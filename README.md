@@ -4,7 +4,6 @@ It uses ADS-B and MLAT data to determine the positions and velocities of aircraf
 Key Features
 Tracks aircraft in real-time using ADS-B and MLAT data.
 Predicts aircraft transits across the Sun and Moon.
-Logs transit events for further analysis.
 Provides visual and audible alerts for close approaches and transits.
 Prerequisites
 Before running the script, ensure you have the following Python modules installed:
@@ -15,6 +14,7 @@ pytz
 socket
 tkinter (if using a GUI)
 To install these modules, you can use pip: pip install ephem requests pytz
+Socket and tkinter should be preinstalled with python.
 
 Configuration
 Before running the script, you need to configure a few settings at the beginning of the script. These include your location, elevation, and the METAR URL for weather data.
