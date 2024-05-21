@@ -18,6 +18,7 @@ Socket and tkinter should be preinstalled with python.
 
 Configuration
 Before running the script, you need to configure a few settings at the beginning of the script. These include your location, elevation, and the METAR URL for weather data.
+You also need to change 127.0.0.1 in sock.connect(('127.0.0.1', port)) to your machine IP address if You are not working on the localhost (line 516 in v5 sript), for example sock.connect(('192.168.1.197', port)).
 
 Location and Elevation:
 # Set geographic location and elevation
@@ -43,11 +44,13 @@ xtd_tst = 20  # Cross-track distance threshold
 Running the Script
 To run the script, execute it with Python:
 
-python transit_warning_v4.py (or python3 transit_warning_v4.py)
+python transit_warning_v5.py (or python3 transit_warning_v5.py)
 
 Notes
 Ensure that your system has access to the ADS-B and MLAT data streams. The script is designed to connect to local ports (30003 for ADS-B and 30106 for MLAT).
 The script clears the terminal screen periodically to display updated tracking information. If running on a system without a terminal, you might need to adjust or remove the clear_screen function calls.
 By following these instructions and configurations, you should be able to track aircraft and predict potential transits effectively.
+
+This script is also running on Anroid (tested with Pydroid3) - but to make this happen you need to comment the line with clear_screen() function (line 396 in v5 script).
 
 Grzegorz Tuszynski
