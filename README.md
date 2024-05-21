@@ -1,26 +1,24 @@
-Transit Warning is a flight tracker script designed to track aircraft and calculate potential transits across the Sun and Moon from a specified location.
+Transit Warning is a flight tracker script designed to track aircraft and calculate potential transits across the Sun and Moon from a specified location.</br>
 It uses ADS-B and MLAT data to determine the positions and velocities of aircraft and predicts their paths to identify possible transit events.
 
-Key Features
-Tracks aircraft in real-time using ADS-B and MLAT data.
-Predicts aircraft transits across the Sun and Moon.
-Provides visual and audible alerts for close approaches and transits.
-Prerequisites
-Before running the script, ensure you have the following Python modules installed:
+Key Features</br>
+Tracks aircraft in real-time using ADS-B and MLAT data.</br>
+Predicts aircraft transits across the Sun and Moon.</br>
+Provides visual and audible alerts for close approaches and transits.</br></br>
+# Prerequisites:</br>
+Before running the script, ensure you have the following Python modules installed:</br>
+ephem</br>
+requests</br>
+pytz</br>
+socket</br>
+tkinter (if using a GUI)</br>
+To install these modules, you can use pip: pip install ephem requests pytz</br>
+Socket should be preinstalled with python.
 
-ephem
-requests
-pytz
-socket
-tkinter (if using a GUI)
-To install these modules, you can use pip: pip install ephem requests pytz
-Socket and tkinter should be preinstalled with python.
+Configuration</br>
+Before running the script, you need to configure a few settings at the beginning of the script. These include your location, elevation, and the METAR URL for weather data.</br>
+You also need to change 127.0.0.1 in sock.connect(('127.0.0.1', port)) to your machine IP address if You are not working on the localhost (line 516 in v5 sript), for example sock.connect(('192.168.1.197', port)).</br>
 
-Configuration
-Before running the script, you need to configure a few settings at the beginning of the script. These include your location, elevation, and the METAR URL for weather data.
-You also need to change 127.0.0.1 in sock.connect(('127.0.0.1', port)) to your machine IP address if You are not working on the localhost (line 516 in v5 sript), for example sock.connect(('192.168.1.197', port)).
-
-Location and Elevation:
 # Set geographic location and elevation
 my_lat = 51.1111  # Latitude
 
@@ -41,16 +39,16 @@ alert_distance = 15  # Alert radius in km
 xtd_tst = 20  # Cross-track distance threshold
 
 
-Running the Script
+# Running the Script
 To run the script, execute it with Python:
 
 python transit_warning_v5.py (or python3 transit_warning_v5.py)
 
 Notes
-Ensure that your system has access to the ADS-B and MLAT data streams. The script is designed to connect to local ports (30003 for ADS-B and 30106 for MLAT).
-The script clears the terminal screen periodically to display updated tracking information. If running on a system without a terminal, you might need to adjust or remove the clear_screen function calls.
-By following these instructions and configurations, you should be able to track aircraft and predict potential transits effectively.
+Ensure that your system has access to the ADS-B and MLAT data streams. The script is designed to connect to local ports (30003 for ADS-B and 30106 for MLAT).</br>
+The script clears the terminal screen periodically to display updated tracking information. If running on a system without a terminal, you might need to adjust or remove the clear_screen function calls.</br>
+By following these instructions and configurations, you should be able to track aircraft and predict potential transits effectively.</br>
 
-This script is also running on Anroid (tested with Pydroid3) - but to make this happen you need to comment the line with clear_screen() function (line 396 in v5 script).
+This script is also running on Anroid (tested with Pydroid3 on Samsung S23) - but to make this happen you need to comment the line (add "#") with clear_screen() function (line 396 in v5 script).
 
 Grzegorz Tuszynski
