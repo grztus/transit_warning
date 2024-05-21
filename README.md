@@ -39,14 +39,6 @@ alert_distance = 15  # Alert radius in km
 
 xtd_tst = 20  # Cross-track distance threshold
 
-Ephemeris Settings:
-The script uses ephem to calculate the positions of the Sun and Moon. Ensure the observer's location is correctly set:
-# Ephemeris settings
-gatech = ephem.Observer()
-
-gatech.lat, gatech.lon = str(my_lat), str(my_lon)
-
-gatech.elevation = my_elevation_const
 
 Running the Script
 To run the script, execute it with Python:
