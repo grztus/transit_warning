@@ -22,8 +22,11 @@ Before running the script, you need to configure a few settings at the beginning
 Location and Elevation:
 # Set geographic location and elevation
 my_lat = 51.1111  # Latitude
+
 my_lon = 21.1111  # Longitude
+
 my_elevation_const = 114  # Your antenna elevation = site elevation + 3 metres (for example) - this elevation is taken into calculations
+
 near_airport_elevation = 111  # Nearest airport elevation
 
 # METAR URL for weather data
