@@ -529,6 +529,7 @@ def tabela():
 
         print(" ")
         print("{} (UTC) --- delay < {:.1f}s --- QNH {}hPa".format(clock.now_utc().time(), diff_t, pressure))
+        print("LAT:", my_lat, "LON:", my_lon)
         # Print port statuses
         for port, status in port_status.items():
             status_str = "Listening" if status else "Not listening"
