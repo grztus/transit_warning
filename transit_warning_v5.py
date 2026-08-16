@@ -72,6 +72,7 @@ import socket
 import threading
 from math import atan2, sin, cos, acos, radians, degrees, atan, asin, sqrt, isnan
 import pytz  # Import pytz for timezone handling
+from transit_clock import clock_from_args
 
 # Ustawienia GUI / GUI settings
 try:
@@ -90,23 +91,7 @@ except NameError:
 from collections import deque
 
 
-class Clock(object):
-    def now_utc(self):
-        raise NotImplementedError
-
-    def ephem_now(self):
-        raise NotImplementedError
-
-
-class RealClock(Clock):
-    def now_utc(self):
-        return datetime.datetime.now(pytz.utc)
-
-    def ephem_now(self):
-        return ephem.now()
-
-
-clock = RealClock()
+clock = clock_from_args(sys.argv[1:])
 
 # Global settings / Globalne ustawienia
 MAX_AGE_SECONDS = 60  # Maksymalny czas życia wpisu po ostatnim odbiorze sygnału (w sekundach) / Maximum entry lifetime after the last received signal (in seconds)
@@ -114,7 +99,7 @@ MAX_AGE_SECONDS = 60  # Maksymalny czas życia wpisu po ostatnim odbiorze sygna�
 # Deklaracja globalnych zmiennych / Declaration of global variables
 global metar_t
 global pressure
-metar_t = clock.now_utc() - datetime.timedelta(seconds=900)  # Ustawienie początkowego czasu / Initial setting of time
+metar_t = clock.now_utc() - datetime.timedelta(seconds=900) if clock.is_ready() else None  # Ustawienie początkowego czasu / Initial setting of time
 pressure = 1013  # Domyślne ciśnienie / Default pressure
 metar_url = 'https://awiacja.imgw.pl/metar00.php?airport=EPRA'  # Adres URL z danymi METAR / URL for METAR data
 
@@ -142,9 +127,9 @@ plane_deque = deque()
 metric_units = True
 
 # Inicjalizacja czasu z uwzględnieniem strefy czasowej / Initialize time with timezone
-aktual_t = clock.now_utc()
-last_t = clock.now_utc() - datetime.timedelta(seconds=10)
-gong_t = clock.now_utc()
+aktual_t = clock.now_utc() if clock.is_ready() else None
+last_t = clock.now_utc() - datetime.timedelta(seconds=10) if clock.is_ready() else None
+gong_t = clock.now_utc() if clock.is_ready() else None
 
 # Ustawienie pożądanych limitów odległości i czasu / Set desired distance and time limits
 warning_distance = 200  # Odległość ostrzegawcza / Warning distance
@@ -170,7 +155,7 @@ gatech.elevation = my_elevation_const
 
 # Obliczanie strefy czasowej dla daty/godziny ISO / Calculate time zone for ISO date/timestamp
 timezone_hours = time.altzone / 60 / 60
-last_update_time = clock.now_utc()  # Inicjalizacja zmiennej na początku skryptu / Initialize variable at the beginning of the script
+last_update_time = clock.now_utc() if clock.is_ready() else None  # Inicjalizacja zmiennej na początku skryptu / Initialize variable at the beginning of the script
 
 port_status = {30003: False, 30106: False}  # Inicjalizacja statusów portów / Initialize port statuses
 
@@ -777,7 +762,8 @@ threading.Thread(target=read_from_port, args=(30106, process_line)).start()
 # Pętla główna / Main loop
 while True:
     time.sleep(1)
-    sun_alt, sun_az, moon_alt, moon_az = tabela()
-    clean_dict()
-    clean_transit_dict()
+    if clock.is_ready():
+        sun_alt, sun_az, moon_alt, moon_az = tabela()
+        clean_dict()
+        clean_transit_dict()
 
