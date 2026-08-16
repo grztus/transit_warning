@@ -266,6 +266,8 @@ def transit_pred(obs2moon, plane_pos, track, velocity, elevation, moon_alt, moon
     azimuth1 = round(((degrees(azimuth1) + 360) % 360), 1)
     dst_p2x = round(haversine((plane_pos[0], plane_pos[1]), (lat3, lon3)), 1)
     velocity = int(velocity)
+    if velocity <= 0:
+        return 0
     delta_time = (dst_p2x / velocity) * 3600
     moon_alt_B = 90.00 - moon_alt
     ideal_dist = (sin(radians(moon_alt_B)) * elevation) / sin(radians(moon_alt)) / 1000
