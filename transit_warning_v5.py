@@ -70,6 +70,7 @@ import re
 import requests
 import socket
 import threading
+from functools import wraps
 from math import atan2, sin, cos, acos, radians, degrees, atan, asin, sqrt, isnan
 import pytz  # Import pytz for timezone handling
 from transit_clock import ReplayClock, clock_from_args
@@ -124,7 +125,16 @@ earth_R = 6371  # Promień Ziemi w km / Radius of the earth in km
 
 # Inicjalizacja pustych słowników i kolejek / Initialize empty dictionaries and deques
 plane_dict = {}
+plane_dict_lock = threading.RLock()
 plane_deque = deque()
+
+
+def synchronized_plane_dict(function):
+    @wraps(function)
+    def locked(*args, **kwargs):
+        with plane_dict_lock:
+            return function(*args, **kwargs)
+    return locked
 
 # Ustawienie jednostek metrycznych / Set desired units
 metric_units = True
@@ -186,6 +196,7 @@ def clear_screen():
         subprocess.call('clear', shell=True)
 
 # Funkcja do czyszczenia słownika samolotów / Function to clean the plane dictionary
+@synchronized_plane_dict
 def clean_dict():
     current_time = clock.now_utc()
     to_delete = [icao for icao, entry in plane_dict.items() if (current_time - entry[0]).total_seconds() > MAX_AGE_SECONDS]
@@ -406,6 +417,7 @@ def get_metar_press():
         return pressure  # Zwraca ostatnio znaną wartość ciśnienia, jeśli nie jest czas na aktualizację / Returns the last known pressure value if it's not time for an update
 
 # Funkcja do generowania tabeli wyjściowej / Function to generate output table
+@synchronized_plane_dict
 def tabela():
     global last_t
     gatech.date = clock.ephem_now()  # Aktualizuj datę w ephemeris / Update date in ephemeris
@@ -526,6 +538,7 @@ def tabela():
 
 
 # Funkcja do czyszczenia słownika tranzytów / Function to clean the transit dictionary
+@synchronized_plane_dict
 def clean_transit_dict():
     current_time = clock.now_utc()
     to_delete = [icao for icao, entry in plane_dict.items() if len(entry) > 31 and entry[31] and isinstance(entry[30], datetime.datetime) and (current_time - entry[30]).total_seconds() > 120]
@@ -553,6 +566,7 @@ def read_from_port(port, process_line):
 
 
 # Funkcja do przetwarzania linii danych / Function to process a line of data
+@synchronized_plane_dict
 def process_line(line, port):
     global last_update_time, moon_alt, moon_az, sun_alt, sun_az, gatech
 
