@@ -72,7 +72,7 @@ import socket
 import threading
 from math import atan2, sin, cos, acos, radians, degrees, atan, asin, sqrt, isnan
 import pytz  # Import pytz for timezone handling
-from transit_clock import clock_from_args
+from transit_clock import ReplayClock, clock_from_args
 
 # Ustawienia GUI / GUI settings
 try:
@@ -91,7 +91,9 @@ except NameError:
 from collections import deque
 
 
-clock = clock_from_args(sys.argv[1:])
+clock = clock_from_args(sys.argv[1:] if __name__ == "__main__" else [])
+replay_time_lock = threading.Lock()
+replay_time_initialized = not isinstance(clock, ReplayClock)
 
 # Global settings / Globalne ustawienia
 MAX_AGE_SECONDS = 60  # Maksymalny czas życia wpisu po ostatnim odbiorze sygnału (w sekundach) / Maximum entry lifetime after the last received signal (in seconds)
@@ -158,6 +160,22 @@ timezone_hours = time.altzone / 60 / 60
 last_update_time = clock.now_utc() if clock.is_ready() else None  # Inicjalizacja zmiennej na początku skryptu / Initialize variable at the beginning of the script
 
 port_status = {30003: False, 30106: False}  # Inicjalizacja statusów portów / Initialize port statuses
+
+
+def advance_replay_time(timestamp_utc):
+    global replay_time_initialized, metar_t, aktual_t, last_t, gong_t, last_update_time
+    if not isinstance(clock, ReplayClock):
+        return
+    with replay_time_lock:
+        clock.advance_to(timestamp_utc)
+        if not replay_time_initialized:
+            current_time = clock.now_utc()
+            metar_t = current_time - datetime.timedelta(seconds=900)
+            aktual_t = current_time
+            last_t = current_time - datetime.timedelta(seconds=10)
+            gong_t = current_time
+            last_update_time = current_time
+            replay_time_initialized = True
 
 # Funkcja do czyszczenia ekranu / Function to clear the screen
 def clear_screen():
@@ -546,6 +564,8 @@ def process_line(line, port):
     icao = re.sub(r'\W+', '', parts[4].strip())  # Usunięcie znaków specjalnych z kodu icao / Remove special characters from icao code
     date = parts[6].strip()
     time = parts[7].strip()
+    logged_date = parts[8].strip()
+    logged_time = parts[9].strip()
 
     # Konwersja daty i czasu na UTC / Convert date and time to UTC
     try:
@@ -554,12 +574,25 @@ def process_line(line, port):
         print("Error parsing date and time: {} {}".format(date, time))
         return
 
+    try:
+        logged_date_time = datetime.datetime.strptime(logged_date + " " + logged_time, '%Y/%m/%d %H:%M:%S.%f').replace(tzinfo=pytz.utc)
+    except ValueError:
+        if isinstance(clock, ReplayClock):
+            print("Error parsing logged date and time: {} {}".format(logged_date, logged_time))
+            return
+        logged_date_time = None
+
     if port == 30003:
         # Dane ADS-B / ADS-B data
         date_time_utc = date_time + datetime.timedelta(hours=timezone_hours)
+        logged_date_time_utc = logged_date_time + datetime.timedelta(hours=timezone_hours) if logged_date_time else None
     else:
         # Dane MLAT, już w UTC / MLAT data, already in UTC
         date_time_utc = date_time
+        logged_date_time_utc = logged_date_time
+
+    if logged_date_time_utc is not None:
+        advance_replay_time(logged_date_time_utc)
 
     if mtype == "1":
         flight = parts[10].strip()
@@ -755,15 +788,20 @@ def process_line(line, port):
     clean_transit_dict()
 
 
-# Uruchomienie wątków do czytania z portów / Start threads to read from ports
-threading.Thread(target=read_from_port, args=(30003, process_line)).start()
-threading.Thread(target=read_from_port, args=(30106, process_line)).start()
+def main():
+    # Uruchomienie wątków do czytania z portów / Start threads to read from ports
+    threading.Thread(target=read_from_port, args=(30003, process_line)).start()
+    threading.Thread(target=read_from_port, args=(30106, process_line)).start()
 
-# Pętla główna / Main loop
-while True:
-    time.sleep(1)
-    if clock.is_ready():
-        sun_alt, sun_az, moon_alt, moon_az = tabela()
-        clean_dict()
-        clean_transit_dict()
+    # Pętla główna / Main loop
+    while True:
+        time.sleep(1)
+        if replay_time_initialized:
+            sun_alt, sun_az, moon_alt, moon_az = tabela()
+            clean_dict()
+            clean_transit_dict()
+
+
+if __name__ == "__main__":
+    main()
 
