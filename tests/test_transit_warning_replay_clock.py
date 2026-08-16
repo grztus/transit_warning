@@ -28,6 +28,7 @@ class ProcessLineReplayClockTests(unittest.TestCase):
         self.original_clock = transit.clock
         self.original_timezone_hours = transit.timezone_hours
         self.original_tabela = transit.tabela
+        self.original_transit_pred = transit.transit_pred
         transit.clock = ReplayClock()
         transit.replay_time_initialized = False
         transit.metar_t = None
@@ -43,6 +44,7 @@ class ProcessLineReplayClockTests(unittest.TestCase):
         transit.clock = self.original_clock
         transit.timezone_hours = self.original_timezone_hours
         transit.tabela = self.original_tabela
+        transit.transit_pred = self.original_transit_pred
 
     def process(self, generated, logged, port=30106, icao="ABC123"):
         transit.process_line(message(generated, logged, icao), port)
@@ -92,6 +94,44 @@ class ProcessLineReplayClockTests(unittest.TestCase):
         age = (transit.clock.now_utc() - transit.plane_dict["ABC123"][0]).total_seconds()
         self.assertEqual(age, 0.05)
         self.assertIn("ABC123", transit.plane_dict)
+
+    def test_first_complete_mlat_message_initializes_ephemerides_before_prediction(self):
+        historical_time = utc("2024/05/18 12:13:09.187")
+        table_times = []
+        prediction_states = []
+
+        def historical_table():
+            table_times.append(transit.clock.now_utc())
+            return 1.0, 2.0, 3.0, 4.0
+
+        def record_prediction(*args):
+            prediction_states.append((
+                transit.sun_alt,
+                transit.sun_az,
+                transit.moon_alt,
+                transit.moon_az,
+                transit.clock.now_utc(),
+                args[-2],
+                args[-1],
+            ))
+            return 0
+
+        transit.tabela = historical_table
+        transit.transit_pred = record_prediction
+        line = "MLAT,3,1,1,48B5CF,1,2024/05/18,12:13:09.187,2024/05/18,12:13:09.187,,1687,97,295,51.7608,21.0416,200,,,,,,,,"
+
+        transit.process_line(line, 30106)
+
+        self.assertEqual(table_times, [historical_time, historical_time])
+        self.assertEqual(
+            prediction_states,
+            [
+                (1.0, 2.0, 3.0, 4.0, historical_time, 3.0, 4.0),
+                (1.0, 2.0, 3.0, 4.0, historical_time, 1.0, 2.0),
+            ],
+        )
+        self.assertEqual(transit.plane_dict["48B5CF"][0], historical_time)
+        self.assertEqual(transit.plane_dict["48B5CF"][2:4], [51.7608, 21.0416])
 
 
 class RealClockIntegrationTests(unittest.TestCase):

@@ -164,6 +164,7 @@ port_status = {30003: False, 30106: False}  # Inicjalizacja statusów portów / 
 
 def advance_replay_time(timestamp_utc):
     global replay_time_initialized, metar_t, aktual_t, last_t, gong_t, last_update_time
+    global sun_alt, sun_az, moon_alt, moon_az
     if not isinstance(clock, ReplayClock):
         return
     with replay_time_lock:
@@ -175,6 +176,7 @@ def advance_replay_time(timestamp_utc):
             last_t = current_time - datetime.timedelta(seconds=10)
             gong_t = current_time
             last_update_time = current_time
+            sun_alt, sun_az, moon_alt, moon_az = tabela()
             replay_time_initialized = True
 
 # Funkcja do czyszczenia ekranu / Function to clear the screen
