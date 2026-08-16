@@ -73,6 +73,7 @@ import threading
 from math import atan2, sin, cos, acos, radians, degrees, atan, asin, sqrt, isnan
 import pytz  # Import pytz for timezone handling
 from transit_clock import ReplayClock, clock_from_args
+from transit_time import port_timestamp_to_utc
 
 # Ustawienia GUI / GUI settings
 try:
@@ -155,8 +156,6 @@ gatech = ephem.Observer()
 gatech.lat, gatech.lon = str(my_lat), str(my_lon)
 gatech.elevation = my_elevation_const
 
-# Obliczanie strefy czasowej dla daty/godziny ISO / Calculate time zone for ISO date/timestamp
-timezone_hours = time.altzone / 60 / 60
 last_update_time = clock.now_utc() if clock.is_ready() else None  # Inicjalizacja zmiennej na początku skryptu / Initialize variable at the beginning of the script
 
 port_status = {30003: False, 30106: False}  # Inicjalizacja statusów portów / Initialize port statuses
@@ -586,14 +585,8 @@ def process_line(line, port):
             return
         logged_date_time = None
 
-    if port == 30003:
-        # Dane ADS-B / ADS-B data
-        date_time_utc = date_time + datetime.timedelta(hours=timezone_hours)
-        logged_date_time_utc = logged_date_time + datetime.timedelta(hours=timezone_hours) if logged_date_time else None
-    else:
-        # Dane MLAT, już w UTC / MLAT data, already in UTC
-        date_time_utc = date_time
-        logged_date_time_utc = logged_date_time
+    date_time_utc = port_timestamp_to_utc(date_time, port)
+    logged_date_time_utc = port_timestamp_to_utc(logged_date_time, port) if logged_date_time else None
 
     if logged_date_time_utc is not None:
         advance_replay_time(logged_date_time_utc)

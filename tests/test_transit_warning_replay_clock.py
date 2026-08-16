@@ -26,7 +26,6 @@ def utc(value):
 class ProcessLineReplayClockTests(unittest.TestCase):
     def setUp(self):
         self.original_clock = transit.clock
-        self.original_timezone_hours = transit.timezone_hours
         self.original_tabela = transit.tabela
         self.original_transit_pred = transit.transit_pred
         transit.clock = ReplayClock()
@@ -37,12 +36,10 @@ class ProcessLineReplayClockTests(unittest.TestCase):
         transit.gong_t = None
         transit.last_update_time = None
         transit.plane_dict = {}
-        transit.timezone_hours = 2
         transit.tabela = lambda: (0, 0, 0, 0)
 
     def tearDown(self):
         transit.clock = self.original_clock
-        transit.timezone_hours = self.original_timezone_hours
         transit.tabela = self.original_tabela
         transit.transit_pred = self.original_transit_pred
 
@@ -80,7 +77,7 @@ class ProcessLineReplayClockTests(unittest.TestCase):
 
     def test_port_30003_applies_existing_offset_to_both_timestamps(self):
         self.process("2024/05/18 12:00:00.000", "2024/05/18 12:00:01.000", port=30003)
-        offset = datetime.timedelta(hours=2)
+        offset = datetime.timedelta(hours=transit.time.altzone / 60 / 60)
         self.assertEqual(transit.plane_dict["ABC123"][0], utc("2024/05/18 12:00:00.000") + offset)
         self.assertEqual(transit.clock.now_utc(), utc("2024/05/18 12:00:01.000") + offset)
 
