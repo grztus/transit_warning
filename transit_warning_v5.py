@@ -89,13 +89,32 @@ except NameError:
 
 from collections import deque
 
+
+class Clock(object):
+    def now_utc(self):
+        raise NotImplementedError
+
+    def ephem_now(self):
+        raise NotImplementedError
+
+
+class RealClock(Clock):
+    def now_utc(self):
+        return datetime.datetime.now(pytz.utc)
+
+    def ephem_now(self):
+        return ephem.now()
+
+
+clock = RealClock()
+
 # Global settings / Globalne ustawienia
 MAX_AGE_SECONDS = 60  # Maksymalny czas życia wpisu po ostatnim odbiorze sygnału (w sekundach) / Maximum entry lifetime after the last received signal (in seconds)
 
 # Deklaracja globalnych zmiennych / Declaration of global variables
 global metar_t
 global pressure
-metar_t = datetime.datetime.now(pytz.utc) - datetime.timedelta(seconds=900)  # Ustawienie początkowego czasu / Initial setting of time
+metar_t = clock.now_utc() - datetime.timedelta(seconds=900)  # Ustawienie początkowego czasu / Initial setting of time
 pressure = 1013  # Domyślne ciśnienie / Default pressure
 metar_url = 'https://awiacja.imgw.pl/metar00.php?airport=EPRA'  # Adres URL z danymi METAR / URL for METAR data
 
@@ -123,9 +142,9 @@ plane_deque = deque()
 metric_units = True
 
 # Inicjalizacja czasu z uwzględnieniem strefy czasowej / Initialize time with timezone
-aktual_t = datetime.datetime.now(pytz.utc)
-last_t = datetime.datetime.now(pytz.utc) - datetime.timedelta(seconds=10)
-gong_t = datetime.datetime.now(pytz.utc)
+aktual_t = clock.now_utc()
+last_t = clock.now_utc() - datetime.timedelta(seconds=10)
+gong_t = clock.now_utc()
 
 # Ustawienie pożądanych limitów odległości i czasu / Set desired distance and time limits
 warning_distance = 200  # Odległość ostrzegawcza / Warning distance
@@ -151,7 +170,7 @@ gatech.elevation = my_elevation_const
 
 # Obliczanie strefy czasowej dla daty/godziny ISO / Calculate time zone for ISO date/timestamp
 timezone_hours = time.altzone / 60 / 60
-last_update_time = datetime.datetime.now(pytz.utc)  # Inicjalizacja zmiennej na początku skryptu / Initialize variable at the beginning of the script
+last_update_time = clock.now_utc()  # Inicjalizacja zmiennej na początku skryptu / Initialize variable at the beginning of the script
 
 port_status = {30003: False, 30106: False}  # Inicjalizacja statusów portów / Initialize port statuses
 
@@ -164,7 +183,7 @@ def clear_screen():
 
 # Funkcja do czyszczenia słownika samolotów / Function to clean the plane dictionary
 def clean_dict():
-    current_time = datetime.datetime.now(pytz.utc)
+    current_time = clock.now_utc()
     to_delete = [icao for icao, entry in plane_dict.items() if (current_time - entry[0]).total_seconds() > MAX_AGE_SECONDS]
     for icao in to_delete:
         del plane_dict[icao]
@@ -191,7 +210,7 @@ def crosstrack(distance, azimuth, track):
 def log_transits(icao, flight, transit_info, celestial_body):
     filename = "transits_log.txt"
     with open(filename, "a") as file:
-        date_time = datetime.datetime.now(pytz.utc).strftime("%Y-%m-%d %H:%M:%S")
+        date_time = clock.now_utc().strftime("%Y-%m-%d %H:%M:%S")
         line = "{},{},{},{},{},{},{},{},{}\n".format(
             date_time, icao, flight, transit_info['min_distance'],
             transit_info['plane_az'], transit_info['plane_alt'],
@@ -251,7 +270,7 @@ def transit_pred(obs2moon, plane_pos, track, velocity, elevation, moon_alt, moon
     ideal_lon = radians(my_lon) + atan2(sin(radians(moon_az)) * sin(ideal_dist / earth_R) * cos(radians(my_lat)), cos(ideal_dist / earth_R) - sin(radians(my_lat)) * sin(ideal_lat))
     ideal_lat, ideal_lon = degrees(ideal_lat), degrees(ideal_lon)
     ideal_lon = (ideal_lon + 540) % 360 - 180
-    return lat3, lon3, azimuth1, altitude1, dst_h2x, dst_p2x, delta_time, 0, moon_az, moon_alt, datetime.datetime.now(pytz.utc)
+    return lat3, lon3, azimuth1, altitude1, dst_h2x, dst_p2x, delta_time, 0, moon_az, moon_alt, clock.now_utc()
 
 # Funkcje kolorowania odległości, wysokości, azymutu / Functions for coloring distance, altitude, azimuth
 def dist_col(distance):
@@ -330,7 +349,7 @@ def wind_deg_to_str1(deg):
 # Funkcja do generowania dźwięku ostrzegawczego / Function to generate a warning sound
 def gong():
     global gong_t
-    aktual_gong_t = datetime.datetime.now(pytz.utc)
+    aktual_gong_t = clock.now_utc()
     diff_gong_t = (aktual_gong_t - gong_t).total_seconds()
     if diff_gong_t > 2:
         gong_t = aktual_gong_t
@@ -355,7 +374,7 @@ def is_int_try(value):
 def get_metar_press():
     global metar_t
     global pressure
-    aktual_metar_t = datetime.datetime.now(pytz.utc)
+    aktual_metar_t = clock.now_utc()
     diff_metar_t = (aktual_metar_t - metar_t).total_seconds()
     if diff_metar_t > 900:
         metar_t = aktual_metar_t
@@ -383,13 +402,13 @@ def get_metar_press():
 # Funkcja do generowania tabeli wyjściowej / Function to generate output table
 def tabela():
     global last_t
-    gatech.date = ephem.now()  # Aktualizuj datę w ephemeris / Update date in ephemeris
+    gatech.date = clock.ephem_now()  # Aktualizuj datę w ephemeris / Update date in ephemeris
     vm, vs = ephem.Moon(gatech), ephem.Sun(gatech)  # Pobierz dane o Księżycu i Słońcu / Get data about the Moon and the Sun
     vm.compute(gatech)  # Oblicz pozycję Księżyca / Compute Moon position
     vs.compute(gatech)  # Oblicz pozycję Słońca / Compute Sun position
     moon_alt, moon_az = round(math.degrees(vm.alt), 1), round(math.degrees(vm.az), 1)  # Wysokość i azymut Księżyca / Moon altitude and azimuth
     sun_alt, sun_az = round(math.degrees(vs.alt), 1), round(math.degrees(vs.az), 1)  # Wysokość i azymut Słońca / Sun altitude and azimuth
-    aktual_t = datetime.datetime.now(pytz.utc)  # Aktualny czas w UTC / Current time in UTC
+    aktual_t = clock.now_utc()  # Aktualny czas w UTC / Current time in UTC
     diff_t = (aktual_t - last_t).total_seconds()  # Różnica czasu od ostatniego odświeżenia / Time difference from last refresh
     if diff_t > 1:
         last_t = aktual_t  # Ustaw ostatni czas odświeżenia / Set last refresh time
@@ -408,9 +427,9 @@ def tabela():
                 continue
 
             if distance <= warning_distance:
-                then = plane_dict[pentry][17] if plane_dict[pentry][17] else datetime.datetime.now(pytz.utc)
-                diff_seconds = (datetime.datetime.now(pytz.utc) - then).total_seconds()
-                diff_minutes = (datetime.datetime.now(pytz.utc) - plane_dict[pentry][0]).total_seconds() / 60
+                then = plane_dict[pentry][17] if plane_dict[pentry][17] else clock.now_utc()
+                diff_seconds = (clock.now_utc() - then).total_seconds()
+                diff_minutes = (clock.now_utc() - plane_dict[pentry][0]).total_seconds() / 60
 
                 if plane_dict[pentry][1]:
                     wiersz = '{}{:<9}{}'.format(YELLOW, plane_dict[pentry][1], RESET)
@@ -459,7 +478,7 @@ def tabela():
                 wiersz += '{:>6.1f} '.format(plane_dict[pentry][6])
                 wiersz += '{:>6} | '.format(wind_deg_to_str1(plane_dict[pentry][6]))
 
-                diff_secx = (datetime.datetime.now(pytz.utc) - plane_dict[pentry][0]).total_seconds()
+                diff_secx = (clock.now_utc() - plane_dict[pentry][0]).total_seconds()
                 separation_deg = float(plane_dict[pentry][24] - plane_dict[pentry][23]) if is_float_try(plane_dict[pentry][24]) and is_float_try(plane_dict[pentry][23]) else 90.0
 
                 if -transit_separation_GREENALERT_FG < separation_deg < transit_separation_GREENALERT_FG:
@@ -491,7 +510,7 @@ def tabela():
                 print(wiersz)
 
         print(" ")
-        print("{} (UTC) --- delay < {:.1f}s --- QNH {}hPa".format(datetime.datetime.now(pytz.utc).time(), diff_t, pressure))
+        print("{} (UTC) --- delay < {:.1f}s --- QNH {}hPa".format(clock.now_utc().time(), diff_t, pressure))
         # Print port statuses
         for port, status in port_status.items():
             status_str = "Listening" if status else "Not listening"
@@ -502,7 +521,7 @@ def tabela():
 
 # Funkcja do czyszczenia słownika tranzytów / Function to clean the transit dictionary
 def clean_transit_dict():
-    current_time = datetime.datetime.now(pytz.utc)
+    current_time = clock.now_utc()
     to_delete = [icao for icao, entry in plane_dict.items() if len(entry) > 31 and entry[31] and isinstance(entry[30], datetime.datetime) and (current_time - entry[30]).total_seconds() > 120]
     for icao in to_delete:
         del plane_dict[icao]
@@ -564,7 +583,7 @@ def process_line(line, port):
         else:
             plane_dict[icao][0] = date_time_utc
             plane_dict[icao][1] = flight
-            last_update_time = datetime.datetime.now(pytz.utc)
+            last_update_time = clock.now_utc()
 
     if mtype == "5":
         flight = parts[10].strip()
@@ -586,7 +605,7 @@ def process_line(line, port):
         else:
             plane_dict[icao][4] = elevation
             plane_dict[icao][0] = date_time_utc
-            last_update_time = datetime.datetime.now(pytz.utc)
+            last_update_time = clock.now_utc()
             if flight != '':
                 plane_dict[icao][1] = flight
 
@@ -604,7 +623,7 @@ def process_line(line, port):
             if track:  # Aktualizuj track tylko, jeśli nie jest pusty / Update track only if not empty
                 plane_dict[icao][11] = track
             plane_dict[icao][14] = velocity
-            last_update_time = datetime.datetime.now(pytz.utc)
+            last_update_time = clock.now_utc()
 
     if mtype == "3":
         elevation = parts[11].strip()
@@ -643,7 +662,7 @@ def process_line(line, port):
                 plane_dict[icao][16] = []
                 plane_dict[icao][15].append(azimuth)
                 plane_dict[icao][16].append(altitude)
-                last_update_time = datetime.datetime.now(pytz.utc)
+                last_update_time = clock.now_utc()
             else:
                 min_distance = plane_dict[icao][10]
                 try:
@@ -666,11 +685,11 @@ def process_line(line, port):
                 plane_dict[icao][7] = altitude
                 if track:  # Aktualizuj track tylko, jeśli nie jest pusty / Update track only if not empty
                     plane_dict[icao][11] = track
-                last_update_time = datetime.datetime.now(pytz.utc)
+                last_update_time = clock.now_utc()
                 if not plane_dict[icao][17]:
                     plane_dict[icao][17] = date_time_utc
                 then = plane_dict[icao][17]
-                now = datetime.datetime.now(pytz.utc)
+                now = clock.now_utc()
                 diff_seconds = (now - then).total_seconds()
                 if diff_seconds > 6:
                     plane_dict[icao][17] = date_time_utc
@@ -726,8 +745,8 @@ def process_line(line, port):
                     gong()
                 if delta_time <= 2:  # Ustaw flagę tranzytu jeśli czas do tranzytu jest mniejszy lub równy 2 sekundy / Set transit flag if time to transit is less than or equal to 2 second
                     plane_dict[icao][31] = True
-                    plane_dict[icao][30] = datetime.datetime.now(pytz.utc)  # Ustaw czas rozpoczęcia tranzytu / Set transit start time
-                plane_dict[icao][29] = datetime.datetime.now(pytz.utc)
+                    plane_dict[icao][30] = clock.now_utc()  # Ustaw czas rozpoczęcia tranzytu / Set transit start time
+                plane_dict[icao][29] = clock.now_utc()
         if tst_int2:
             alt_a = round(tst_int2[3], 2)
             dst_h2x = round(tst_int2[4], 2)
@@ -744,8 +763,8 @@ def process_line(line, port):
                     gong()
                 if delta_time <= 2:  # Ustaw flagę tranzytu jeśli czas do tranzytu jest mniejszy lub równy 2 sekundy / Set transit flag if time to transit is less than or equal to 2 second
                     plane_dict[icao][31] = True
-                    plane_dict[icao][30] = datetime.datetime.now(pytz.utc)  # Ustaw czas rozpoczęcia tranzytu / Set transit start time
-                plane_dict[icao][30] = datetime.datetime.now(pytz.utc)
+                    plane_dict[icao][30] = clock.now_utc()  # Ustaw czas rozpoczęcia tranzytu / Set transit start time
+                plane_dict[icao][30] = clock.now_utc()
     sun_alt, sun_az, moon_alt, moon_az = tabela()
     clean_dict()
     clean_transit_dict()
