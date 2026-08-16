@@ -1,0 +1,18 @@
+# Prywatna konfiguracja lokalna
+.env
+
+# Logi i nagrania ADS-B / MLAT
+*.log
+tests/data/*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# VS Code - lokalne ustawienia projektu
+.vscode/
+
+# Pliki tymczasowe
+*.tmp
