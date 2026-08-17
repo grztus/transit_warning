@@ -1,10 +1,12 @@
 import datetime
 import unittest
+from unittest.mock import patch
 
 import pytz
 
 import transit_warning as transit
 from config import InstallationConfig
+from environment import EnvironmentEvent, EnvironmentReplay
 from transit_clock import RealClock, ReplayClock, clock_from_args
 
 
@@ -42,6 +44,8 @@ class ProcessLineReplayClockTests(unittest.TestCase):
         self.original_clock = transit.clock
         self.original_tabela = transit.tabela
         self.original_transit_pred = transit.transit_pred
+        self.original_environment_replay = transit.environment_replay
+        self.original_pressure = transit.pressure
         transit.clock = ReplayClock()
         transit.replay_time_initialized = False
         transit.metar_t = None
@@ -51,15 +55,25 @@ class ProcessLineReplayClockTests(unittest.TestCase):
         transit.gong_t = None
         transit.last_update_time = None
         transit.plane_dict = {}
+        transit.environment_replay = None
+        transit.pressure = 1013
         transit.tabela = lambda: (0, 0, 0, 0)
 
     def tearDown(self):
         transit.clock = self.original_clock
         transit.tabela = self.original_tabela
         transit.transit_pred = self.original_transit_pred
+        transit.environment_replay = self.original_environment_replay
+        transit.pressure = self.original_pressure
 
     def process(self, generated, logged, port=30106, icao="ABC123"):
         transit.process_line(message(generated, logged, icao), port)
+
+    def qnh(self, timestamp, value):
+        return EnvironmentEvent(1, utc(timestamp), "qnh", value, "test")
+
+    def set_environment(self, *events):
+        transit.environment_replay = EnvironmentReplay(events)
 
     def test_generated_stays_on_record_and_logged_initializes_clock_and_globals(self):
         generated = "2024/05/18 12:00:00.000"
@@ -107,6 +121,52 @@ class ProcessLineReplayClockTests(unittest.TestCase):
         age = (transit.clock.now_utc() - transit.plane_dict["ABC123"][0]).total_seconds()
         self.assertEqual(age, 0.05)
         self.assertIn("ABC123", transit.plane_dict)
+
+    def test_single_qnh_event_is_applied(self):
+        self.set_environment(self.qnh("2024/05/18 12:00:00.000", 1008.5))
+        self.process("2024/05/18 12:00:00.000", "2024/05/18 12:00:00.000")
+        self.assertEqual(transit.pressure, 1008.5)
+
+    def test_multiple_qnh_changes_are_applied(self):
+        self.set_environment(
+            self.qnh("2024/05/18 12:00:00.000", 1008.5),
+            self.qnh("2024/05/18 12:00:05.000", 1009.2),
+        )
+        self.process("2024/05/18 12:00:00.000", "2024/05/18 12:00:00.000")
+        self.assertEqual(transit.pressure, 1008.5)
+        self.process("2024/05/18 12:00:05.000", "2024/05/18 12:00:05.000")
+        self.assertEqual(transit.pressure, 1009.2)
+
+    def test_event_between_messages_is_applied_at_next_message(self):
+        self.set_environment(self.qnh("2024/05/18 12:00:03.000", 1007.0))
+        self.process("2024/05/18 12:00:00.000", "2024/05/18 12:00:00.000")
+        self.assertEqual(transit.pressure, 1013)
+        self.process("2024/05/18 12:00:04.000", "2024/05/18 12:00:04.000")
+        self.assertEqual(transit.pressure, 1007.0)
+
+    def test_equal_timestamp_qnh_is_used_before_altitude_correction(self):
+        self.set_environment(self.qnh("2024/05/18 12:00:00.000", 1000.0))
+        line = (
+            "MSG,5,1,1,ABC123,1,2024/05/18,12:00:00.000,"
+            "2024/05/18,12:00:00.000,TEST123,10000"
+        )
+        transit.process_line(line, 30106)
+        expected_metres = (10000 + (1013 - 1000.0) * 26) * 0.3048
+        self.assertEqual(transit.plane_dict["ABC123"][4], expected_metres)
+
+    def test_missing_environment_file_keeps_fallback(self):
+        transit.configure_environment_replay(None)
+        self.process("2024/05/18 12:00:00.000", "2024/05/18 12:00:00.000")
+        self.assertEqual(transit.pressure, 1013)
+
+    @patch.object(transit, "fetch_awc_metar")
+    def test_replay_altitude_processing_does_not_request_awc(self, fetch):
+        line = (
+            "MSG,5,1,1,ABC123,1,2024/05/18,12:00:00.000,"
+            "2024/05/18,12:00:00.000,TEST123,10000"
+        )
+        transit.process_line(line, 30106)
+        fetch.assert_not_called()
 
     def test_first_complete_mlat_message_initializes_ephemerides_before_prediction(self):
         historical_time = utc("2024/05/18 12:13:09.187")

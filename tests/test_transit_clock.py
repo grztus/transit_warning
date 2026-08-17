@@ -5,6 +5,7 @@ import unittest
 import ephem
 import pytz
 
+import transit_warning as transit
 from transit_clock import RealClock, ReplayClock, clock_from_args
 
 
@@ -16,6 +17,16 @@ class ClockSelectionTests(unittest.TestCase):
         clock = clock_from_args(["--clock", "replay"])
         self.assertIsInstance(clock, ReplayClock)
         self.assertFalse(clock.is_ready())
+
+    def test_environment_replay_argument_requires_replay_clock(self):
+        with self.assertRaises(SystemExit):
+            transit.parse_runtime_args(["--environment-replay", "environment.jsonl"])
+
+    def test_environment_replay_argument_is_accepted_with_replay_clock(self):
+        args = transit.parse_runtime_args(
+            ["--clock", "replay", "--environment-replay", "environment.jsonl"]
+        )
+        self.assertEqual(args.environment_replay, "environment.jsonl")
 
 
 class ReplayClockTests(unittest.TestCase):

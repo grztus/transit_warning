@@ -59,6 +59,7 @@ USA.
 
 # Importowanie niezbędnych bibliotek / Importing necessary libraries
 from __future__ import print_function
+import argparse
 import os
 import subprocess
 import sys
@@ -73,6 +74,7 @@ from functools import wraps
 from math import atan2, sin, cos, acos, radians, degrees, atan, asin, sqrt, isnan
 import pytz  # Import pytz for timezone handling
 from config import ConfigurationError, InstallationConfig, load_installation_config
+from environment import EnvironmentFormatError, EnvironmentReplay, iter_environment_events
 from metar import fetch_awc_metar
 from transit_clock import ReplayClock, clock_from_args
 from transit_time import port_timestamp_to_utc
@@ -94,9 +96,21 @@ except NameError:
 from collections import deque
 
 
-clock = clock_from_args(sys.argv[1:] if __name__ == "__main__" else [])
+def parse_runtime_args(arguments):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--clock", choices=("real", "replay"), default="real")
+    parser.add_argument("--environment-replay")
+    args = parser.parse_args(arguments)
+    if args.environment_replay is not None and args.clock != "replay":
+        parser.error("--environment-replay requires --clock replay")
+    return args
+
+
+runtime_args = parse_runtime_args(sys.argv[1:] if __name__ == "__main__" else [])
+clock = clock_from_args(["--clock", runtime_args.clock])
 replay_time_lock = threading.Lock()
 replay_time_initialized = not isinstance(clock, ReplayClock)
+environment_replay = None
 
 # Global settings / Globalne ustawienia
 MAX_AGE_SECONDS = 60  # Maksymalny czas życia wpisu po ostatnim odbiorze sygnału (w sekundach) / Maximum entry lifetime after the last received signal (in seconds)
@@ -192,6 +206,22 @@ def apply_installation_config(configuration: InstallationConfig):
 last_update_time = clock.now_utc() if clock.is_ready() else None  # Inicjalizacja zmiennej na początku skryptu / Initialize variable at the beginning of the script
 
 port_status = {}
+
+
+def configure_environment_replay(path):
+    global environment_replay
+    environment_replay = (
+        EnvironmentReplay(iter_environment_events(path)) if path is not None else None
+    )
+
+
+def apply_replay_environment(timestamp_utc):
+    global pressure
+    if environment_replay is None:
+        return
+    for event in environment_replay.pop_through(timestamp_utc):
+        if event.type == "qnh":
+            pressure = event.value_hpa
 
 
 def advance_replay_time(timestamp_utc):
@@ -625,6 +655,8 @@ def process_line(line, port):
 
     if logged_date_time_utc is not None:
         advance_replay_time(logged_date_time_utc)
+        if isinstance(clock, ReplayClock):
+            apply_replay_environment(clock.now_utc())
 
     if mtype == "1":
         flight = parts[10].strip()
@@ -821,6 +853,10 @@ def process_line(line, port):
 
 
 def main():
+    try:
+        configure_environment_replay(runtime_args.environment_replay)
+    except (OSError, EnvironmentFormatError) as error:
+        raise SystemExit("Invalid environment replay file: {}".format(error))
     try:
         configuration = load_installation_config()
     except ConfigurationError as error:
