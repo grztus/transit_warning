@@ -5,7 +5,7 @@ import unittest
 import pytz
 
 import transit_time
-import transit_warning_v5 as transit
+import transit_warning as transit
 from transit_clock import ReplayClock
 from transit_time import port_timestamp_to_utc
 

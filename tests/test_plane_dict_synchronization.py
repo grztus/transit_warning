@@ -3,7 +3,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-import transit_warning_v5 as transit
+import transit_warning as transit
 
 
 def plane_entry(timestamp, distance="999"):

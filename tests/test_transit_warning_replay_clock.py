@@ -3,7 +3,7 @@ import unittest
 
 import pytz
 
-import transit_warning_v5 as transit
+import transit_warning as transit
 from transit_clock import RealClock, ReplayClock, clock_from_args
 
 

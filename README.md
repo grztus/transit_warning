@@ -42,7 +42,7 @@ xtd_tst = 20  # Cross-track distance threshold
 # Running the Script
 To run the script, execute it with Python:
 
-python transit_warning_v5.py (or python3 transit_warning_v5.py)
+python transit_warning.py (or python3 transit_warning.py)
 
 Notes
 Ensure that your system has access to the ADS-B and MLAT data streams. The script is designed to connect to local ports (30003 for ADS-B and 30106 for MLAT).</br>

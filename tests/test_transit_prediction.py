@@ -1,6 +1,6 @@
 import unittest
 
-from transit_warning_v5 import transit_pred
+from transit_warning import transit_pred
 
 
 TRANSIT_ARGS = (
