@@ -62,10 +62,15 @@ class ApplicationConfigurationTests(unittest.TestCase):
         threads = [Mock(), Mock()]
         thread_factory = Mock(side_effect=threads)
         with patch.object(transit, "load_installation_config", return_value=TEST_CONFIG), \
+                patch.object(transit, "initialize_daily_environment") as initialize_daily, \
+                patch.object(transit, "get_metar_press") as get_pressure, \
                 patch.object(transit.threading, "Thread", thread_factory), \
                 patch.object(transit.time, "sleep", side_effect=KeyboardInterrupt):
             with self.assertRaises(KeyboardInterrupt):
                 transit.main()
+
+        initialize_daily.assert_called_once_with()
+        get_pressure.assert_called_once_with()
 
         self.assertEqual(
             thread_factory.call_args_list,

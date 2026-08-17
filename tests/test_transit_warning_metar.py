@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 import pytz
 
 import transit_warning as transit
+from environment import DailyEnvironmentRecorder, EnvironmentEvent, iter_environment_events
 from metar import AwcMetar
 from transit_clock import ReplayClock
 
@@ -30,12 +31,14 @@ class GetMetarPressTests(unittest.TestCase):
         self.original_pressure = transit.pressure
         self.original_metar_station = transit.metar_station
         self.original_environment_recorder = transit.environment_recorder
+        self.original_daily_environment_recorder = transit.daily_environment_recorder
         transit.clock = FakeClock()
         transit.metar_t = None
         transit.metar_attempt_t = None
         transit.pressure = 1013
         transit.metar_station = "EPRA"
         transit.environment_recorder = None
+        transit.daily_environment_recorder = None
 
     def tearDown(self):
         transit.clock = self.original_clock
@@ -44,6 +47,7 @@ class GetMetarPressTests(unittest.TestCase):
         transit.pressure = self.original_pressure
         transit.metar_station = self.original_metar_station
         transit.environment_recorder = self.original_environment_recorder
+        transit.daily_environment_recorder = self.original_daily_environment_recorder
 
     def observation(self, altim=1015.0, age_seconds=0, station="EPRA", raw_ob="METAR"):
         return AwcMetar(
@@ -52,6 +56,124 @@ class GetMetarPressTests(unittest.TestCase):
             altim=altim,
             raw_ob=raw_ob,
         )
+
+    def persisted_event(self, value=1004.0, days_ago=0):
+        return EnvironmentEvent(
+            1,
+            transit.clock.now_utc() - datetime.timedelta(days=days_ago, minutes=1),
+            "qnh",
+            value,
+            "awc",
+            "EPRA",
+            transit.clock.now_utc() - datetime.timedelta(days=days_ago, minutes=5),
+        )
+
+    def seed_daily_history(self, directory, event):
+        recorder = DailyEnvironmentRecorder(event.time, directory, "EPRA")
+        recorder.record_qnh(event)
+        recorder.close()
+
+    def test_initialization_recovers_today_without_enabling_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            event = self.persisted_event(1004.0)
+            self.seed_daily_history(directory, event)
+            recovered = transit.initialize_daily_environment(directory)
+            try:
+                self.assertEqual(recovered.value_hpa, 1004.0)
+                self.assertEqual(transit.pressure, 1004.0)
+                self.assertIsNone(transit.metar_t)
+                self.assertIsNone(transit.metar_attempt_t)
+            finally:
+                transit.daily_environment_recorder.close()
+
+    def test_initialization_recovers_previous_day_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            event = self.persisted_event(1005.0, days_ago=1)
+            self.seed_daily_history(directory, event)
+            recovered = transit.initialize_daily_environment(directory)
+            try:
+                self.assertEqual(recovered.value_hpa, 1005.0)
+                self.assertEqual(transit.pressure, 1005.0)
+            finally:
+                transit.daily_environment_recorder.close()
+
+    def test_initialization_ignores_older_history_and_uses_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            event = self.persisted_event(1002.0, days_ago=2)
+            self.seed_daily_history(directory, event)
+            self.assertIsNone(transit.initialize_daily_environment(directory))
+            try:
+                self.assertEqual(transit.pressure, 1013)
+            finally:
+                transit.daily_environment_recorder.close()
+
+    @patch.object(transit, "DailyEnvironmentRecorder")
+    def test_failed_daily_recorder_does_not_block_awc(self, recorder_type):
+        failed_recorder = Mock(status=DailyEnvironmentRecorder.FAILED)
+        failed_recorder.recover_recent_qnh.return_value = None
+        recorder_type.return_value = failed_recorder
+        transit.initialize_daily_environment()
+        observation = self.observation(1006.0)
+        with patch.object(transit, "fetch_awc_metar", return_value=observation) as fetch:
+            self.assertEqual(transit.get_metar_press(), 1006.0)
+        fetch.assert_called_once_with("EPRA")
+        failed_recorder.record_qnh.assert_called_once()
+
+    @patch.object(transit, "fetch_awc_metar")
+    def test_immediate_awc_replaces_recovered_qnh_and_then_caches(self, fetch):
+        with tempfile.TemporaryDirectory() as directory:
+            self.seed_daily_history(directory, self.persisted_event(1004.0))
+            transit.initialize_daily_environment(directory)
+            fetch.return_value = self.observation(1006.0)
+            try:
+                self.assertEqual(transit.get_metar_press(), 1006.0)
+                self.assertEqual(fetch.call_count, 1)
+                transit.clock.advance(899.999)
+                self.assertEqual(transit.get_metar_press(), 1006.0)
+                self.assertEqual(fetch.call_count, 1)
+            finally:
+                transit.daily_environment_recorder.close()
+
+    @patch.object(transit, "fetch_awc_metar", return_value=None)
+    def test_failed_immediate_awc_keeps_recovered_qnh_and_retry_policy(self, fetch):
+        with tempfile.TemporaryDirectory() as directory:
+            self.seed_daily_history(directory, self.persisted_event(1004.0))
+            transit.initialize_daily_environment(directory)
+            try:
+                self.assertEqual(transit.get_metar_press(), 1004.0)
+                transit.clock.advance(59.999)
+                self.assertEqual(transit.get_metar_press(), 1004.0)
+                self.assertEqual(fetch.call_count, 1)
+                transit.clock.advance(0.001)
+                self.assertEqual(transit.get_metar_press(), 1004.0)
+                self.assertEqual(fetch.call_count, 2)
+            finally:
+                transit.daily_environment_recorder.close()
+
+    @patch.object(transit, "fetch_awc_metar", return_value=None)
+    def test_failed_immediate_awc_without_history_keeps_fallback(self, fetch):
+        with tempfile.TemporaryDirectory() as directory:
+            transit.initialize_daily_environment(directory)
+            try:
+                self.assertEqual(transit.get_metar_press(), 1013)
+                self.assertEqual(transit.pressure, 1013)
+            finally:
+                transit.daily_environment_recorder.close()
+
+    @patch.object(transit, "fetch_awc_metar")
+    def test_identical_awc_does_not_append_duplicate_after_restart(self, fetch):
+        with tempfile.TemporaryDirectory() as directory:
+            self.seed_daily_history(directory, self.persisted_event(1004.0))
+            transit.initialize_daily_environment(directory)
+            path = transit.daily_environment_recorder._path_for(transit.clock.now_utc().date())
+            before = list(iter_environment_events(path))
+            fetch.return_value = self.observation(1004.0)
+            try:
+                self.assertEqual(transit.get_metar_press(), 1004.0)
+                after = list(iter_environment_events(path))
+                self.assertEqual(len(after), len(before))
+            finally:
+                transit.daily_environment_recorder.close()
 
     @patch.object(transit, "fetch_awc_metar")
     def test_first_valid_epra_qnh_is_stored(self, fetch):
@@ -217,6 +339,14 @@ class GetMetarPressTests(unittest.TestCase):
         self.assertIs(transit.metar_t, original_metar_t)
         self.assertIs(transit.metar_attempt_t, original_attempt_t)
         transit.environment_recorder.record.assert_not_called()
+
+    def test_replay_does_not_create_daily_environment_recorder(self):
+        replay_clock = ReplayClock()
+        transit.clock = replay_clock
+        with patch.object(transit, "DailyEnvironmentRecorder") as recorder_type:
+            self.assertIsNone(transit.initialize_daily_environment())
+        recorder_type.assert_not_called()
+        self.assertIsNone(transit.daily_environment_recorder)
 
 
 if __name__ == "__main__":

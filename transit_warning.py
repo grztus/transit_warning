@@ -75,6 +75,7 @@ from math import atan2, sin, cos, acos, radians, degrees, atan, asin, sqrt, isna
 import pytz  # Import pytz for timezone handling
 from config import ConfigurationError, InstallationConfig, load_installation_config
 from environment import (
+    DailyEnvironmentRecorder,
     EnvironmentEvent,
     EnvironmentFormatError,
     EnvironmentRecorder,
@@ -124,6 +125,7 @@ replay_time_lock = threading.Lock()
 replay_time_initialized = not isinstance(clock, ReplayClock)
 environment_replay = None
 environment_recorder = None
+daily_environment_recorder = None
 
 # Global settings / Globalne ustawienia
 MAX_AGE_SECONDS = 60  # Maksymalny czas życia wpisu po ostatnim odbiorze sygnału (w sekundach) / Maximum entry lifetime after the last received signal (in seconds)
@@ -242,6 +244,27 @@ def configure_environment_recording(path):
         station=metar_station,
     )
     environment_recorder = EnvironmentRecorder(path, initial_event)
+
+
+def initialize_daily_environment(base_dir=None):
+    global daily_environment_recorder, pressure, metar_t, metar_attempt_t
+    if isinstance(clock, ReplayClock):
+        daily_environment_recorder = None
+        return None
+
+    now_utc = clock.now_utc()
+    recorder_options = {
+        "fallback_station": metar_station,
+        "error_handler": lambda message: print(message),
+    }
+    if base_dir is not None:
+        recorder_options["base_dir"] = base_dir
+    daily_environment_recorder = DailyEnvironmentRecorder(now_utc, **recorder_options)
+    recovered = daily_environment_recorder.recover_recent_qnh(now_utc)
+    pressure = recovered.value_hpa if recovered is not None else 1013
+    metar_t = None
+    metar_attempt_t = None
+    return recovered
 
 
 def apply_replay_environment(timestamp_utc):
@@ -495,6 +518,16 @@ def get_metar_press():
     metar_t = aktual_metar_t
     if environment_recorder is not None:
         environment_recorder.record(EnvironmentEvent(
+            version=1,
+            time=aktual_metar_t,
+            type="qnh",
+            value_hpa=metar_data.altim,
+            source="awc",
+            station=metar_station,
+            obs_time=metar_data.obs_time,
+        ))
+    if daily_environment_recorder is not None:
+        daily_environment_recorder.record_qnh(EnvironmentEvent(
             version=1,
             time=aktual_metar_t,
             type="qnh",
@@ -892,6 +925,7 @@ def process_line(line, port):
 
 
 def main():
+    global daily_environment_recorder
     try:
         configuration = load_installation_config()
     except ConfigurationError as error:
@@ -899,7 +933,13 @@ def main():
     apply_installation_config(configuration)
     try:
         configure_environment_replay(runtime_args.environment_replay)
-        configure_environment_recording(runtime_args.environment_record)
+        if isinstance(clock, ReplayClock):
+            daily_environment_recorder = None
+            configure_environment_recording(None)
+        else:
+            initialize_daily_environment()
+            configure_environment_recording(runtime_args.environment_record)
+            get_metar_press()
     except (OSError, EnvironmentFormatError, EnvironmentRecordError) as error:
         raise SystemExit("Invalid environment file: {}".format(error))
 
@@ -910,6 +950,8 @@ def main():
     # Pętla główna / Main loop
     while True:
         time.sleep(1)
+        if daily_environment_recorder is not None:
+            daily_environment_recorder.rotate_if_needed(clock.now_utc())
         if replay_time_initialized:
             sun_alt, sun_az, moon_alt, moon_az = tabela()
             clean_dict()

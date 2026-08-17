@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timedelta, timezone
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -178,6 +179,19 @@ class DailyEnvironmentRecorderTests(unittest.TestCase):
         )
         recorder.close()
 
+    def test_utc_day_selection_does_not_depend_on_local_timezone_setting(self):
+        utc_time = datetime(2026, 8, 17, 23, 30, tzinfo=timezone.utc)
+        results = []
+        for zone in ("UTC", "Europe/Warsaw", "America/New_York"):
+            directory = self.base_dir / zone.replace("/", "_")
+            with patch.dict(os.environ, {"TZ": zone}):
+                recorder = DailyEnvironmentRecorder(utc_time, directory)
+                results.append((recorder._active_date, recorder.next_midnight_utc))
+                recorder.close()
+        self.assertEqual(results, [
+            (datetime(2026, 8, 17).date(), datetime(2026, 8, 18, tzinfo=timezone.utc)),
+        ] * 3)
+
     def test_records_first_qnh_and_deduplicates_same_decimal_value(self):
         recorder = DailyEnvironmentRecorder(self.now, self.base_dir)
         self.assertTrue(recorder.record_qnh(self.event("2026-08-17T12:01:00Z", 1004.25)))
@@ -252,6 +266,36 @@ class DailyEnvironmentRecorderTests(unittest.TestCase):
         self.assertEqual(restarted.last_event.obs_time, expected.obs_time)
         self.assertEqual(self.path("20260817").read_text(encoding="utf-8"), original)
         restarted.close()
+
+    def test_recovers_previous_day_into_today_as_carryover(self):
+        previous = DailyEnvironmentRecorder(
+            datetime(2026, 8, 16, 12, 0, tzinfo=timezone.utc), self.base_dir
+        )
+        previous.record_qnh(self.event(
+            "2026-08-16T23:30:00Z", 1006.5, "awc", "EPRA",
+            "2026-08-16T23:00:00Z",
+        ))
+        previous.close()
+
+        current = DailyEnvironmentRecorder(self.now, self.base_dir)
+        recovered = current.recover_recent_qnh(self.now)
+        self.assertEqual(recovered.value_hpa, 1006.5)
+        self.assertEqual(recovered.source, "carryover")
+        self.assertEqual(recovered.time, datetime(2026, 8, 17, tzinfo=timezone.utc))
+        self.assertEqual(recovered.obs_time, datetime(2026, 8, 16, 23, tzinfo=timezone.utc))
+        current.close()
+
+    def test_does_not_search_older_than_previous_day(self):
+        old = DailyEnvironmentRecorder(
+            datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc), self.base_dir
+        )
+        old.record_qnh(self.event("2026-08-15T12:01:00Z", 1002.0))
+        old.close()
+
+        current = DailyEnvironmentRecorder(self.now, self.base_dir)
+        self.assertIsNone(current.recover_recent_qnh(self.now))
+        self.assertIsNone(current.last_event)
+        current.close()
 
     def test_jump_over_multiple_days_opens_only_current_day(self):
         recorder = DailyEnvironmentRecorder(self.now, self.base_dir)

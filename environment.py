@@ -240,6 +240,40 @@ class DailyEnvironmentRecorder:
             self._error_reported = True
             return self.error_message
 
+    def recover_recent_qnh(self, now_utc):
+        """Return the last QNH from today or yesterday, without searching further."""
+        with self._lock:
+            if self.status == self.FAILED:
+                return None
+            try:
+                now_utc = self._require_utc(now_utc)
+                if self._last_event is not None:
+                    return self._last_event
+
+                previous_day = now_utc.date() - timedelta(days=1)
+                previous_path = self._path_for(previous_day)
+                previous_event = None
+                if previous_path.exists():
+                    for previous_event in iter_environment_events(previous_path):
+                        pass
+                if previous_event is None:
+                    return None
+
+                carryover = EnvironmentEvent(
+                    1,
+                    datetime.combine(now_utc.date(), time.min, tzinfo=timezone.utc),
+                    "qnh",
+                    previous_event.value_hpa,
+                    "carryover",
+                    previous_event.station,
+                    previous_event.obs_time,
+                )
+                self._write_event(carryover)
+                return carryover
+            except Exception as error:
+                self._fail("history recovery", error)
+                return None
+
     @staticmethod
     def _require_utc(value):
         if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
@@ -338,9 +372,18 @@ class DailyEnvironmentRecorder:
                 self.rotate_if_needed(event_time)
                 if self.status == self.FAILED:
                     return False
-                if self._last_event is not None and event.value_hpa == self._last_event.value_hpa:
+                validated = parse_environment_event(_event_record(event))
+                if self._last_event is not None and validated.time < self._last_event.time:
+                    raise EnvironmentRecordError(
+                        "event time {} is earlier than the last event {}".format(
+                            validated.time.isoformat(), self._last_event.time.isoformat()
+                        )
+                    )
+                if (self._last_event is not None
+                        and validated.value_hpa == self._last_event.value_hpa):
+                    self._last_event = validated
                     return False
-                self._write_event(event)
+                self._write_event(validated)
                 return True
             except Exception as error:
                 self._fail("write", error)
