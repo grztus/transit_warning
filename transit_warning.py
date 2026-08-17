@@ -700,7 +700,7 @@ def tabela():
         for status_line in source_status_lines():
             print(status_line)
 
-    return moon_alt, moon_az, sun_alt, sun_az
+    return sun_alt, sun_az, moon_alt, moon_az
 
 
 # Funkcja do czyszczenia słownika tranzytów / Function to clean the transit dictionary

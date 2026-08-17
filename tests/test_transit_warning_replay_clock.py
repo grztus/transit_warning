@@ -1,6 +1,7 @@
 import datetime
+import math
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytz
 
@@ -37,6 +38,33 @@ def message(generated, logged, icao="ABC123"):
 
 def utc(value):
     return datetime.datetime.strptime(value, "%Y/%m/%d %H:%M:%S.%f").replace(tzinfo=pytz.utc)
+
+
+class SunMoonTableContractTests(unittest.TestCase):
+    def test_real_table_returns_sun_then_moon(self):
+        now = utc("2024/05/18 12:00:00.000")
+        sun = Mock(alt=math.radians(31.5), az=math.radians(141.2))
+        moon = Mock(alt=math.radians(-17.4), az=math.radians(278.6))
+        original_clock = transit.clock
+        original_gatech = transit.gatech
+        original_last_t = transit.last_t
+        try:
+            transit.clock = Mock()
+            transit.clock.now_utc.return_value = now
+            transit.clock.ephem_now.return_value = "controlled ephem date"
+            transit.gatech = Mock()
+            transit.last_t = now
+            with patch.object(transit.ephem, "Sun", return_value=sun), \
+                    patch.object(transit.ephem, "Moon", return_value=moon):
+                result = transit.tabela()
+        finally:
+            transit.clock = original_clock
+            transit.gatech = original_gatech
+            transit.last_t = original_last_t
+
+        self.assertEqual(result, (31.5, 141.2, -17.4, 278.6))
+        sun.compute.assert_called_once()
+        moon.compute.assert_called_once()
 
 
 class ProcessLineReplayClockTests(unittest.TestCase):
@@ -175,7 +203,7 @@ class ProcessLineReplayClockTests(unittest.TestCase):
 
         def historical_table():
             table_times.append(transit.clock.now_utc())
-            return 1.0, 2.0, 3.0, 4.0
+            return 31.5, 141.2, -17.4, 278.6
 
         def record_prediction(*args):
             prediction_states.append((
@@ -199,8 +227,10 @@ class ProcessLineReplayClockTests(unittest.TestCase):
         self.assertEqual(
             prediction_states,
             [
-                (1.0, 2.0, 3.0, 4.0, historical_time, 3.0, 4.0),
-                (1.0, 2.0, 3.0, 4.0, historical_time, 1.0, 2.0),
+                (31.5, 141.2, -17.4, 278.6,
+                 historical_time, -17.4, 278.6),
+                (31.5, 141.2, -17.4, 278.6,
+                 historical_time, 31.5, 141.2),
             ],
         )
         self.assertEqual(transit.plane_dict["48B5CF"][0], historical_time)
