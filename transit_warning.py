@@ -74,6 +74,7 @@ from functools import wraps
 from math import atan2, sin, cos, acos, radians, degrees, atan, asin, sqrt, isnan
 import pytz  # Import pytz for timezone handling
 from config import ConfigurationError, InstallationConfig, load_installation_config
+from metar import fetch_metar_text, parse_metar_qnh
 from transit_clock import ReplayClock, clock_from_args
 from transit_time import port_timestamp_to_utc
 
@@ -417,20 +418,17 @@ def get_metar_press():
     if diff_metar_t > 900:
         metar_t = aktual_metar_t
         try:
-            response = requests.get(metar_url)
-            if response.status_code == 200:
-                metar_data = response.text
-                pressure_match = re.search(r'Q(\d{4})', metar_data)
-                if pressure_match:
-                    pressure = int(pressure_match.group(1))
-                    if 800 < pressure < 1100:
-                        return pressure
-                    else:
-                        return 1013  # Wartość domyślna w przypadku nierealistycznego odczytu / Default value in case of unrealistic reading
-                else:
-                    return 1013  # Wartość domyślna, jeśli brak ciśnienia w danych / Default value if no pressure in data
-            else:
+            metar_data = fetch_metar_text(metar_url)
+            if metar_data is None:
                 return 1013  # Wartość domyślna, jeśli odpowiedź serwera nie jest 200 OK / Default value if server response is not 200 OK
+            # Preserve the existing global-state update before range validation.
+            pressure_match = re.search(r'Q(\d{4})', metar_data)
+            if pressure_match:
+                pressure = int(pressure_match.group(1))
+            parsed_pressure = parse_metar_qnh(metar_data)
+            if parsed_pressure is not None:
+                return parsed_pressure
+            return 1013  # Wartość domyślna w przypadku braku lub nierealistycznego odczytu / Default value for missing or unrealistic data
         except requests.exceptions.RequestException as e:
             print("Error retrieving METAR data: ", e)
             return pressure  # Zwraca ostatnio znaną wartość ciśnienia, jeśli wystąpi błąd / Returns the last known pressure value if an error occurs
