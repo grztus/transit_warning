@@ -1,54 +1,88 @@
-Transit Warning is a flight tracker script designed to track aircraft and calculate potential transits across the Sun and Moon from a specified location.</br>
-It uses ADS-B and MLAT data to determine the positions and velocities of aircraft and predicts their paths to identify possible transit events.
+# Transit Warning
 
-Key Features</br>
-Tracks aircraft in real-time using ADS-B and MLAT data.</br>
-Predicts aircraft transits across the Sun and Moon.</br>
-Provides visual and audible alerts for close approaches and transits.</br></br>
-# Prerequisites:</br>
-Before running the script, ensure you have the following Python modules installed:</br>
-ephem</br>
-requests</br>
-pytz</br>
-socket</br>
-tkinter (if using a GUI)</br>
-To install these modules, you can use pip: pip install ephem requests pytz</br>
-Socket should be preinstalled with python.
+Transit Warning tracks aircraft from ADS-B and MLAT data and predicts potential
+transits across the Sun and Moon for a configured observer location.
 
-Configuration</br>
-Before running the script, you need to configure a few settings at the beginning of the script. These include your location, elevation, and the METAR URL for weather data.</br>
-You also need to change 127.0.0.1 in sock.connect(('127.0.0.1', port)) to your machine IP address if You are not working on the localhost (line 516 in v5 sript), for example sock.connect(('192.168.1.197', port)).</br>
+## Requirements
 
-# Set geographic location and elevation
-my_lat = 51.1111  # Latitude
+- Python 3.10 or newer
+- Access to ADS-B and MLAT TCP sources
+- Tkinter/Tk support in the Python installation (the application currently imports it)
 
-my_lon = 21.1111  # Longitude
+The project no longer supports Python 2.
 
-my_elevation_const = 114  # Your antenna elevation = site elevation + 3 metres (for example) - this elevation is taken into calculations
+## Fresh installation
 
-near_airport_elevation = 111  # Nearest airport elevation
+Clone the repository, enter its directory, and install the Python dependencies:
 
-# METAR URL for weather data
-metar_url = 'https://awiacja.imgw.pl/metar00.php?airport=EPRA'  # Change to your local METAR URL (if there is some provided)
+```console
+git clone <repository-url>
+cd transit_warning
+python -m pip install -r requirements.txt
+```
 
-# Set desired distance and time limits
-warning_distance = 200  # Warning radius in km
+Create a private `.env` file from the public template.
 
-alert_distance = 15  # Alert radius in km
+Windows PowerShell:
 
-xtd_tst = 20  # Cross-track distance threshold
+```powershell
+Copy-Item .env.example .env
+```
 
+Linux/macOS:
 
-# Running the Script
-To run the script, execute it with Python:
+```console
+cp .env.example .env
+```
 
-python transit_warning.py (or python3 transit_warning.py)
+Edit `.env` and provide values for:
 
-Notes
-Ensure that your system has access to the ADS-B and MLAT data streams. The script is designed to connect to local ports (30003 for ADS-B and 30106 for MLAT).</br>
-The script clears the terminal screen periodically to display updated tracking information. If running on a system without a terminal, you might need to adjust or remove the clear_screen function calls.</br>
-By following these instructions and configurations, you should be able to track aircraft and predict potential transits effectively.</br>
+- `OBSERVER_LAT` — observer latitude in decimal degrees
+- `OBSERVER_LON` — observer longitude in decimal degrees
+- `OBSERVER_ELEVATION_M` — observer/antenna elevation in metres above sea level
+- `ADSB_HOST` — IP address or hostname of the ADS-B source
+- `MLAT_HOST` — IP address or hostname of the MLAT source
+- `METAR_URL` — full HTTP or HTTPS URL used to retrieve METAR data
 
-This script is also running on Anroid (tested with Pydroid3 on Samsung S23) - but to make this happen you need to comment the line (add "#") with clear_screen() function (line 396 in v5 script).
+Keep `ADSB_PORT=30003` and `MLAT_PORT=30106` if the local data sources use the
+default TCP ports. System environment variables override values from `.env`.
+The private `.env` file is ignored by Git; do not commit it.
 
-Grzegorz Tuszynski
+## Running the application
+
+Normal operation:
+
+```console
+python transit_warning.py
+```
+
+The application validates the installation configuration before it creates the
+observer or starts the TCP input threads. Configuration errors are reported at
+startup with the affected field names.
+
+## Replay mode
+
+Start the application with its replay clock:
+
+```console
+python transit_warning.py --clock replay
+```
+
+In another terminal, run one of the replay scenarios, for example:
+
+```console
+python replay_server.py adsb-2026 --speed 100
+python replay_server.py mlat-2024 --speed 100
+python replay_server.py dual-2026 --speed 100
+```
+
+Replay scenarios require their corresponding recording files under
+`tests/data/`. These recordings are local files and are ignored by Git, so they
+may not be present after a fresh clone.
+
+## Notes
+
+- The default source ports are 30003 for ADS-B and 30106 for MLAT.
+- The terminal display is cleared periodically while the application runs.
+- On Linux, Tkinter may need to be installed through the operating system's
+  package manager (for example, the `python3-tk` package on Debian-based systems).
