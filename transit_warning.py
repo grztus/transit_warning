@@ -278,6 +278,18 @@ def session_recorder_statuses():
     )
 
 
+def source_status_lines():
+    adsb_recorder_status, mlat_recorder_status = session_recorder_statuses()
+    adsb_port_status = "Listening" if port_status.get(adsb_port, False) else "Not listening"
+    mlat_port_status = "Listening" if port_status.get(mlat_port, False) else "Not listening"
+    return (
+        "ADS-B  Port {}: {}  |  Recorder: {}".format(
+            adsb_port, adsb_port_status, adsb_recorder_status),
+        "MLAT   Port {}: {}  |  Recorder: {}".format(
+            mlat_port, mlat_port_status, mlat_recorder_status),
+    )
+
+
 def initialize_daily_environment(base_dir=None):
     global daily_environment_recorder, pressure, metar_t, metar_attempt_t
     if isinstance(clock, ReplayClock):
@@ -684,13 +696,9 @@ def tabela():
         print(" ")
         print("{} (UTC) --- delay < {:.1f}s --- QNH {}hPa".format(clock.now_utc().time(), diff_t, pressure))
         print("LAT:", my_lat, "LON:", my_lon)
-        # Print port statuses
-        for port, status in port_status.items():
-            status_str = "Listening" if status else "Not listening"
-            print("Port {}: {}".format(port, status_str))
-        adsb_recorder_status, mlat_recorder_status = session_recorder_statuses()
-        print("ADS-B Recorder: {}".format(adsb_recorder_status))
-        print("MLAT Recorder: {}".format(mlat_recorder_status))
+        # Print combined port and recorder statuses.
+        for status_line in source_status_lines():
+            print(status_line)
 
     return moon_alt, moon_az, sun_alt, sun_az
 
@@ -752,11 +760,16 @@ def shutdown_runtime(threads, recorder):
         except Exception as error:
             print("Session recorder shutdown failed: {}".format(error))
             return
+        try:
+            delete_raw = (
+                recorder.manifest_data().get("recording_status") == "complete")
+        except Exception:
+            delete_raw = False
         archive_errors = []
         try:
             archived = archive_session(
                 recorder.session_dir,
-                delete_raw=False,
+                delete_raw=delete_raw,
                 error_handler=archive_errors.append,
             )
         except Exception as error:

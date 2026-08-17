@@ -189,6 +189,7 @@ class MainSessionRecordingTests(unittest.TestCase):
 
     def test_ctrl_c_closes_recorder_with_current_utc_and_joins_threads(self):
         recorder = Mock()
+        recorder.manifest_data.return_value = {"recording_status": "complete"}
         ended_at = datetime.datetime(
             2026, 8, 18, 20, 0, tzinfo=datetime.timezone.utc)
         threads = [Mock(), Mock()]
@@ -202,7 +203,7 @@ class MainSessionRecordingTests(unittest.TestCase):
             transit.main()
         recorder.close.assert_called_once_with(ended_at)
         archive.assert_called_once_with(
-            recorder.session_dir, delete_raw=False,
+            recorder.session_dir, delete_raw=True,
             error_handler=unittest.mock.ANY)
         for thread in threads:
             thread.join.assert_called_once_with(timeout=2.0)
@@ -246,6 +247,29 @@ class MainSessionRecordingTests(unittest.TestCase):
         self.assertEqual(
             transit.session_recorder_statuses(), ("FAILED", "RECORDING"))
 
+    def test_combined_source_status_lines_without_recording(self):
+        transit.session_recording_requested = False
+        with patch.object(transit, "adsb_port", 30003), \
+                patch.object(transit, "mlat_port", 30106), \
+                patch.object(transit, "port_status", {30003: True, 30106: True}):
+            self.assertEqual(transit.source_status_lines(), (
+                "ADS-B  Port 30003: Listening  |  Recorder: OFF",
+                "MLAT   Port 30106: Listening  |  Recorder: OFF",
+            ))
+
+    def test_combined_source_status_lines_keep_independent_failures(self):
+        transit.session_recording_requested = True
+        transit.session_recorder = Mock()
+        transit.session_recorder.adsb_writer.status = RecordingStatus.FAILED
+        transit.session_recorder.mlat_writer.status = RecordingStatus.RECORDING
+        with patch.object(transit, "adsb_port", 30003), \
+                patch.object(transit, "mlat_port", 30106), \
+                patch.object(transit, "port_status", {30003: True, 30106: False}):
+            self.assertEqual(transit.source_status_lines(), (
+                "ADS-B  Port 30003: Listening  |  Recorder: FAILED",
+                "MLAT   Port 30106: Not listening  |  Recorder: RECORDING",
+            ))
+
 
 class AutomaticSessionArchiveTests(unittest.TestCase):
     def setUp(self):
@@ -273,9 +297,10 @@ class AutomaticSessionArchiveTests(unittest.TestCase):
                 patch("builtins.print"):
             transit.shutdown_runtime([], recorder)
 
-    def test_archive_runs_after_close_and_uses_delete_raw_false(self):
+    def test_complete_archive_runs_after_close_and_uses_delete_raw_true(self):
         recorder = Mock()
         recorder.session_dir = Path("current-session")
+        recorder.manifest_data.return_value = {"recording_status": "complete"}
         ended_at = datetime.datetime(
             2026, 8, 18, 21, 0, tzinfo=datetime.timezone.utc)
         order = []
@@ -291,15 +316,18 @@ class AutomaticSessionArchiveTests(unittest.TestCase):
             transit.shutdown_runtime([], recorder)
         self.assertEqual(order, [
             ("close", ended_at),
-            ("archive", recorder.session_dir, False),
+            ("archive", recorder.session_dir, True),
         ])
 
-    def test_zip_contains_only_current_session_streams_and_preserves_raw(self):
+    def test_complete_leaves_only_manifest_and_zip_with_both_full_streams(self):
         previous, _ = self.make_recorder(0)
         previous.close(datetime.datetime(
             2026, 8, 18, 20, 0, 1, tzinfo=datetime.timezone.utc))
         current, ended_at = self.make_recorder(2)
-        (current.session_dir / "environment.jsonl").write_text(
+        environment_dir = Path(self.temp.name) / "environment"
+        environment_dir.mkdir()
+        environment_path = environment_dir / "environment_20260818.jsonl"
+        environment_path.write_text(
             '{"type":"qnh"}\n', encoding="utf-8")
 
         self.shutdown(current, ended_at)
@@ -309,9 +337,39 @@ class AutomaticSessionArchiveTests(unittest.TestCase):
         with zipfile.ZipFile(archive_path) as archive:
             self.assertEqual(set(archive.namelist()), {
                 "adsb_30003.log", "mlat_30106.log"})
-        self.assertTrue((current.session_dir / "adsb_30003.log").exists())
-        self.assertTrue((current.session_dir / "mlat_30106.log").exists())
-        self.assertTrue((current.session_dir / "environment.jsonl").exists())
+            self.assertEqual(archive.read("adsb_30003.log"), b"ADS-B 2\n")
+            self.assertEqual(archive.read("mlat_30106.log"), b"MLAT 2\n")
+        self.assertEqual(
+            {path.name for path in current.session_dir.iterdir()},
+            {"manifest.json", "streams.zip"})
+        self.assertEqual(
+            environment_path.read_text(encoding="utf-8"), '{"type":"qnh"}\n')
+
+    def test_partial_session_archives_without_deleting_raw(self):
+        recorder, ended_at = self.make_recorder(3)
+        recorder.adsb_writer._fail("write", OSError("failed"))
+        with patch.object(transit, "archive_session", wraps=transit.archive_session) as archive:
+            self.shutdown(recorder, ended_at)
+        archive.assert_called_once_with(
+            recorder.session_dir, delete_raw=False,
+            error_handler=unittest.mock.ANY)
+        self.assertEqual(recorder.manifest_data()["recording_status"], "partial")
+        self.assertTrue((recorder.session_dir / "adsb_30003.log").exists())
+        self.assertTrue((recorder.session_dir / "mlat_30106.log").exists())
+        self.assertTrue((recorder.session_dir / "streams.zip").exists())
+
+    def test_failed_session_archives_without_deleting_raw(self):
+        recorder, ended_at = self.make_recorder(4)
+        recorder._session_failed = True
+        with patch.object(transit, "archive_session", wraps=transit.archive_session) as archive:
+            self.shutdown(recorder, ended_at)
+        archive.assert_called_once_with(
+            recorder.session_dir, delete_raw=False,
+            error_handler=unittest.mock.ANY)
+        self.assertEqual(recorder.manifest_data()["recording_status"], "failed")
+        self.assertTrue((recorder.session_dir / "adsb_30003.log").exists())
+        self.assertTrue((recorder.session_dir / "mlat_30106.log").exists())
+        self.assertTrue((recorder.session_dir / "streams.zip").exists())
 
     def test_consecutive_sessions_get_independent_archives(self):
         first, first_end = self.make_recorder(10)
@@ -334,7 +392,7 @@ class AutomaticSessionArchiveTests(unittest.TestCase):
     def test_archive_failure_is_fail_open_and_manifest_stays_complete(self):
         recorder, ended_at = self.make_recorder(30)
         with patch.object(transit.clock, "now_utc", return_value=ended_at), \
-                patch.object(transit, "archive_session", return_value=False), \
+                patch.object(transit, "archive_session", return_value=False) as archive, \
                 patch("builtins.print") as output:
             transit.shutdown_runtime([], recorder)
 
@@ -343,6 +401,9 @@ class AutomaticSessionArchiveTests(unittest.TestCase):
         self.assertTrue((recorder.session_dir / "adsb_30003.log").exists())
         self.assertTrue((recorder.session_dir / "mlat_30106.log").exists())
         self.assertFalse((recorder.session_dir / "streams.zip").exists())
+        archive.assert_called_once_with(
+            recorder.session_dir, delete_raw=True,
+            error_handler=unittest.mock.ANY)
         output.assert_any_call("Session archive: FAILED (unknown error)")
 
 
