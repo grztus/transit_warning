@@ -1,11 +1,15 @@
 import io
 import datetime
+import json
+from pathlib import Path
+import tempfile
 import threading
 import unittest
 from unittest.mock import Mock, call, patch
+import zipfile
 
 import transit_warning as transit
-from recording import RecordingStatus
+from recording import RecordingStatus, SessionRecorder
 
 from tests.test_transit_warning_config import TEST_CONFIG
 
@@ -161,6 +165,7 @@ class MainSessionRecordingTests(unittest.TestCase):
         patches = self.main_patches(True)
         with patches[0], patches[1], patches[2], patches[3], \
                 patch.object(transit, "SessionRecorder", side_effect=create_recorder) as factory, \
+                patch.object(transit, "archive_session", return_value=True), \
                 patch.object(transit.threading, "Thread", side_effect=create_thread), patches[5]:
             transit.main()
 
@@ -176,6 +181,7 @@ class MainSessionRecordingTests(unittest.TestCase):
         patches = self.main_patches(True, [None, KeyboardInterrupt()])
         with patches[0], patches[1], patches[2], patches[3], \
                 patch.object(transit, "SessionRecorder", return_value=recorder), \
+                patch.object(transit, "archive_session", return_value=True), \
                 patches[4], patches[5]:
             transit.main()
         recorder.flush_if_due.assert_called_once_with()
@@ -190,9 +196,14 @@ class MainSessionRecordingTests(unittest.TestCase):
         with patches[0], patches[1], patches[2], patches[3], \
                 patch.object(transit, "SessionRecorder", return_value=recorder), \
                 patch.object(transit.threading, "Thread", side_effect=threads), \
-                patch.object(transit.clock, "now_utc", return_value=ended_at), patches[5]:
+                patch.object(transit.clock, "now_utc", return_value=ended_at), \
+                patch.object(transit, "archive_session", return_value=True) as archive, \
+                patches[5]:
             transit.main()
         recorder.close.assert_called_once_with(ended_at)
+        archive.assert_called_once_with(
+            recorder.session_dir, delete_raw=False,
+            error_handler=unittest.mock.ANY)
         for thread in threads:
             thread.join.assert_called_once_with(timeout=2.0)
 
@@ -201,8 +212,9 @@ class MainSessionRecordingTests(unittest.TestCase):
         transit.shutdown_complete = False
         recorder = Mock()
         thread = Mock()
-        transit.shutdown_runtime([thread], recorder)
-        transit.shutdown_runtime([thread], recorder)
+        with patch.object(transit, "archive_session", return_value=True):
+            transit.shutdown_runtime([thread], recorder)
+            transit.shutdown_runtime([thread], recorder)
         thread.join.assert_called_once_with(timeout=2.0)
         recorder.close.assert_called_once()
 
@@ -219,9 +231,11 @@ class MainSessionRecordingTests(unittest.TestCase):
         patches = self.main_patches(False)
         with patches[0], patches[1], patches[2], patches[3], \
                 patch.object(transit, "SessionRecorder") as factory, \
+                patch.object(transit, "archive_session") as archive, \
                 patches[4], patches[5]:
             transit.main()
         factory.assert_not_called()
+        archive.assert_not_called()
         self.assertEqual(transit.session_recorder_statuses(), ("OFF", "OFF"))
 
     def test_writer_statuses_are_independent(self):
@@ -231,6 +245,105 @@ class MainSessionRecordingTests(unittest.TestCase):
         transit.session_recorder.mlat_writer.status = RecordingStatus.RECORDING
         self.assertEqual(
             transit.session_recorder_statuses(), ("FAILED", "RECORDING"))
+
+
+class AutomaticSessionArchiveTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.base_dir = Path(self.temp.name) / "sessions"
+        transit.stop_event.clear()
+        transit.shutdown_complete = False
+
+    def tearDown(self):
+        transit.stop_event.clear()
+        transit.shutdown_complete = False
+        self.temp.cleanup()
+
+    def make_recorder(self, second=0):
+        started = datetime.datetime(
+            2026, 8, 18, 20, 0, second, tzinfo=datetime.timezone.utc)
+        recorder = SessionRecorder(
+            started, 30003, 30106, "Europe/Warsaw", self.base_dir)
+        recorder.record_line(30003, "ADS-B {}\n".format(second))
+        recorder.record_line(30106, "MLAT {}\n".format(second))
+        return recorder, started
+
+    def shutdown(self, recorder, ended_at):
+        with patch.object(transit.clock, "now_utc", return_value=ended_at), \
+                patch("builtins.print"):
+            transit.shutdown_runtime([], recorder)
+
+    def test_archive_runs_after_close_and_uses_delete_raw_false(self):
+        recorder = Mock()
+        recorder.session_dir = Path("current-session")
+        ended_at = datetime.datetime(
+            2026, 8, 18, 21, 0, tzinfo=datetime.timezone.utc)
+        order = []
+        recorder.close.side_effect = lambda value: order.append(("close", value))
+
+        def archive_side_effect(*args, **kwargs):
+            order.append(("archive", args[0], kwargs["delete_raw"]))
+            return True
+
+        with patch.object(transit.clock, "now_utc", return_value=ended_at), \
+                patch.object(transit, "archive_session", side_effect=archive_side_effect), \
+                patch("builtins.print"):
+            transit.shutdown_runtime([], recorder)
+        self.assertEqual(order, [
+            ("close", ended_at),
+            ("archive", recorder.session_dir, False),
+        ])
+
+    def test_zip_contains_only_current_session_streams_and_preserves_raw(self):
+        previous, _ = self.make_recorder(0)
+        previous.close(datetime.datetime(
+            2026, 8, 18, 20, 0, 1, tzinfo=datetime.timezone.utc))
+        current, ended_at = self.make_recorder(2)
+        (current.session_dir / "environment.jsonl").write_text(
+            '{"type":"qnh"}\n', encoding="utf-8")
+
+        self.shutdown(current, ended_at)
+
+        self.assertFalse((previous.session_dir / "streams.zip").exists())
+        archive_path = current.session_dir / "streams.zip"
+        with zipfile.ZipFile(archive_path) as archive:
+            self.assertEqual(set(archive.namelist()), {
+                "adsb_30003.log", "mlat_30106.log"})
+        self.assertTrue((current.session_dir / "adsb_30003.log").exists())
+        self.assertTrue((current.session_dir / "mlat_30106.log").exists())
+        self.assertTrue((current.session_dir / "environment.jsonl").exists())
+
+    def test_consecutive_sessions_get_independent_archives(self):
+        first, first_end = self.make_recorder(10)
+        self.shutdown(first, first_end)
+        transit.shutdown_complete = False
+        transit.stop_event.clear()
+        second, second_end = self.make_recorder(20)
+        self.shutdown(second, second_end)
+
+        first_zip = first.session_dir / "streams.zip"
+        second_zip = second.session_dir / "streams.zip"
+        self.assertTrue(first_zip.exists())
+        self.assertTrue(second_zip.exists())
+        self.assertNotEqual(first_zip, second_zip)
+        with zipfile.ZipFile(first_zip) as archive:
+            self.assertEqual(archive.read("adsb_30003.log"), b"ADS-B 10\n")
+        with zipfile.ZipFile(second_zip) as archive:
+            self.assertEqual(archive.read("adsb_30003.log"), b"ADS-B 20\n")
+
+    def test_archive_failure_is_fail_open_and_manifest_stays_complete(self):
+        recorder, ended_at = self.make_recorder(30)
+        with patch.object(transit.clock, "now_utc", return_value=ended_at), \
+                patch.object(transit, "archive_session", return_value=False), \
+                patch("builtins.print") as output:
+            transit.shutdown_runtime([], recorder)
+
+        manifest = json.loads(recorder.manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["recording_status"], "complete")
+        self.assertTrue((recorder.session_dir / "adsb_30003.log").exists())
+        self.assertTrue((recorder.session_dir / "mlat_30106.log").exists())
+        self.assertFalse((recorder.session_dir / "streams.zip").exists())
+        output.assert_any_call("Session archive: FAILED (unknown error)")
 
 
 if __name__ == "__main__":

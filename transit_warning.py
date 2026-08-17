@@ -84,7 +84,7 @@ from environment import (
     iter_environment_events,
 )
 from metar import fetch_awc_metar
-from recording import RecordingStatus, SessionRecorder
+from recording import RecordingStatus, SessionRecorder, archive_session
 from transit_clock import ReplayClock, clock_from_args
 from transit_time import AdsBTimestampOffsetValidator, port_timestamp_to_utc
 
@@ -751,6 +751,22 @@ def shutdown_runtime(threads, recorder):
             recorder.close(clock.now_utc())
         except Exception as error:
             print("Session recorder shutdown failed: {}".format(error))
+            return
+        archive_errors = []
+        try:
+            archived = archive_session(
+                recorder.session_dir,
+                delete_raw=False,
+                error_handler=archive_errors.append,
+            )
+        except Exception as error:
+            archived = False
+            archive_errors.append(str(error))
+        if archived:
+            print("Session archive: OK")
+        else:
+            detail = archive_errors[0] if archive_errors else "unknown error"
+            print("Session archive: FAILED ({})".format(detail))
 
 
 # Funkcja do czytania danych z portu / Function to read data from port
