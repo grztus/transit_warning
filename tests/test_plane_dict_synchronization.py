@@ -4,6 +4,19 @@ import unittest
 from unittest.mock import patch
 
 import transit_warning as transit
+from config import InstallationConfig
+
+
+TEST_CONFIG = InstallationConfig(
+    observer_lat=51.1111,
+    observer_lon=21.1111,
+    observer_elevation_m=111.0,
+    adsb_host="127.0.0.1",
+    adsb_port=30003,
+    mlat_host="127.0.0.1",
+    mlat_port=30106,
+    metar_url="https://weather.example/metar",
+)
 
 
 def plane_entry(timestamp, distance="999"):
@@ -49,6 +62,7 @@ class ItemsControlledDict(dict):
 
 class PlaneDictSynchronizationTests(unittest.TestCase):
     def setUp(self):
+        transit.apply_installation_config(TEST_CONFIG)
         self.original_plane_dict = transit.plane_dict
         self.original_last_t = transit.last_t
 

@@ -73,6 +73,7 @@ import threading
 from functools import wraps
 from math import atan2, sin, cos, acos, radians, degrees, atan, asin, sqrt, isnan
 import pytz  # Import pytz for timezone handling
+from config import ConfigurationError, InstallationConfig, load_installation_config
 from transit_clock import ReplayClock, clock_from_args
 from transit_time import port_timestamp_to_utc
 
@@ -105,7 +106,7 @@ global metar_t
 global pressure
 metar_t = clock.now_utc() - datetime.timedelta(seconds=900) if clock.is_ready() else None  # Ustawienie początkowego czasu / Initial setting of time
 pressure = 1013  # Domyślne ciśnienie / Default pressure
-metar_url = 'https://awiacja.imgw.pl/metar00.php?airport=EPRA'  # Adres URL z danymi METAR / URL for METAR data
+metar_url = None
 
 # Kolory terminala / Terminal Colors
 REDALERT = '\x1b[1;37;41m'
@@ -156,19 +157,39 @@ transit_separation_GREENALERT_FG = 3
 transit_separation_notignored = 15
 
 # Ustawienia lokalizacji geograficznej i wysokości / Set geographic location and elevation
-my_lat = 51.1111  # Szerokość geograficzna / Latitude
-my_lon = 21.1111  # Długość geograficzna / Longitude
-my_elevation_const = 111  # Wysokość anteny = wysokość miejsca + 3 metry / Your antenna elevation = site elevation + for example 3 metres
+my_lat = None
+my_lon = None
+my_elevation_const = None
 near_airport_elevation = 100  # Wysokość najbliższego lotniska / Nearest airport elevation
 
 # Ustawienia efemeryd / Ephemeris settings
-gatech = ephem.Observer()
-gatech.lat, gatech.lon = str(my_lat), str(my_lon)
-gatech.elevation = my_elevation_const
+gatech = None
+
+adsb_host = None
+adsb_port = None
+mlat_host = None
+mlat_port = None
+
+
+def apply_installation_config(configuration: InstallationConfig):
+    global my_lat, my_lon, my_elevation_const, metar_url, gatech
+    global adsb_host, adsb_port, mlat_host, mlat_port, port_status
+    my_lat = configuration.observer_lat
+    my_lon = configuration.observer_lon
+    my_elevation_const = configuration.observer_elevation_m
+    metar_url = configuration.metar_url
+    adsb_host = configuration.adsb_host
+    adsb_port = configuration.adsb_port
+    mlat_host = configuration.mlat_host
+    mlat_port = configuration.mlat_port
+    gatech = ephem.Observer()
+    gatech.lat, gatech.lon = str(my_lat), str(my_lon)
+    gatech.elevation = my_elevation_const
+    port_status = {adsb_port: False, mlat_port: False}
 
 last_update_time = clock.now_utc() if clock.is_ready() else None  # Inicjalizacja zmiennej na początku skryptu / Initialize variable at the beginning of the script
 
-port_status = {30003: False, 30106: False}  # Inicjalizacja statusów portów / Initialize port statuses
+port_status = {}
 
 
 def advance_replay_time(timestamp_utc):
@@ -547,12 +568,12 @@ def clean_transit_dict():
         del plane_dict[icao]
 
 # Funkcja do czytania danych z portu / Function to read data from port
-def read_from_port(port, process_line):
+def read_from_port(host, port, process_line):
     global port_status
     while True:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(('127.0.0.1', port))
+            sock.connect((host, port))
             port_status[port] = True
             file = sock.makefile()
             while True:
@@ -801,9 +822,15 @@ def process_line(line, port):
 
 
 def main():
+    try:
+        configuration = load_installation_config()
+    except ConfigurationError as error:
+        raise SystemExit(str(error))
+    apply_installation_config(configuration)
+
     # Uruchomienie wątków do czytania z portów / Start threads to read from ports
-    threading.Thread(target=read_from_port, args=(30003, process_line)).start()
-    threading.Thread(target=read_from_port, args=(30106, process_line)).start()
+    threading.Thread(target=read_from_port, args=(adsb_host, adsb_port, process_line)).start()
+    threading.Thread(target=read_from_port, args=(mlat_host, mlat_port, process_line)).start()
 
     # Pętla główna / Main loop
     while True:

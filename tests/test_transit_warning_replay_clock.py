@@ -4,7 +4,20 @@ import unittest
 import pytz
 
 import transit_warning as transit
+from config import InstallationConfig
 from transit_clock import RealClock, ReplayClock, clock_from_args
+
+
+TEST_CONFIG = InstallationConfig(
+    observer_lat=51.1111,
+    observer_lon=21.1111,
+    observer_elevation_m=111.0,
+    adsb_host="127.0.0.1",
+    adsb_port=30003,
+    mlat_host="127.0.0.1",
+    mlat_port=30106,
+    metar_url="https://weather.example/metar",
+)
 
 
 def message(generated, logged, icao="ABC123"):
@@ -25,6 +38,7 @@ def utc(value):
 
 class ProcessLineReplayClockTests(unittest.TestCase):
     def setUp(self):
+        transit.apply_installation_config(TEST_CONFIG)
         self.original_clock = transit.clock
         self.original_tabela = transit.tabela
         self.original_transit_pred = transit.transit_pred

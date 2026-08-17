@@ -1,6 +1,7 @@
 import unittest
 
-from transit_warning import transit_pred
+import transit_warning as transit
+from config import InstallationConfig
 
 
 TRANSIT_ARGS = (
@@ -12,11 +13,25 @@ TRANSIT_ARGS = (
     150.5,
 )
 
+TEST_CONFIG = InstallationConfig(
+    observer_lat=51.1111,
+    observer_lon=21.1111,
+    observer_elevation_m=111.0,
+    adsb_host="127.0.0.1",
+    adsb_port=30003,
+    mlat_host="127.0.0.1",
+    mlat_port=30106,
+    metar_url="https://weather.example/metar",
+)
+
 
 class TransitVelocityTests(unittest.TestCase):
+    def setUp(self):
+        transit.apply_installation_config(TEST_CONFIG)
+
     def predict(self, velocity):
         observer, plane, track, elevation, body_alt, body_az = TRANSIT_ARGS
-        return transit_pred(observer, plane, track, velocity, elevation, body_alt, body_az)
+        return transit.transit_pred(observer, plane, track, velocity, elevation, body_alt, body_az)
 
     def test_zero_velocity_has_no_prediction(self):
         self.assertEqual(self.predict(0), 0)
