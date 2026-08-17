@@ -29,7 +29,7 @@ class FetchMetarTextTests(unittest.TestCase):
 
         self.assertEqual(fetch_metar_text("https://weather.example/metar"), "METAR TEST Q1013")
 
-        get.assert_called_once_with("https://weather.example/metar")
+        get.assert_called_once_with("https://weather.example/metar", timeout=5)
 
     @patch("metar.requests.get")
     def test_returns_none_for_non_200_response(self, get):
@@ -37,12 +37,16 @@ class FetchMetarTextTests(unittest.TestCase):
 
         self.assertIsNone(fetch_metar_text("https://weather.example/metar"))
 
+        get.assert_called_once_with("https://weather.example/metar", timeout=5)
+
     @patch("metar.requests.get")
     def test_request_exception_propagates(self, get):
         get.side_effect = requests.exceptions.ConnectionError("offline")
 
         with self.assertRaises(requests.exceptions.ConnectionError):
             fetch_metar_text("https://weather.example/metar")
+
+        get.assert_called_once_with("https://weather.example/metar", timeout=5)
 
 
 if __name__ == "__main__":

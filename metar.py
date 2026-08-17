@@ -7,7 +7,7 @@ import requests
 
 def fetch_metar_text(url):
     """Return the response text for HTTP 200, or None for another status."""
-    response = requests.get(url)
+    response = requests.get(url, timeout=5)
     if response.status_code == 200:
         return response.text
     return None

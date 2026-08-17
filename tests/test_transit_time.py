@@ -43,7 +43,7 @@ class ProcessLineTimestampConversionTests(unittest.TestCase):
         try:
             transit.clock = ReplayClock()
             transit.replay_time_initialized = False
-            transit.metar_t = transit.aktual_t = transit.last_t = None
+            transit.metar_t = transit.metar_attempt_t = transit.aktual_t = transit.last_t = None
             transit.gong_t = transit.last_update_time = None
             transit.plane_dict = {}
             transit.tabela = lambda: (0, 0, 0, 0)

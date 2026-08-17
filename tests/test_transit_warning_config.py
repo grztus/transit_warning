@@ -40,13 +40,14 @@ class ApplicationConfigurationTests(unittest.TestCase):
 
     def test_metar_request_uses_configured_url(self):
         transit.apply_installation_config(TEST_CONFIG)
-        transit.metar_t = transit.clock.now_utc() - transit.datetime.timedelta(seconds=901)
+        transit.metar_t = None
+        transit.metar_attempt_t = None
         response = Mock(status_code=200, text="METAR TEST 101200Z Q1015")
 
         with patch.object(transit.requests, "get", return_value=response) as get:
             self.assertEqual(transit.get_metar_press(), 1015)
 
-        get.assert_called_once_with(TEST_CONFIG.metar_url)
+        get.assert_called_once_with(TEST_CONFIG.metar_url, timeout=5)
 
     def test_main_starts_independent_configured_sources(self):
         threads = [Mock(), Mock()]

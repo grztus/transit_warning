@@ -45,6 +45,7 @@ class ProcessLineReplayClockTests(unittest.TestCase):
         transit.clock = ReplayClock()
         transit.replay_time_initialized = False
         transit.metar_t = None
+        transit.metar_attempt_t = None
         transit.aktual_t = None
         transit.last_t = None
         transit.gong_t = None
@@ -69,7 +70,8 @@ class ProcessLineReplayClockTests(unittest.TestCase):
         logged_utc = utc(logged)
         self.assertEqual(transit.plane_dict["ABC123"][0], generated_utc)
         self.assertEqual(transit.clock.now_utc(), logged_utc)
-        self.assertEqual(transit.metar_t, logged_utc - datetime.timedelta(seconds=900))
+        self.assertIsNone(transit.metar_t)
+        self.assertIsNone(transit.metar_attempt_t)
         self.assertEqual(transit.aktual_t, logged_utc)
         self.assertEqual(transit.last_t, logged_utc - datetime.timedelta(seconds=10))
         self.assertEqual(transit.gong_t, logged_utc)

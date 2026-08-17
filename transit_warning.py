@@ -104,8 +104,10 @@ MAX_AGE_SECONDS = 60  # Maksymalny czas życia wpisu po ostatnim odbiorze sygna�
 
 # Deklaracja globalnych zmiennych / Declaration of global variables
 global metar_t
+global metar_attempt_t
 global pressure
-metar_t = clock.now_utc() - datetime.timedelta(seconds=900) if clock.is_ready() else None  # Ustawienie początkowego czasu / Initial setting of time
+metar_t = None
+metar_attempt_t = None
 pressure = 1013  # Domyślne ciśnienie / Default pressure
 metar_url = None
 
@@ -194,7 +196,7 @@ port_status = {}
 
 
 def advance_replay_time(timestamp_utc):
-    global replay_time_initialized, metar_t, aktual_t, last_t, gong_t, last_update_time
+    global replay_time_initialized, metar_t, metar_attempt_t, aktual_t, last_t, gong_t, last_update_time
     global sun_alt, sun_az, moon_alt, moon_az
     if not isinstance(clock, ReplayClock):
         return
@@ -202,7 +204,8 @@ def advance_replay_time(timestamp_utc):
         clock.advance_to(timestamp_utc)
         if not replay_time_initialized:
             current_time = clock.now_utc()
-            metar_t = current_time - datetime.timedelta(seconds=900)
+            metar_t = None
+            metar_attempt_t = None
             aktual_t = current_time
             last_t = current_time - datetime.timedelta(seconds=10)
             gong_t = current_time
@@ -412,28 +415,27 @@ def is_int_try(value):
 # Funkcja do pobierania danych METAR / Function to retrieve METAR data
 def get_metar_press():
     global metar_t
+    global metar_attempt_t
     global pressure
     aktual_metar_t = clock.now_utc()
-    diff_metar_t = (aktual_metar_t - metar_t).total_seconds()
-    if diff_metar_t > 900:
-        metar_t = aktual_metar_t
-        try:
-            metar_data = fetch_metar_text(metar_url)
-            if metar_data is None:
-                return 1013  # Wartość domyślna, jeśli odpowiedź serwera nie jest 200 OK / Default value if server response is not 200 OK
-            # Preserve the existing global-state update before range validation.
-            pressure_match = re.search(r'Q(\d{4})', metar_data)
-            if pressure_match:
-                pressure = int(pressure_match.group(1))
-            parsed_pressure = parse_metar_qnh(metar_data)
-            if parsed_pressure is not None:
-                return parsed_pressure
-            return 1013  # Wartość domyślna w przypadku braku lub nierealistycznego odczytu / Default value for missing or unrealistic data
-        except requests.exceptions.RequestException as e:
-            print("Error retrieving METAR data: ", e)
-            return pressure  # Zwraca ostatnio znaną wartość ciśnienia, jeśli wystąpi błąd / Returns the last known pressure value if an error occurs
-    else:
-        return pressure  # Zwraca ostatnio znaną wartość ciśnienia, jeśli nie jest czas na aktualizację / Returns the last known pressure value if it's not time for an update
+    if metar_t is not None and (aktual_metar_t - metar_t).total_seconds() < 900:
+        return pressure
+    if metar_attempt_t is not None and (aktual_metar_t - metar_attempt_t).total_seconds() < 60:
+        return pressure
+    metar_attempt_t = aktual_metar_t
+    try:
+        metar_data = fetch_metar_text(metar_url)
+    except requests.exceptions.RequestException as e:
+        print("Error retrieving METAR data: ", e)
+        return pressure
+    if metar_data is None:
+        return pressure
+    parsed_pressure = parse_metar_qnh(metar_data)
+    if parsed_pressure is None:
+        return pressure
+    pressure = parsed_pressure
+    metar_t = aktual_metar_t
+    return pressure
 
 # Funkcja do generowania tabeli wyjściowej / Function to generate output table
 @synchronized_plane_dict
