@@ -84,6 +84,7 @@ from environment import (
     iter_environment_events,
 )
 from metar import fetch_awc_metar
+from recording import RecordingStatus, SessionRecorder
 from transit_clock import ReplayClock, clock_from_args
 from transit_time import AdsBTimestampOffsetValidator, port_timestamp_to_utc
 
@@ -109,6 +110,7 @@ def parse_runtime_args(arguments):
     parser.add_argument("--clock", choices=("real", "replay"), default="real")
     parser.add_argument("--environment-replay")
     parser.add_argument("--environment-record")
+    parser.add_argument("--record", action="store_true")
     args = parser.parse_args(arguments)
     if args.environment_replay is not None and args.environment_record is not None:
         parser.error("--environment-replay and --environment-record cannot be used together")
@@ -116,6 +118,8 @@ def parse_runtime_args(arguments):
         parser.error("--environment-replay requires --clock replay")
     if args.environment_record is not None and args.clock != "real":
         parser.error("--environment-record requires --clock real")
+    if args.record and args.clock != "real":
+        parser.error("--record requires --clock real")
     return args
 
 
@@ -127,6 +131,8 @@ environment_replay = None
 environment_recorder = None
 daily_environment_recorder = None
 adsb_timestamp_validator = None
+session_recorder = None
+session_recording_requested = False
 
 # Global settings / Globalne ustawienia
 MAX_AGE_SECONDS = 60  # Maksymalny czas życia wpisu po ostatnim odbiorze sygnału (w sekundach) / Maximum entry lifetime after the last received signal (in seconds)
@@ -252,6 +258,19 @@ def configure_environment_recording(path):
         station=metar_station,
     )
     environment_recorder = EnvironmentRecorder(path, initial_event)
+
+
+def session_recorder_statuses():
+    if not session_recording_requested:
+        return (RecordingStatus.OFF.value, RecordingStatus.OFF.value)
+    if session_recorder is None:
+        return (RecordingStatus.FAILED.value, RecordingStatus.FAILED.value)
+    adsb_writer = session_recorder.adsb_writer
+    mlat_writer = session_recorder.mlat_writer
+    return (
+        adsb_writer.status.value if adsb_writer is not None else RecordingStatus.FAILED.value,
+        mlat_writer.status.value if mlat_writer is not None else RecordingStatus.FAILED.value,
+    )
 
 
 def initialize_daily_environment(base_dir=None):
@@ -664,6 +683,9 @@ def tabela():
         for port, status in port_status.items():
             status_str = "Listening" if status else "Not listening"
             print("Port {}: {}".format(port, status_str))
+        adsb_recorder_status, mlat_recorder_status = session_recorder_statuses()
+        print("ADS-B Recorder: {}".format(adsb_recorder_status))
+        print("MLAT Recorder: {}".format(mlat_recorder_status))
 
     return moon_alt, moon_az, sun_alt, sun_az
 
@@ -677,7 +699,7 @@ def clean_transit_dict():
         del plane_dict[icao]
 
 # Funkcja do czytania danych z portu / Function to read data from port
-def read_from_port(host, port, process_line):
+def read_from_port(host, port, process_line, session_recorder=None):
     global port_status
     while True:
         try:
@@ -689,6 +711,11 @@ def read_from_port(host, port, process_line):
                 line = file.readline()
                 if not line:
                     break
+                if session_recorder is not None:
+                    try:
+                        session_recorder.record_line(port, line)
+                    except Exception as error:
+                        print("Session recorder error on port {}: {}".format(port, error))
                 process_line(line.strip(), port)
         except Exception as e:
             print("Error on port {}: {}".format(port, e))
@@ -940,12 +967,14 @@ def process_line(line, port):
 
 
 def main():
-    global daily_environment_recorder
+    global daily_environment_recorder, session_recorder, session_recording_requested
     try:
         configuration = load_installation_config()
     except ConfigurationError as error:
         raise SystemExit(str(error))
     apply_installation_config(configuration)
+    session_recorder = None
+    session_recording_requested = runtime_args.record
     try:
         configure_environment_replay(runtime_args.environment_replay)
         if isinstance(clock, ReplayClock):
@@ -958,15 +987,33 @@ def main():
     except (OSError, EnvironmentFormatError, EnvironmentRecordError) as error:
         raise SystemExit("Invalid environment file: {}".format(error))
 
+    if session_recording_requested:
+        try:
+            session_recorder = SessionRecorder(
+                clock.now_utc(), adsb_port, mlat_port, adsb_timestamp_timezone,
+                error_handler=lambda message: print(message),
+            )
+        except Exception as error:
+            print("Session recorder initialization failed: {}".format(error))
+            session_recorder = None
+
     # Uruchomienie wątków do czytania z portów / Start threads to read from ports
-    threading.Thread(target=read_from_port, args=(adsb_host, adsb_port, process_line)).start()
-    threading.Thread(target=read_from_port, args=(mlat_host, mlat_port, process_line)).start()
+    threading.Thread(
+        target=read_from_port,
+        args=(adsb_host, adsb_port, process_line, session_recorder),
+    ).start()
+    threading.Thread(
+        target=read_from_port,
+        args=(mlat_host, mlat_port, process_line, session_recorder),
+    ).start()
 
     # Pętla główna / Main loop
     while True:
         time.sleep(1)
         if daily_environment_recorder is not None:
             daily_environment_recorder.rotate_if_needed(clock.now_utc())
+        if session_recorder is not None:
+            session_recorder.flush_if_due()
         if replay_time_initialized:
             sun_alt, sun_az, moon_alt, moon_az = tabela()
             clean_dict()

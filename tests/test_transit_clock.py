@@ -46,6 +46,13 @@ class ClockSelectionTests(unittest.TestCase):
                 "--environment-record", "record.jsonl",
             ])
 
+    def test_record_argument_is_accepted_with_real_clock(self):
+        self.assertTrue(transit.parse_runtime_args(["--record"]).record)
+
+    def test_record_argument_rejects_replay_clock(self):
+        with self.assertRaises(SystemExit):
+            transit.parse_runtime_args(["--clock", "replay", "--record"])
+
 
 class ReplayClockTests(unittest.TestCase):
     def setUp(self):

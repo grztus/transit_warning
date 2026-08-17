@@ -82,9 +82,11 @@ class ApplicationConfigurationTests(unittest.TestCase):
             thread_factory.call_args_list,
             [
                 call(target=transit.read_from_port,
-                     args=(TEST_CONFIG.adsb_host, TEST_CONFIG.adsb_port, transit.process_line)),
+                     args=(TEST_CONFIG.adsb_host, TEST_CONFIG.adsb_port,
+                           transit.process_line, None)),
                 call(target=transit.read_from_port,
-                     args=(TEST_CONFIG.mlat_host, TEST_CONFIG.mlat_port, transit.process_line)),
+                     args=(TEST_CONFIG.mlat_host, TEST_CONFIG.mlat_port,
+                           transit.process_line, None)),
             ],
         )
         for thread in threads:
