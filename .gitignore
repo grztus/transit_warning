@@ -1,9 +1,10 @@
 # Prywatna konfiguracja lokalna
 .env
 
-# Logi i nagrania ADS-B / MLAT
+# Logi i nagrania ADS-B / MLAT / environment
 *.log
 tests/data/*
+recordings/
 
 # Python
 __pycache__/
