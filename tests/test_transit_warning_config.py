@@ -72,8 +72,7 @@ class ApplicationConfigurationTests(unittest.TestCase):
                 patch.object(transit, "get_metar_press") as get_pressure, \
                 patch.object(transit.threading, "Thread", thread_factory), \
                 patch.object(transit.time, "sleep", side_effect=KeyboardInterrupt):
-            with self.assertRaises(KeyboardInterrupt):
-                transit.main()
+            transit.main()
 
         initialize_daily.assert_called_once_with()
         get_pressure.assert_called_once_with()
@@ -91,6 +90,7 @@ class ApplicationConfigurationTests(unittest.TestCase):
         )
         for thread in threads:
             thread.start.assert_called_once_with()
+            thread.join.assert_called_once_with(timeout=2.0)
         self.assertEqual(
             transit.port_status,
             {TEST_CONFIG.adsb_port: False, TEST_CONFIG.mlat_port: False},

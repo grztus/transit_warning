@@ -133,6 +133,11 @@ daily_environment_recorder = None
 adsb_timestamp_validator = None
 session_recorder = None
 session_recording_requested = False
+stop_event = threading.Event()
+active_sockets = {}
+active_sockets_lock = threading.Lock()
+shutdown_lock = threading.Lock()
+shutdown_complete = False
 
 # Global settings / Globalne ustawienia
 MAX_AGE_SECONDS = 60  # Maksymalny czas życia wpisu po ostatnim odbiorze sygnału (w sekundach) / Maximum entry lifetime after the last received signal (in seconds)
@@ -698,16 +703,70 @@ def clean_transit_dict():
     for icao in to_delete:
         del plane_dict[icao]
 
+# Function to manage sockets blocked in readline() during controlled shutdown.
+def _register_active_socket(port, sock):
+    with active_sockets_lock:
+        if stop_event.is_set():
+            return False
+        active_sockets[port] = sock
+        return True
+
+
+def _unregister_active_socket(port, sock):
+    with active_sockets_lock:
+        if active_sockets.get(port) is sock:
+            del active_sockets[port]
+
+
+def close_active_sockets():
+    with active_sockets_lock:
+        sockets = list(active_sockets.values())
+        active_sockets.clear()
+    for sock in sockets:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+
+def shutdown_runtime(threads, recorder):
+    global shutdown_complete
+    with shutdown_lock:
+        if shutdown_complete:
+            return
+        shutdown_complete = True
+        stop_event.set()
+    close_active_sockets()
+    for thread in threads:
+        try:
+            thread.join(timeout=2.0)
+        except Exception:
+            pass
+    if recorder is not None:
+        try:
+            recorder.close(clock.now_utc())
+        except Exception as error:
+            print("Session recorder shutdown failed: {}".format(error))
+
+
 # Funkcja do czytania danych z portu / Function to read data from port
 def read_from_port(host, port, process_line, session_recorder=None):
     global port_status
-    while True:
+    while not stop_event.is_set():
+        sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            if not _register_active_socket(port, sock):
+                sock.close()
+                break
             sock.connect((host, port))
             port_status[port] = True
             file = sock.makefile()
-            while True:
+            while not stop_event.is_set():
                 line = file.readline()
                 if not line:
                     break
@@ -718,9 +777,20 @@ def read_from_port(host, port, process_line, session_recorder=None):
                         print("Session recorder error on port {}: {}".format(port, error))
                 process_line(line.strip(), port)
         except Exception as e:
+            if stop_event.is_set():
+                break
             print("Error on port {}: {}".format(port, e))
             port_status[port] = False
-            time.sleep(5)  # Retry after a short delay
+            if stop_event.wait(5):
+                break
+        finally:
+            if sock is not None:
+                _unregister_active_socket(port, sock)
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+    port_status[port] = False
 
 
 # Funkcja do przetwarzania linii danych / Function to process a line of data
@@ -968,11 +1038,15 @@ def process_line(line, port):
 
 def main():
     global daily_environment_recorder, session_recorder, session_recording_requested
+    global shutdown_complete
     try:
         configuration = load_installation_config()
     except ConfigurationError as error:
         raise SystemExit(str(error))
     apply_installation_config(configuration)
+    stop_event.clear()
+    with shutdown_lock:
+        shutdown_complete = False
     session_recorder = None
     session_recording_requested = runtime_args.record
     try:
@@ -998,26 +1072,32 @@ def main():
             session_recorder = None
 
     # Uruchomienie wątków do czytania z portów / Start threads to read from ports
-    threading.Thread(
+    threads = [threading.Thread(
         target=read_from_port,
         args=(adsb_host, adsb_port, process_line, session_recorder),
-    ).start()
-    threading.Thread(
+    ), threading.Thread(
         target=read_from_port,
         args=(mlat_host, mlat_port, process_line, session_recorder),
-    ).start()
+    )]
+    for thread in threads:
+        thread.start()
 
     # Pętla główna / Main loop
-    while True:
-        time.sleep(1)
-        if daily_environment_recorder is not None:
-            daily_environment_recorder.rotate_if_needed(clock.now_utc())
-        if session_recorder is not None:
-            session_recorder.flush_if_due()
-        if replay_time_initialized:
-            sun_alt, sun_az, moon_alt, moon_az = tabela()
-            clean_dict()
-            clean_transit_dict()
+    try:
+        while True:
+            time.sleep(1)
+            if daily_environment_recorder is not None:
+                daily_environment_recorder.rotate_if_needed(clock.now_utc())
+            if session_recorder is not None:
+                session_recorder.flush_if_due()
+            if replay_time_initialized:
+                sun_alt, sun_az, moon_alt, moon_az = tabela()
+                clean_dict()
+                clean_transit_dict()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        shutdown_runtime(threads, session_recorder)
 
 
 if __name__ == "__main__":
