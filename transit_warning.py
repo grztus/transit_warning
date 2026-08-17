@@ -70,6 +70,7 @@ import ephem
 import re
 import socket
 import threading
+from dataclasses import dataclass
 from functools import wraps
 from math import atan2, sin, cos, acos, radians, degrees, atan, asin, sqrt, isnan
 import pytz  # Import pytz for timezone handling
@@ -169,8 +170,29 @@ earth_R = 6371  # Promień Ziemi w km / Radius of the earth in km
 
 # Inicjalizacja pustych słowników i kolejek / Initialize empty dictionaries and deques
 plane_dict = {}
+altitude_sources = {}
 plane_dict_lock = threading.RLock()
 plane_deque = deque()
+
+
+@dataclass(frozen=True)
+class AltitudeMeasurement:
+    source: str
+    altitude_kind: str
+    altitude_baro_ft: int
+    altitude_corrected_m: float
+    timestamp_utc: datetime.datetime
+    message_type: str
+
+
+@dataclass(frozen=True)
+class AltitudeDiagnostics:
+    current_geometry_altitude_m: float | str | None
+    latest_adsb: AltitudeMeasurement | None
+    latest_mlat: AltitudeMeasurement | None
+    delta_adsb_mlat_ft: int | None
+    adsb_age_seconds: float | None
+    mlat_age_seconds: float | None
 
 
 def synchronized_plane_dict(function):
@@ -244,6 +266,51 @@ def apply_installation_config(configuration: InstallationConfig):
 def correct_pressure_altitude(pressure_altitude_ft, qnh_hpa):
     """Apply the existing linear QNH approximation to pressure altitude."""
     return pressure_altitude_ft + (qnh_hpa - 1013.25) * 26
+
+
+def _record_altitude_measurement(
+        icao, port, altitude_baro_ft, altitude_corrected_m,
+        timestamp_utc, message_type):
+    if port == adsb_port:
+        source = "adsb"
+    elif port == mlat_port:
+        source = "mlat"
+    else:
+        return
+    altitude_sources.setdefault(icao, {})[source] = AltitudeMeasurement(
+        source=source,
+        altitude_kind="barometric",
+        altitude_baro_ft=altitude_baro_ft,
+        altitude_corrected_m=altitude_corrected_m,
+        timestamp_utc=timestamp_utc,
+        message_type="MSG,{}".format(message_type),
+    )
+
+
+def get_altitude_diagnostics(icao, now_utc=None):
+    """Return current geometry altitude and latest per-source measurements."""
+    with plane_dict_lock:
+        measurements = altitude_sources.get(icao, {})
+        adsb = measurements.get("adsb")
+        mlat = measurements.get("mlat")
+        current = plane_dict.get(icao, [None, None, None, None, None])[4]
+        now = (
+            clock.now_utc() if now_utc is None else now_utc
+        ) if adsb is not None or mlat is not None else None
+        delta = (
+            adsb.altitude_baro_ft - mlat.altitude_baro_ft
+            if adsb is not None and mlat is not None else None
+        )
+        return AltitudeDiagnostics(
+            current_geometry_altitude_m=current,
+            latest_adsb=adsb,
+            latest_mlat=mlat,
+            delta_adsb_mlat_ft=delta,
+            adsb_age_seconds=(now - adsb.timestamp_utc).total_seconds()
+            if adsb is not None else None,
+            mlat_age_seconds=(now - mlat.timestamp_utc).total_seconds()
+            if mlat is not None else None,
+        )
 
 last_update_time = clock.now_utc() if clock.is_ready() else None  # Inicjalizacja zmiennej na początku skryptu / Initialize variable at the beginning of the script
 
@@ -360,6 +427,7 @@ def clean_dict():
     to_delete = [icao for icao, entry in plane_dict.items() if (current_time - entry[0]).total_seconds() > MAX_AGE_SECONDS]
     for icao in to_delete:
         del plane_dict[icao]
+        altitude_sources.pop(icao, None)
 
 # Funkcja do obliczania odległości między punktami (haversine) / Function to calculate distance between points (haversine)
 def haversine(origin, destination):
@@ -718,6 +786,7 @@ def clean_transit_dict():
     to_delete = [icao for icao, entry in plane_dict.items() if len(entry) > 31 and entry[31] and isinstance(entry[30], datetime.datetime) and (current_time - entry[30]).total_seconds() > 120]
     for icao in to_delete:
         del plane_dict[icao]
+        altitude_sources.pop(icao, None)
 
 # Function to manage sockets blocked in readline() during controlled shutdown.
 def _register_active_socket(port, sock):
@@ -892,11 +961,16 @@ def process_line(line, port):
         flight = parts[10].strip()
         elevation = parts[11].strip()
         if is_int_try(elevation):
-            elevation = int(elevation)
+            altitude_baro_ft = int(elevation)
             pressure = get_metar_press()
-            elevation = correct_pressure_altitude(elevation, pressure)
+            corrected_altitude_ft = correct_pressure_altitude(
+                altitude_baro_ft, pressure)
+            corrected_altitude_m = float(corrected_altitude_ft * 0.3048)
+            _record_altitude_measurement(
+                icao, port, altitude_baro_ft, corrected_altitude_m,
+                date_time_utc, mtype)
             if metric_units:
-                elevation = float((elevation * 0.3048))
+                elevation = corrected_altitude_m
             else:
                 elevation = ""
         if icao not in plane_dict:
@@ -928,11 +1002,16 @@ def process_line(line, port):
         elevation = parts[11].strip()
         track = parts[12].strip() if len(parts) > 12 else ''
         if is_int_try(elevation):
-            elevation = int(elevation)
+            altitude_baro_ft = int(elevation)
             pressure = get_metar_press()
-            elevation = correct_pressure_altitude(elevation, pressure)
+            corrected_altitude_ft = correct_pressure_altitude(
+                altitude_baro_ft, pressure)
+            corrected_altitude_m = float(corrected_altitude_ft * 0.3048)
+            _record_altitude_measurement(
+                icao, port, altitude_baro_ft, corrected_altitude_m,
+                date_time_utc, mtype)
             if metric_units:
-                elevation = float((elevation * 0.3048))
+                elevation = corrected_altitude_m
             else:
                 elevation = ""
         try:
