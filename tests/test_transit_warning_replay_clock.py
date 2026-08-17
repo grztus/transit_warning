@@ -15,6 +15,7 @@ TEST_CONFIG = InstallationConfig(
     observer_lat=51.1111,
     observer_lon=21.1111,
     observer_elevation_m=111.0,
+    transition_altitude_ft=6500,
     adsb_host="127.0.0.1",
     adsb_port=30003,
     adsb_timestamp_timezone="Europe/Warsaw",
@@ -65,6 +66,23 @@ class SunMoonTableContractTests(unittest.TestCase):
         self.assertEqual(result, (31.5, 141.2, -17.4, 278.6))
         sun.compute.assert_called_once()
         moon.compute.assert_called_once()
+
+
+class PressureAltitudeCorrectionTests(unittest.TestCase):
+    def test_standard_pressure_does_not_change_altitude(self):
+        self.assertEqual(transit.correct_pressure_altitude(10000, 1013.25), 10000)
+
+    def test_lower_qnh_reduces_altitude(self):
+        self.assertLess(transit.correct_pressure_altitude(10000, 1000), 10000)
+
+    def test_higher_qnh_increases_altitude(self):
+        self.assertGreater(transit.correct_pressure_altitude(10000, 1020), 10000)
+
+    def test_decimal_qnh_is_preserved_in_linear_correction(self):
+        self.assertAlmostEqual(
+            transit.correct_pressure_altitude(10000, 1008.5),
+            10000 + (1008.5 - 1013.25) * 26,
+        )
 
 
 class ProcessLineReplayClockTests(unittest.TestCase):
@@ -179,8 +197,26 @@ class ProcessLineReplayClockTests(unittest.TestCase):
             "2024/05/18,12:00:00.000,TEST123,10000"
         )
         transit.process_line(line, 30106)
-        expected_metres = (10000 + (1013 - 1000.0) * 26) * 0.3048
+        expected_metres = (10000 + (1000.0 - 1013.25) * 26) * 0.3048
         self.assertEqual(transit.plane_dict["ABC123"][4], expected_metres)
+
+    def test_msg3_and_msg5_use_identical_correction_below_old_threshold(self):
+        transit.pressure = 1000.0
+        msg5 = (
+            "MSG,5,1,1,MSG005,1,2024/05/18,12:00:00.000,"
+            "2024/05/18,12:00:00.000,TEST123,5000"
+        )
+        msg3 = (
+            "MSG,3,1,1,MSG003,1,2024/05/18,12:00:00.000,"
+            "2024/05/18,12:00:00.000,,5000,,,51.2,21.2"
+        )
+
+        transit.process_line(msg5, 30106)
+        transit.process_line(msg3, 30106)
+
+        expected_metres = transit.correct_pressure_altitude(5000, 1000.0) * 0.3048
+        self.assertEqual(transit.plane_dict["MSG005"][4], expected_metres)
+        self.assertEqual(transit.plane_dict["MSG003"][4], expected_metres)
 
     def test_missing_environment_file_keeps_fallback(self):
         transit.configure_environment_replay(None)

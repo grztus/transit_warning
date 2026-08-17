@@ -17,6 +17,7 @@ TEST_CONFIG = InstallationConfig(
     observer_lat=51.1111,
     observer_lon=21.1111,
     observer_elevation_m=111.0,
+    transition_altitude_ft=6500,
     adsb_host="127.0.0.1",
     adsb_port=30003,
     adsb_timestamp_timezone="Europe/Warsaw",

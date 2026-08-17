@@ -24,6 +24,7 @@ class InstallationConfig:
     observer_lat: float
     observer_lon: float
     observer_elevation_m: float
+    transition_altitude_ft: int
     adsb_host: str
     adsb_port: int
     adsb_timestamp_timezone: str
@@ -67,6 +68,21 @@ def _port(values, name, default, errors):
         return None
     if not 1 <= value <= 65535:
         errors.append("{} must be in the range 1..65535".format(name))
+        return None
+    return value
+
+
+def _positive_integer(values, name, errors):
+    raw_value = _required(values, name, errors)
+    if raw_value is None:
+        return None
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        errors.append("{} must be an integer".format(name))
+        return None
+    if value <= 0:
+        errors.append("{} must be a positive integer".format(name))
         return None
     return value
 
@@ -121,6 +137,8 @@ def load_installation_config(
     observer_lat = _finite_float(values, "OBSERVER_LAT", errors, -90, 90)
     observer_lon = _finite_float(values, "OBSERVER_LON", errors, -180, 180)
     observer_elevation_m = _finite_float(values, "OBSERVER_ELEVATION_M", errors)
+    transition_altitude_ft = _positive_integer(
+        values, "TRANSITION_ALTITUDE_FT", errors)
     adsb_host = _host(values, "ADSB_HOST", "127.0.0.1", errors)
     adsb_port = _port(values, "ADSB_PORT", 30003, errors)
     adsb_timestamp_timezone = _iana_timezone(values, errors)
@@ -140,6 +158,7 @@ def load_installation_config(
         observer_lat=observer_lat,
         observer_lon=observer_lon,
         observer_elevation_m=observer_elevation_m,
+        transition_altitude_ft=transition_altitude_ft,
         adsb_host=adsb_host,
         adsb_port=adsb_port,
         adsb_timestamp_timezone=adsb_timestamp_timezone,

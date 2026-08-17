@@ -16,6 +16,7 @@ TEST_CONFIG = InstallationConfig(
     observer_lat=50.25,
     observer_lon=19.75,
     observer_elevation_m=245.5,
+    transition_altitude_ft=6500,
     adsb_host="adsb.example",
     adsb_port=31003,
     adsb_timestamp_timezone="Europe/Warsaw",
@@ -38,6 +39,8 @@ class ApplicationConfigurationTests(unittest.TestCase):
         self.assertEqual(transit.my_lat, TEST_CONFIG.observer_lat)
         self.assertEqual(transit.my_lon, TEST_CONFIG.observer_lon)
         self.assertEqual(transit.my_elevation_const, TEST_CONFIG.observer_elevation_m)
+        self.assertEqual(
+            transit.transition_altitude_ft, TEST_CONFIG.transition_altitude_ft)
         self.assertEqual(transit.metar_station, TEST_CONFIG.metar_station)
         self.assertEqual(
             transit.adsb_timestamp_timezone, TEST_CONFIG.adsb_timestamp_timezone)

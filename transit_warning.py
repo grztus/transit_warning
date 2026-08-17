@@ -203,6 +203,7 @@ transit_separation_notignored = 15
 my_lat = None
 my_lon = None
 my_elevation_const = None
+transition_altitude_ft = None
 near_airport_elevation = 100  # Wysokość najbliższego lotniska / Nearest airport elevation
 
 # Ustawienia efemeryd / Ephemeris settings
@@ -216,12 +217,14 @@ mlat_port = None
 
 
 def apply_installation_config(configuration: InstallationConfig):
-    global my_lat, my_lon, my_elevation_const, metar_station, gatech
+    global my_lat, my_lon, my_elevation_const, transition_altitude_ft
+    global metar_station, gatech
     global adsb_host, adsb_port, adsb_timestamp_timezone, adsb_timestamp_validator
     global mlat_host, mlat_port, port_status
     my_lat = configuration.observer_lat
     my_lon = configuration.observer_lon
     my_elevation_const = configuration.observer_elevation_m
+    transition_altitude_ft = configuration.transition_altitude_ft
     metar_station = configuration.metar_station
     adsb_host = configuration.adsb_host
     adsb_port = configuration.adsb_port
@@ -236,6 +239,11 @@ def apply_installation_config(configuration: InstallationConfig):
     gatech.lat, gatech.lon = str(my_lat), str(my_lon)
     gatech.elevation = my_elevation_const
     port_status = {adsb_port: False, mlat_port: False}
+
+
+def correct_pressure_altitude(pressure_altitude_ft, qnh_hpa):
+    """Apply the existing linear QNH approximation to pressure altitude."""
+    return pressure_altitude_ft + (qnh_hpa - 1013.25) * 26
 
 last_update_time = clock.now_utc() if clock.is_ready() else None  # Inicjalizacja zmiennej na początku skryptu / Initialize variable at the beginning of the script
 
@@ -885,12 +893,8 @@ def process_line(line, port):
         elevation = parts[11].strip()
         if is_int_try(elevation):
             elevation = int(elevation)
-            if elevation > 6500:
-                pressure = get_metar_press()
-                elevation += (1013 - pressure) * 26
-                my_elevation = my_elevation_const
-            else:
-                my_elevation = near_airport_elevation
+            pressure = get_metar_press()
+            elevation = correct_pressure_altitude(elevation, pressure)
             if metric_units:
                 elevation = float((elevation * 0.3048))
             else:
@@ -925,12 +929,8 @@ def process_line(line, port):
         track = parts[12].strip() if len(parts) > 12 else ''
         if is_int_try(elevation):
             elevation = int(elevation)
-            if elevation > 6500:
-                pressure = get_metar_press()
-                elevation += (1013 - pressure) * 26
-                my_elevation = my_elevation_const
-            else:
-                my_elevation = near_airport_elevation
+            pressure = get_metar_press()
+            elevation = correct_pressure_altitude(elevation, pressure)
             if metric_units:
                 elevation = float((elevation * 0.3048))
             else:

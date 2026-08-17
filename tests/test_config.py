@@ -11,6 +11,7 @@ REQUIRED = {
     "OBSERVER_LAT": "50.25",
     "OBSERVER_LON": "19.75",
     "OBSERVER_ELEVATION_M": "245.5",
+    "TRANSITION_ALTITUDE_FT": "6500",
     "ADSB_TIMESTAMP_TIMEZONE": "Europe/Warsaw",
     "METAR_STATION": "epra",
 }
@@ -39,6 +40,7 @@ class InstallationConfigTests(unittest.TestCase):
                 observer_lat=50.25,
                 observer_lon=19.75,
                 observer_elevation_m=245.5,
+                transition_altitude_ft=6500,
                 adsb_host="adsb.example",
                 adsb_port=31003,
                 adsb_timestamp_timezone="Europe/Warsaw",
@@ -63,6 +65,7 @@ class InstallationConfigTests(unittest.TestCase):
                 "OBSERVER_LAT=10\n"
                 "OBSERVER_LON=20\n"
                 "OBSERVER_ELEVATION_M=30\n"
+                "TRANSITION_ALTITUDE_FT=6500\n"
                 "ADSB_HOST=from-file\n"
                 "ADSB_TIMESTAMP_TIMEZONE=Europe/Warsaw\n"
                 "METAR_STATION=EPWA\n",
@@ -96,7 +99,8 @@ class InstallationConfigTests(unittest.TestCase):
 
         message = str(raised.exception)
         for name in ("OBSERVER_LAT", "OBSERVER_LON", "OBSERVER_ELEVATION_M",
-                     "ADSB_TIMESTAMP_TIMEZONE", "METAR_STATION"):
+                     "TRANSITION_ALTITUDE_FT", "ADSB_TIMESTAMP_TIMEZONE",
+                     "METAR_STATION"):
             self.assertIn("{} is required".format(name), message)
 
     def test_rejects_invalid_coordinates_and_elevation(self):
@@ -119,6 +123,13 @@ class InstallationConfigTests(unittest.TestCase):
                 with self.subTest(name=name, value=value):
                     with self.assertRaises(ConfigurationError):
                         self.load({**REQUIRED, name: value})
+
+    def test_validates_transition_altitude(self):
+        self.assertEqual(self.load(REQUIRED).transition_altitude_ft, 6500)
+        for value in ("not-an-integer", "1.5", "0", "-1"):
+            with self.subTest(value=value):
+                with self.assertRaises(ConfigurationError):
+                    self.load({**REQUIRED, "TRANSITION_ALTITUDE_FT": value})
 
     def test_rejects_empty_hosts(self):
         for name in ("ADSB_HOST", "MLAT_HOST"):

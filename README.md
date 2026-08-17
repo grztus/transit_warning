@@ -40,6 +40,8 @@ Edit `.env` and provide values for:
 - `OBSERVER_LAT` — observer latitude in decimal degrees
 - `OBSERVER_LON` — observer longitude in decimal degrees
 - `OBSERVER_ELEVATION_M` — observer/antenna elevation in metres above sea level
+- `TRANSITION_ALTITUDE_FT` — local transition altitude as a positive whole
+  number of feet (loaded for future operational altitude handling)
 - `ADSB_HOST` — IP address or hostname of the ADS-B source
 - `ADSB_TIMESTAMP_TIMEZONE` — IANA timezone used by the ADS-B source for naive
   SBS timestamps (for example `Europe/Warsaw`)
