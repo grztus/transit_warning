@@ -1,15 +1,16 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from environment import (
     EnvironmentEvent,
     EnvironmentFormatError,
     EnvironmentRecorder,
     EnvironmentRecordError,
+    DailyEnvironmentRecorder,
     EnvironmentReplay,
     iter_environment_events,
 )
@@ -142,6 +143,224 @@ class EnvironmentRecorderTests(unittest.TestCase):
             self.assertEqual(events[0].value_hpa, 1013.0)
             self.assertEqual(events[0].source, "fallback")
             self.assertIsNone(events[0].obs_time)
+
+
+class DailyEnvironmentRecorderTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.base_dir = Path(self.temp.name) / "environment"
+        self.now = datetime(2026, 8, 17, 12, 0, tzinfo=timezone.utc)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def event(self, timestamp, value, source="awc", station="EPRA", obs_time=None):
+        return EnvironmentEvent(
+            1,
+            datetime.fromisoformat(timestamp.replace("Z", "+00:00")),
+            "qnh",
+            value,
+            source,
+            station,
+            datetime.fromisoformat(obs_time.replace("Z", "+00:00")) if obs_time else None,
+        )
+
+    def path(self, day):
+        return self.base_dir / "environment_{}.jsonl".format(day)
+
+    def test_creates_file_for_current_utc_day(self):
+        recorder = DailyEnvironmentRecorder(self.now, self.base_dir, "EPRA")
+        self.assertEqual(recorder.status, recorder.RECORDING)
+        self.assertTrue(self.path("20260817").is_file())
+        self.assertEqual(
+            recorder.next_midnight_utc,
+            datetime(2026, 8, 18, tzinfo=timezone.utc),
+        )
+        recorder.close()
+
+    def test_records_first_qnh_and_deduplicates_same_decimal_value(self):
+        recorder = DailyEnvironmentRecorder(self.now, self.base_dir)
+        self.assertTrue(recorder.record_qnh(self.event("2026-08-17T12:01:00Z", 1004.25)))
+        self.assertFalse(recorder.record_qnh(self.event(
+            "2026-08-17T12:02:00Z", 1004.25,
+            obs_time="2026-08-17T12:00:00Z",
+        )))
+        recorder.close()
+        events = list(iter_environment_events(self.path("20260817")))
+        self.assertEqual([event.value_hpa for event in events], [1004.25])
+
+    def test_does_not_rotate_before_midnight(self):
+        recorder = DailyEnvironmentRecorder(self.now, self.base_dir)
+        before = datetime(2026, 8, 17, 23, 59, 59, 999000, tzinfo=timezone.utc)
+        self.assertFalse(recorder.rotate_if_needed(before))
+        self.assertFalse(self.path("20260818").exists())
+        recorder.close()
+
+    def test_rotates_exactly_at_midnight_with_carryover_metadata(self):
+        recorder = DailyEnvironmentRecorder(self.now, self.base_dir)
+        recorder.record_qnh(self.event(
+            "2026-08-17T23:45:00Z", 1004.0, "awc", "EPRA",
+            "2026-08-17T23:30:00Z",
+        ))
+        midnight = datetime(2026, 8, 18, tzinfo=timezone.utc)
+        self.assertTrue(recorder.rotate_if_needed(midnight))
+        carryover = list(iter_environment_events(self.path("20260818")))[0]
+        self.assertEqual(carryover.time, midnight)
+        self.assertEqual(carryover.value_hpa, 1004.0)
+        self.assertEqual(carryover.source, "carryover")
+        self.assertEqual(carryover.station, "EPRA")
+        self.assertEqual(
+            carryover.obs_time,
+            datetime(2026, 8, 17, 23, 30, tzinfo=timezone.utc),
+        )
+        recorder.close()
+
+    def test_carryover_precedes_awc_at_the_same_midnight(self):
+        recorder = DailyEnvironmentRecorder(self.now, self.base_dir)
+        recorder.record_qnh(self.event("2026-08-17T23:45:00Z", 1004.0))
+        recorder.record_qnh(self.event("2026-08-18T00:00:00Z", 1005.5))
+        recorder.close()
+        events = list(iter_environment_events(self.path("20260818")))
+        self.assertEqual([event.source for event in events], ["carryover", "awc"])
+        self.assertEqual([event.value_hpa for event in events], [1004.0, 1005.5])
+        self.assertEqual(events[0].time, events[1].time)
+
+    def test_rotation_without_known_state_writes_fallback(self):
+        recorder = DailyEnvironmentRecorder(self.now, self.base_dir, "EPRA")
+        recorder.rotate_if_needed(datetime(2026, 8, 18, tzinfo=timezone.utc))
+        event = list(iter_environment_events(self.path("20260818")))[0]
+        self.assertEqual(event.value_hpa, 1013.0)
+        self.assertEqual(event.source, "fallback")
+        self.assertEqual(event.station, "EPRA")
+        recorder.close()
+
+    def test_restart_recovers_last_state_without_appending_fallback(self):
+        first = DailyEnvironmentRecorder(self.now, self.base_dir)
+        expected = self.event(
+            "2026-08-17T12:01:00Z", 1004.5, "awc", "EPRA",
+            "2026-08-17T12:00:00Z",
+        )
+        first.record_qnh(expected)
+        first.close()
+        original = self.path("20260817").read_text(encoding="utf-8")
+
+        restarted = DailyEnvironmentRecorder(
+            datetime(2026, 8, 17, 15, 0, tzinfo=timezone.utc), self.base_dir
+        )
+        self.assertEqual(restarted.last_qnh, 1004.5)
+        self.assertEqual(restarted.last_event.station, "EPRA")
+        self.assertEqual(restarted.last_event.obs_time, expected.obs_time)
+        self.assertEqual(self.path("20260817").read_text(encoding="utf-8"), original)
+        restarted.close()
+
+    def test_jump_over_multiple_days_opens_only_current_day(self):
+        recorder = DailyEnvironmentRecorder(self.now, self.base_dir)
+        recorder.record_qnh(self.event("2026-08-17T12:01:00Z", 1004.0))
+        recorder.rotate_if_needed(datetime(2026, 8, 20, 8, 0, tzinfo=timezone.utc))
+        self.assertFalse(self.path("20260818").exists())
+        self.assertFalse(self.path("20260819").exists())
+        self.assertTrue(self.path("20260820").exists())
+        event = list(iter_environment_events(self.path("20260820")))[0]
+        self.assertEqual(event.time, datetime(2026, 8, 20, tzinfo=timezone.utc))
+        self.assertEqual(event.value_hpa, 1004.0)
+        self.assertEqual(
+            recorder.next_midnight_utc,
+            datetime(2026, 8, 21, tzinfo=timezone.utc),
+        )
+        recorder.close()
+
+    def test_initialization_error_fails_open_and_reports_once(self):
+        errors = Mock()
+        with patch.object(Path, "mkdir", side_effect=PermissionError("denied")):
+            recorder = DailyEnvironmentRecorder(
+                self.now, self.base_dir, error_handler=errors
+            )
+        self.assertEqual(recorder.status, recorder.FAILED)
+        errors.assert_called_once()
+        self.assertFalse(recorder.record_qnh(self.event("2026-08-17T12:01:00Z", 1004.0)))
+        errors.assert_called_once()
+
+    def test_file_open_error_sets_failed_without_raising(self):
+        self.base_dir.mkdir(parents=True)
+        with patch.object(Path, "open", side_effect=PermissionError("open denied")):
+            recorder = DailyEnvironmentRecorder(self.now, self.base_dir)
+        self.assertEqual(recorder.status, recorder.FAILED)
+        self.assertIn("open denied", recorder.error_message)
+
+    def test_write_error_fails_open_and_later_calls_are_noop(self):
+        errors = Mock()
+        recorder = DailyEnvironmentRecorder(self.now, self.base_dir, error_handler=errors)
+        recorder._file.close()
+        failed_file = Mock()
+        failed_file.write.side_effect = OSError("disk full")
+        recorder._file = failed_file
+        self.assertFalse(recorder.record_qnh(self.event("2026-08-17T12:01:00Z", 1004.0)))
+        self.assertEqual(recorder.status, recorder.FAILED)
+        self.assertFalse(recorder.record_qnh(self.event("2026-08-17T12:02:00Z", 1005.0)))
+        failed_file.write.assert_called_once()
+        errors.assert_called_once()
+
+    def test_flush_error_sets_failed(self):
+        recorder = DailyEnvironmentRecorder(self.now, self.base_dir)
+        recorder._file.close()
+        recorder._file = Mock()
+        recorder._file.flush.side_effect = OSError("flush failed")
+        self.assertFalse(recorder.record_qnh(self.event("2026-08-17T12:01:00Z", 1004.0)))
+        self.assertEqual(recorder.status, recorder.FAILED)
+
+    def test_rotation_error_sets_failed_and_is_not_retried(self):
+        recorder = DailyEnvironmentRecorder(self.now, self.base_dir)
+        with patch.object(recorder, "_open_day", side_effect=OSError("open failed")) as open_day:
+            self.assertFalse(recorder.rotate_if_needed(
+                datetime(2026, 8, 18, tzinfo=timezone.utc)
+            ))
+            self.assertFalse(recorder.rotate_if_needed(
+                datetime(2026, 8, 19, tzinfo=timezone.utc)
+            ))
+        self.assertEqual(recorder.status, recorder.FAILED)
+        open_day.assert_called_once()
+
+    def test_error_can_be_consumed_only_once_without_handler(self):
+        with patch.object(Path, "mkdir", side_effect=PermissionError("denied")):
+            recorder = DailyEnvironmentRecorder(self.now, self.base_dir)
+        self.assertIn("denied", recorder.consume_error())
+        self.assertIsNone(recorder.consume_error())
+
+    def test_restart_scans_existing_history_without_loading_it_as_a_list(self):
+        path = self.path("20260817")
+        path.parent.mkdir(parents=True)
+        with path.open("w", encoding="utf-8") as target:
+            for second in range(1000):
+                event = self.event(
+                    "2026-08-17T12:{:02d}:{:02d}Z".format(
+                        (second // 60) % 60, second % 60
+                    ),
+                    1000.0 + (second % 2),
+                )
+                target.write(json.dumps({
+                    "version": 1,
+                    "time": event.time.isoformat().replace("+00:00", "Z"),
+                    "type": "qnh",
+                    "value_hpa": event.value_hpa,
+                    "source": "awc",
+                    "station": "EPRA",
+                }) + "\n")
+        recorder = DailyEnvironmentRecorder(self.now + timedelta(hours=1), self.base_dir)
+        self.assertEqual(recorder.last_qnh, 1001.0)
+        recorder.close()
+
+
+class EnvironmentRecorderAdditionalTests(unittest.TestCase):
+    def event(self, timestamp, value=1013.0, source="fallback", obs_time=None):
+        return EnvironmentEvent(
+            1,
+            datetime.fromisoformat(timestamp.replace("Z", "+00:00")),
+            "qnh",
+            value,
+            source,
+            "EPRA",
+            datetime.fromisoformat(obs_time.replace("Z", "+00:00")) if obs_time else None,
+        )
 
     def test_records_decimal_awc_change_and_skips_same_value(self):
         with tempfile.TemporaryDirectory() as directory:

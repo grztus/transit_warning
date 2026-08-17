@@ -1,11 +1,12 @@
 """Validated, streaming environmental events for deterministic replay."""
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 import json
 import math
 from pathlib import Path
 import re
+import threading
 from typing import Iterator
 
 
@@ -186,3 +187,173 @@ class EnvironmentRecorder:
 
     def close(self):
         self._file.close()
+
+
+class DailyEnvironmentRecorder:
+    """Fail-open, UTC-day-rotated recorder for environmental state."""
+
+    RECORDING = "RECORDING"
+    FAILED = "FAILED"
+
+    def __init__(
+        self,
+        now_utc,
+        base_dir=Path("recordings/environment"),
+        fallback_station=None,
+        error_handler=None,
+    ):
+        self.base_dir = Path(base_dir)
+        self.fallback_station = fallback_station
+        self.error_handler = error_handler
+        self.status = self.RECORDING
+        self.error_message = None
+        self._error_reported = False
+        self._file = None
+        self._lock = threading.RLock()
+        self._active_date = None
+        self._last_event = None
+        self.next_midnight_utc = None
+        try:
+            now_utc = self._require_utc(now_utc)
+            self.base_dir.mkdir(parents=True, exist_ok=True)
+            self._open_day(now_utc.date())
+            self.next_midnight_utc = self._midnight_after(now_utc.date())
+        except Exception as error:
+            self._fail("initialization", error)
+
+    @property
+    def last_event(self):
+        """Return the last persisted QNH event, if one is known."""
+        with self._lock:
+            return self._last_event
+
+    @property
+    def last_qnh(self):
+        with self._lock:
+            return self._last_event.value_hpa if self._last_event is not None else None
+
+    def consume_error(self):
+        """Return the failure message once for polling integrations."""
+        with self._lock:
+            if self.error_message is None or self._error_reported:
+                return None
+            self._error_reported = True
+            return self.error_message
+
+    @staticmethod
+    def _require_utc(value):
+        if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("time must be a timezone-aware UTC datetime")
+        if value.utcoffset() != timedelta(0):
+            raise ValueError("time must use UTC")
+        return value.astimezone(timezone.utc)
+
+    @staticmethod
+    def _midnight_after(day):
+        return datetime.combine(day + timedelta(days=1), time.min, tzinfo=timezone.utc)
+
+    def _path_for(self, day):
+        return self.base_dir / "environment_{}.jsonl".format(day.strftime("%Y%m%d"))
+
+    def _open_day(self, day):
+        path = self._path_for(day)
+        last_event = None
+        if path.exists():
+            for last_event in iter_environment_events(path):
+                pass
+        self._file = path.open("a", encoding="utf-8", newline="\n")
+        self._active_date = day
+        self._last_event = last_event
+
+    def _write_event(self, event):
+        validated = parse_environment_event(_event_record(event))
+        if self._last_event is not None and validated.time < self._last_event.time:
+            raise EnvironmentRecordError(
+                "event time {} is earlier than the last event {}".format(
+                    validated.time.isoformat(), self._last_event.time.isoformat()
+                )
+            )
+        self._file.write(json.dumps(_event_record(validated), separators=(",", ":")) + "\n")
+        self._file.flush()
+        self._last_event = validated
+
+    def _fail(self, operation, error):
+        if self.status == self.FAILED:
+            return
+        self.status = self.FAILED
+        self.error_message = "Environment recorder {} failed: {}".format(operation, error)
+        try:
+            if self._file is not None:
+                self._file.close()
+        except Exception:
+            pass
+        self._file = None
+        if self.error_handler is not None and not self._error_reported:
+            self._error_reported = True
+            try:
+                self.error_handler(self.error_message)
+            except Exception:
+                pass
+
+    def rotate_if_needed(self, now_utc):
+        with self._lock:
+            if self.status == self.FAILED:
+                return False
+            try:
+                if now_utc < self.next_midnight_utc:
+                    return False
+                now_utc = self._require_utc(now_utc)
+                previous_event = self._last_event
+                target_day = now_utc.date()
+                target_midnight = datetime.combine(target_day, time.min, tzinfo=timezone.utc)
+                self._file.close()
+                self._file = None
+                self._open_day(target_day)
+                if self._last_event is None:
+                    if previous_event is None:
+                        carryover = EnvironmentEvent(
+                            1, target_midnight, "qnh", 1013.0, "fallback",
+                            self.fallback_station,
+                        )
+                    else:
+                        carryover = EnvironmentEvent(
+                            1, target_midnight, "qnh", previous_event.value_hpa, "carryover",
+                            previous_event.station, previous_event.obs_time,
+                        )
+                    self._write_event(carryover)
+                self.next_midnight_utc = self._midnight_after(target_day)
+                return True
+            except Exception as error:
+                self._fail("rotation", error)
+                return False
+
+    def record_qnh(self, event):
+        with self._lock:
+            if self.status == self.FAILED:
+                return False
+            try:
+                if event.type != "qnh":
+                    raise EnvironmentFormatError('type must be "qnh"')
+                event_time = self._require_utc(event.time)
+                self.rotate_if_needed(event_time)
+                if self.status == self.FAILED:
+                    return False
+                if self._last_event is not None and event.value_hpa == self._last_event.value_hpa:
+                    return False
+                self._write_event(event)
+                return True
+            except Exception as error:
+                self._fail("write", error)
+                return False
+
+    def close(self):
+        with self._lock:
+            if self._file is None:
+                return
+            try:
+                self._file.flush()
+                self._file.close()
+            except Exception as error:
+                self._fail("close", error)
+            finally:
+                self._file = None
