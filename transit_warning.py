@@ -74,7 +74,14 @@ from functools import wraps
 from math import atan2, sin, cos, acos, radians, degrees, atan, asin, sqrt, isnan
 import pytz  # Import pytz for timezone handling
 from config import ConfigurationError, InstallationConfig, load_installation_config
-from environment import EnvironmentFormatError, EnvironmentReplay, iter_environment_events
+from environment import (
+    EnvironmentEvent,
+    EnvironmentFormatError,
+    EnvironmentRecorder,
+    EnvironmentRecordError,
+    EnvironmentReplay,
+    iter_environment_events,
+)
 from metar import fetch_awc_metar
 from transit_clock import ReplayClock, clock_from_args
 from transit_time import port_timestamp_to_utc
@@ -100,9 +107,14 @@ def parse_runtime_args(arguments):
     parser = argparse.ArgumentParser()
     parser.add_argument("--clock", choices=("real", "replay"), default="real")
     parser.add_argument("--environment-replay")
+    parser.add_argument("--environment-record")
     args = parser.parse_args(arguments)
+    if args.environment_replay is not None and args.environment_record is not None:
+        parser.error("--environment-replay and --environment-record cannot be used together")
     if args.environment_replay is not None and args.clock != "replay":
         parser.error("--environment-replay requires --clock replay")
+    if args.environment_record is not None and args.clock != "real":
+        parser.error("--environment-record requires --clock real")
     return args
 
 
@@ -111,6 +123,7 @@ clock = clock_from_args(["--clock", runtime_args.clock])
 replay_time_lock = threading.Lock()
 replay_time_initialized = not isinstance(clock, ReplayClock)
 environment_replay = None
+environment_recorder = None
 
 # Global settings / Globalne ustawienia
 MAX_AGE_SECONDS = 60  # Maksymalny czas życia wpisu po ostatnim odbiorze sygnału (w sekundach) / Maximum entry lifetime after the last received signal (in seconds)
@@ -213,6 +226,22 @@ def configure_environment_replay(path):
     environment_replay = (
         EnvironmentReplay(iter_environment_events(path)) if path is not None else None
     )
+
+
+def configure_environment_recording(path):
+    global environment_recorder
+    if path is None:
+        environment_recorder = None
+        return
+    initial_event = EnvironmentEvent(
+        version=1,
+        time=clock.now_utc(),
+        type="qnh",
+        value_hpa=pressure,
+        source="fallback",
+        station=metar_station,
+    )
+    environment_recorder = EnvironmentRecorder(path, initial_event)
 
 
 def apply_replay_environment(timestamp_utc):
@@ -464,6 +493,16 @@ def get_metar_press():
         return pressure
     pressure = metar_data.altim
     metar_t = aktual_metar_t
+    if environment_recorder is not None:
+        environment_recorder.record(EnvironmentEvent(
+            version=1,
+            time=aktual_metar_t,
+            type="qnh",
+            value_hpa=metar_data.altim,
+            source="awc",
+            station=metar_station,
+            obs_time=metar_data.obs_time,
+        ))
     return pressure
 
 # Funkcja do generowania tabeli wyjściowej / Function to generate output table
@@ -854,14 +893,15 @@ def process_line(line, port):
 
 def main():
     try:
-        configure_environment_replay(runtime_args.environment_replay)
-    except (OSError, EnvironmentFormatError) as error:
-        raise SystemExit("Invalid environment replay file: {}".format(error))
-    try:
         configuration = load_installation_config()
     except ConfigurationError as error:
         raise SystemExit(str(error))
     apply_installation_config(configuration)
+    try:
+        configure_environment_replay(runtime_args.environment_replay)
+        configure_environment_recording(runtime_args.environment_record)
+    except (OSError, EnvironmentFormatError, EnvironmentRecordError) as error:
+        raise SystemExit("Invalid environment file: {}".format(error))
 
     # Uruchomienie wątków do czytania z portów / Start threads to read from ports
     threading.Thread(target=read_from_port, args=(adsb_host, adsb_port, process_line)).start()

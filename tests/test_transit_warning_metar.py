@@ -1,6 +1,8 @@
 import datetime
+from pathlib import Path
+import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytz
 
@@ -27,11 +29,13 @@ class GetMetarPressTests(unittest.TestCase):
         self.original_metar_attempt_t = transit.metar_attempt_t
         self.original_pressure = transit.pressure
         self.original_metar_station = transit.metar_station
+        self.original_environment_recorder = transit.environment_recorder
         transit.clock = FakeClock()
         transit.metar_t = None
         transit.metar_attempt_t = None
         transit.pressure = 1013
         transit.metar_station = "EPRA"
+        transit.environment_recorder = None
 
     def tearDown(self):
         transit.clock = self.original_clock
@@ -39,6 +43,7 @@ class GetMetarPressTests(unittest.TestCase):
         transit.metar_attempt_t = self.original_metar_attempt_t
         transit.pressure = self.original_pressure
         transit.metar_station = self.original_metar_station
+        transit.environment_recorder = self.original_environment_recorder
 
     def observation(self, altim=1015.0, age_seconds=0, station="EPRA", raw_ob="METAR"):
         return AwcMetar(
@@ -56,6 +61,38 @@ class GetMetarPressTests(unittest.TestCase):
         self.assertEqual(transit.metar_t, transit.clock.now_utc())
         self.assertEqual(transit.metar_attempt_t, transit.clock.now_utc())
         fetch.assert_called_once_with("EPRA")
+
+    @patch.object(transit, "fetch_awc_metar")
+    def test_accepted_awc_qnh_is_recorded_with_metadata(self, fetch):
+        observation = self.observation(1011.8)
+        fetch.return_value = observation
+        recorder = Mock()
+        transit.environment_recorder = recorder
+
+        transit.get_metar_press()
+
+        event = recorder.record.call_args.args[0]
+        self.assertEqual(event.time, transit.clock.now_utc())
+        self.assertEqual(event.value_hpa, 1011.8)
+        self.assertEqual(event.source, "awc")
+        self.assertEqual(event.station, "EPRA")
+        self.assertEqual(event.obs_time, observation.obs_time)
+
+    def test_configure_recording_writes_initial_fallback_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "environment.jsonl"
+            transit.configure_environment_recording(path)
+            recorder = transit.environment_recorder
+            try:
+                from environment import iter_environment_events
+                event = next(iter_environment_events(path))
+                self.assertEqual(event.time, transit.clock.now_utc())
+                self.assertEqual(event.value_hpa, 1013.0)
+                self.assertEqual(event.source, "fallback")
+                self.assertEqual(event.station, "EPRA")
+                self.assertIsNone(event.obs_time)
+            finally:
+                recorder.close()
 
     @patch.object(transit, "fetch_awc_metar")
     def test_kjfk_uses_altim_without_parsing_raw_a_value(self, fetch):
@@ -112,9 +149,24 @@ class GetMetarPressTests(unittest.TestCase):
 
     @patch.object(transit, "fetch_awc_metar")
     def test_future_observation_is_rejected(self, fetch):
+        transit.environment_recorder = Mock()
         fetch.return_value = self.observation(age_seconds=-0.001)
         self.assertEqual(transit.get_metar_press(), 1013)
         self.assertIsNone(transit.metar_t)
+        transit.environment_recorder.record.assert_not_called()
+
+    @patch.object(transit, "fetch_awc_metar", return_value=None)
+    def test_provider_error_does_not_record_environment_event(self, fetch):
+        transit.environment_recorder = Mock()
+        self.assertEqual(transit.get_metar_press(), 1013)
+        transit.environment_recorder.record.assert_not_called()
+
+    @patch.object(transit, "fetch_awc_metar")
+    def test_stale_observation_does_not_record_environment_event(self, fetch):
+        transit.environment_recorder = Mock()
+        fetch.return_value = self.observation(age_seconds=5400.001)
+        self.assertEqual(transit.get_metar_press(), 1013)
+        transit.environment_recorder.record.assert_not_called()
 
     @patch.object(transit, "fetch_awc_metar")
     def test_retry_after_stale_observation_uses_60_second_boundary(self, fetch):
@@ -158,11 +210,13 @@ class GetMetarPressTests(unittest.TestCase):
         original_attempt_t = datetime.datetime(2026, 8, 17, 10, 1, tzinfo=pytz.utc)
         transit.metar_t = original_metar_t
         transit.metar_attempt_t = original_attempt_t
+        transit.environment_recorder = Mock()
         self.assertEqual(transit.get_metar_press(), 1007.0)
         fetch.assert_not_called()
         self.assertEqual(transit.pressure, 1007.0)
         self.assertIs(transit.metar_t, original_metar_t)
         self.assertIs(transit.metar_attempt_t, original_attempt_t)
+        transit.environment_recorder.record.assert_not_called()
 
 
 if __name__ == "__main__":

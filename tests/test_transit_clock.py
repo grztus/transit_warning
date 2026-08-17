@@ -28,6 +28,24 @@ class ClockSelectionTests(unittest.TestCase):
         )
         self.assertEqual(args.environment_replay, "environment.jsonl")
 
+    def test_environment_record_argument_is_accepted_with_real_clock(self):
+        args = transit.parse_runtime_args(["--environment-record", "environment.jsonl"])
+        self.assertEqual(args.environment_record, "environment.jsonl")
+
+    def test_environment_record_argument_rejects_replay_clock(self):
+        with self.assertRaises(SystemExit):
+            transit.parse_runtime_args(
+                ["--clock", "replay", "--environment-record", "environment.jsonl"]
+            )
+
+    def test_environment_record_and_replay_are_mutually_exclusive(self):
+        with self.assertRaises(SystemExit):
+            transit.parse_runtime_args([
+                "--clock", "replay",
+                "--environment-replay", "replay.jsonl",
+                "--environment-record", "record.jsonl",
+            ])
+
 
 class ReplayClockTests(unittest.TestCase):
     def setUp(self):
