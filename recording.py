@@ -9,12 +9,90 @@ import os
 from pathlib import Path
 import threading
 import time
+import zipfile
 
 
 class RecordingStatus(str, Enum):
     OFF = "OFF"
     RECORDING = "RECORDING"
     FAILED = "FAILED"
+
+
+def _report_archive_error(error_handler, message):
+    if error_handler is not None:
+        try:
+            error_handler(message)
+        except Exception:
+            pass
+
+
+def _verify_stream_archive(path, expected_files=None):
+    """Verify CRCs, member names and optional source sizes without loading files."""
+    expected_files = list(expected_files or ())
+    with zipfile.ZipFile(path, "r") as archive:
+        members = archive.infolist()
+        names = [member.filename for member in members]
+        if len(names) != 2 or len(set(names)) != 2:
+            return False
+        if (sum(name.startswith("adsb_") and name.endswith(".log") for name in names) != 1
+                or sum(name.startswith("mlat_") and name.endswith(".log") for name in names) != 1):
+            return False
+        if archive.testzip() is not None:
+            return False
+        if expected_files:
+            expected = {path.name: path.stat().st_size for path in expected_files}
+            actual = {member.filename: member.file_size for member in members}
+            if actual != expected:
+                return False
+    return True
+
+
+def archive_session(session_dir, delete_raw=False, error_handler=None):
+    """Create and verify ``streams.zip`` while preserving raw logs on failure."""
+    session_dir = Path(session_dir)
+    archive_path = session_dir / "streams.zip"
+    temporary_path = session_dir / "streams.zip.tmp"
+
+    try:
+        adsb_files = list(session_dir.glob("adsb_*.log"))
+        mlat_files = list(session_dir.glob("mlat_*.log"))
+        raw_files = adsb_files + mlat_files
+
+        if archive_path.exists():
+            if not _verify_stream_archive(
+                    archive_path, raw_files if len(raw_files) == 2 else None):
+                raise ValueError("existing streams.zip failed verification")
+            if delete_raw:
+                for raw_path in raw_files:
+                    raw_path.unlink()
+            return True
+
+        if len(adsb_files) != 1 or len(mlat_files) != 1:
+            raise ValueError("session must contain exactly one ADS-B and one MLAT log")
+
+        temporary_path.unlink(missing_ok=True)
+        with temporary_path.open("w+b") as output:
+            with zipfile.ZipFile(
+                    output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for raw_path in raw_files:
+                    archive.write(raw_path, arcname=raw_path.name)
+
+        if not _verify_stream_archive(temporary_path, raw_files):
+            raise ValueError("temporary streams archive failed verification")
+
+        os.replace(temporary_path, archive_path)
+        if delete_raw:
+            for raw_path in raw_files:
+                raw_path.unlink()
+        return True
+    except Exception as error:
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        _report_archive_error(
+            error_handler, "Session archive failed: {}".format(error))
+        return False
 
 
 def _utc_text(value: datetime) -> str:

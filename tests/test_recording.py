@@ -1,12 +1,19 @@
 import io
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+import zipfile
 
-from recording import RecordingStatus, SessionRecorder, StreamWriter
+from recording import (
+    RecordingStatus,
+    SessionRecorder,
+    StreamWriter,
+    archive_session,
+)
 
 
 UTC = timezone.utc
@@ -247,6 +254,84 @@ class SessionRecorderTests(unittest.TestCase):
             self.recorder.close(START)
         self.assertIsNotNone(self.recorder.manifest_error)
         self.assertEqual(self.recorder.manifest_data()["recording_status"], "failed")
+
+
+class ArchiveSessionTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.session_dir = Path(self.temp.name) / "20260817_204417"
+        self.session_dir.mkdir()
+        self.adsb_path = self.session_dir / "adsb_30003.log"
+        self.mlat_path = self.session_dir / "mlat_30106.log"
+        self.adsb_content = b"MSG,3,ADS-B\r\nMSG,4,ADS-B\n"
+        self.mlat_content = b"MSG,3,MLAT\n"
+        self.adsb_path.write_bytes(self.adsb_content)
+        self.mlat_path.write_bytes(self.mlat_content)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    @property
+    def archive_path(self):
+        return self.session_dir / "streams.zip"
+
+    @property
+    def temporary_path(self):
+        return self.session_dir / "streams.zip.tmp"
+
+    def test_creates_verified_zip_with_both_original_contents(self):
+        self.assertTrue(archive_session(self.session_dir))
+        with zipfile.ZipFile(self.archive_path) as archive:
+            self.assertEqual(
+                set(archive.namelist()), {self.adsb_path.name, self.mlat_path.name})
+            self.assertEqual(archive.read(self.adsb_path.name), self.adsb_content)
+            self.assertEqual(archive.read(self.mlat_path.name), self.mlat_content)
+            self.assertIsNone(archive.testzip())
+
+    def test_delete_raw_false_preserves_both_logs(self):
+        self.assertTrue(archive_session(self.session_dir, delete_raw=False))
+        self.assertTrue(self.adsb_path.exists())
+        self.assertTrue(self.mlat_path.exists())
+
+    def test_delete_raw_true_removes_logs_only_after_success(self):
+        with patch("recording.os.replace", wraps=os.replace) as replace:
+            self.assertTrue(archive_session(self.session_dir, delete_raw=True))
+        replace.assert_called_once()
+        self.assertTrue(self.archive_path.exists())
+        self.assertFalse(self.adsb_path.exists())
+        self.assertFalse(self.mlat_path.exists())
+
+    def test_compression_error_preserves_raw_and_removes_temporary(self):
+        messages = []
+        with patch("recording.zipfile.ZipFile.write", side_effect=OSError("full")):
+            self.assertFalse(archive_session(self.session_dir, True, messages.append))
+        self.assertTrue(self.adsb_path.exists())
+        self.assertTrue(self.mlat_path.exists())
+        self.assertFalse(self.archive_path.exists())
+        self.assertFalse(self.temporary_path.exists())
+        self.assertEqual(len(messages), 1)
+
+    def test_verification_error_preserves_raw_and_removes_temporary(self):
+        with patch("recording._verify_stream_archive", return_value=False):
+            self.assertFalse(archive_session(self.session_dir, delete_raw=True))
+        self.assertTrue(self.adsb_path.exists())
+        self.assertTrue(self.mlat_path.exists())
+        self.assertFalse(self.archive_path.exists())
+        self.assertFalse(self.temporary_path.exists())
+
+    def test_existing_archive_is_idempotent(self):
+        self.assertTrue(archive_session(self.session_dir))
+        first_bytes = self.archive_path.read_bytes()
+        self.assertTrue(archive_session(self.session_dir))
+        self.assertEqual(self.archive_path.read_bytes(), first_bytes)
+        self.assertFalse(self.temporary_path.exists())
+
+    def test_existing_verified_archive_can_remove_remaining_raw(self):
+        self.assertTrue(archive_session(self.session_dir))
+        self.assertTrue(archive_session(self.session_dir, delete_raw=True))
+        self.assertFalse(self.adsb_path.exists())
+        self.assertFalse(self.mlat_path.exists())
+        self.assertTrue(archive_session(self.session_dir, delete_raw=True))
 
 
 if __name__ == "__main__":
