@@ -2,3 +2,4 @@ ephem
 pytz
 requests
 python-dotenv
+tzdata

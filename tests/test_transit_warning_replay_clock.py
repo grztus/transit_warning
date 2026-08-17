@@ -16,6 +16,7 @@ TEST_CONFIG = InstallationConfig(
     observer_elevation_m=111.0,
     adsb_host="127.0.0.1",
     adsb_port=30003,
+    adsb_timestamp_timezone="Europe/Warsaw",
     mlat_host="127.0.0.1",
     mlat_port=30106,
     metar_station="EPRA",
@@ -105,11 +106,10 @@ class ProcessLineReplayClockTests(unittest.TestCase):
         self.assertEqual(transit.clock.now_utc(), utc("2024/05/18 12:00:10.000"))
         self.assertEqual(transit.plane_dict["ABC123"][0], utc("2024/05/18 12:00:02.000"))
 
-    def test_port_30003_applies_existing_offset_to_both_timestamps(self):
+    def test_port_30003_applies_configured_timezone_to_both_timestamps(self):
         self.process("2024/05/18 12:00:00.000", "2024/05/18 12:00:01.000", port=30003)
-        offset = datetime.timedelta(hours=transit.time.altzone / 60 / 60)
-        self.assertEqual(transit.plane_dict["ABC123"][0], utc("2024/05/18 12:00:00.000") + offset)
-        self.assertEqual(transit.clock.now_utc(), utc("2024/05/18 12:00:01.000") + offset)
+        self.assertEqual(transit.plane_dict["ABC123"][0], utc("2024/05/18 10:00:00.000"))
+        self.assertEqual(transit.clock.now_utc(), utc("2024/05/18 10:00:01.000"))
 
     def test_port_30106_keeps_both_timestamps_as_utc(self):
         self.process("2024/05/18 12:00:00.000", "2024/05/18 12:00:01.000", port=30106)

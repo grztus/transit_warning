@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 from typing import Mapping
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import dotenv_values
 
@@ -25,6 +26,7 @@ class InstallationConfig:
     observer_elevation_m: float
     adsb_host: str
     adsb_port: int
+    adsb_timestamp_timezone: str
     mlat_host: str
     mlat_port: int
     metar_station: str
@@ -88,6 +90,18 @@ def _metar_station(values, errors):
     return value
 
 
+def _iana_timezone(values, errors):
+    value = _required(values, "ADSB_TIMESTAMP_TIMEZONE", errors)
+    if value is None:
+        return None
+    try:
+        ZoneInfo(value)
+    except (ZoneInfoNotFoundError, ValueError):
+        errors.append("ADSB_TIMESTAMP_TIMEZONE must be a valid IANA timezone name")
+        return None
+    return value
+
+
 def load_installation_config(
     environ: Mapping[str, str] | None = None,
     dotenv_path: str | os.PathLike[str] = DEFAULT_DOTENV_PATH,
@@ -109,6 +123,7 @@ def load_installation_config(
     observer_elevation_m = _finite_float(values, "OBSERVER_ELEVATION_M", errors)
     adsb_host = _host(values, "ADSB_HOST", "127.0.0.1", errors)
     adsb_port = _port(values, "ADSB_PORT", 30003, errors)
+    adsb_timestamp_timezone = _iana_timezone(values, errors)
     mlat_host = _host(values, "MLAT_HOST", "127.0.0.1", errors)
     mlat_port = _port(values, "MLAT_PORT", 30106, errors)
     metar_station = _metar_station(values, errors)
@@ -127,6 +142,7 @@ def load_installation_config(
         observer_elevation_m=observer_elevation_m,
         adsb_host=adsb_host,
         adsb_port=adsb_port,
+        adsb_timestamp_timezone=adsb_timestamp_timezone,
         mlat_host=mlat_host,
         mlat_port=mlat_port,
         metar_station=metar_station,

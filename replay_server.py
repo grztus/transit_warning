@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable, Iterator
 
+from config import ConfigurationError, load_installation_config
 from transit_time import port_timestamp_to_utc
 
 
@@ -66,18 +67,19 @@ def message_timestamp(line: str) -> datetime:
     return datetime.strptime(f"{fields[6].strip()} {fields[7].strip()}", TIMESTAMP_FORMAT)
 
 
-def logged_timestamp(line: str, port: int) -> datetime:
+def logged_timestamp(line: str, port: int, adsb_timestamp_timezone: str) -> datetime:
     """Return Logged fields 8-9 on the port's existing UTC timeline."""
     fields = line.rstrip("\r\n").split(",")
     if len(fields) < 10:
         raise ValueError("message has fewer than 10 fields")
     parsed = datetime.strptime(f"{fields[8].strip()} {fields[9].strip()}", TIMESTAMP_FORMAT)
-    return port_timestamp_to_utc(parsed, port)
+    return port_timestamp_to_utc(parsed, port, adsb_timestamp_timezone, ADSB_PORT)
 
 
 def merge_logged_streams(
     adsb_lines: Iterable[str],
     mlat_lines: Iterable[str],
+    adsb_timestamp_timezone: str,
 ) -> Iterator[tuple[datetime, int, str]]:
     """Merge two chronological streams; port 30003 wins equal timestamps.
 
@@ -88,7 +90,7 @@ def merge_logged_streams(
     for port, source in sources.items():
         try:
             line = next(source)
-            pending[port] = (logged_timestamp(line, port), line)
+            pending[port] = (logged_timestamp(line, port, adsb_timestamp_timezone), line)
         except StopIteration:
             pass
 
@@ -98,7 +100,8 @@ def merge_logged_streams(
         yield timestamp, port, line
         try:
             next_line = next(sources[port])
-            pending[port] = (logged_timestamp(next_line, port), next_line)
+            pending[port] = (
+                logged_timestamp(next_line, port, adsb_timestamp_timezone), next_line)
         except StopIteration:
             pass
 
@@ -109,11 +112,14 @@ def replay_dual_streams(
     clients: dict[int, socket.socket],
     speed: float | None,
     stop_event: threading.Event,
+    adsb_timestamp_timezone: str,
 ) -> int:
     """Send both inputs on one globally paced Logged UTC timeline."""
     pacer = ReplayPacer(speed, stop_event) if speed is not None else None
     count = 0
-    for timestamp, port, line in merge_logged_streams(adsb_lines, mlat_lines):
+    for timestamp, port, line in merge_logged_streams(
+        adsb_lines, mlat_lines, adsb_timestamp_timezone
+    ):
         if stop_event.is_set():
             break
         if pacer is not None and pacer.pace(timestamp):
@@ -295,6 +301,7 @@ class DualReplayServer:
         self,
         scenario: DualScenario,
         speed: float | None,
+        adsb_timestamp_timezone: str,
         host: str = "127.0.0.1",
         ports: tuple[int, int] = (ADSB_PORT, MLAT_PORT),
     ) -> None:
@@ -302,6 +309,7 @@ class DualReplayServer:
         self.speed = speed
         self.host = host
         self.adsb_port, self.mlat_port = ports
+        self.adsb_timestamp_timezone = adsb_timestamp_timezone
         self.stop_event = threading.Event()
         self._listeners: dict[int, socket.socket] = {}
         self._thread: threading.Thread | None = None
@@ -355,7 +363,8 @@ class DualReplayServer:
                 with self.scenario.adsb_path.open("r", encoding="utf-8", newline="") as adsb_source, \
                      self.scenario.mlat_path.open("r", encoding="utf-8", newline="") as mlat_source:
                     count = replay_dual_streams(
-                        adsb_source, mlat_source, clients, self.speed, self.stop_event
+                        adsb_source, mlat_source, clients, self.speed, self.stop_event,
+                        self.adsb_timestamp_timezone,
                     )
                     print(f"Dual replay connection finished: {count} messages")
             except ValueError as error:
@@ -412,7 +421,13 @@ def main() -> None:
     if args.scenario in DUAL_SCENARIOS:
         if args.file is not None:
             raise SystemExit("--file is not supported for dual replay")
-        DualReplayServer(DUAL_SCENARIOS[args.scenario], args.speed, args.host).serve_forever()
+        try:
+            adsb_timestamp_timezone = load_installation_config().adsb_timestamp_timezone
+        except ConfigurationError as error:
+            raise SystemExit(str(error))
+        DualReplayServer(
+            DUAL_SCENARIOS[args.scenario], args.speed, adsb_timestamp_timezone, args.host,
+        ).serve_forever()
         return
     scenario = SCENARIOS[args.scenario]
     ReplayServer(scenario, args.file or scenario.default_path, args.speed, args.host).serve_forever()

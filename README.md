@@ -41,12 +41,18 @@ Edit `.env` and provide values for:
 - `OBSERVER_LON` — observer longitude in decimal degrees
 - `OBSERVER_ELEVATION_M` — observer/antenna elevation in metres above sea level
 - `ADSB_HOST` — IP address or hostname of the ADS-B source
+- `ADSB_TIMESTAMP_TIMEZONE` — IANA timezone used by the ADS-B source for naive
+  SBS timestamps (for example `Europe/Warsaw`)
 - `MLAT_HOST` — IP address or hostname of the MLAT source
 - `METAR_STATION` — four-letter ICAO station identifier used to retrieve METAR data from Aviation Weather Center (for example `EPRA`)
 
 Keep `ADSB_PORT=30003` and `MLAT_PORT=30106` if the local data sources use the
 default TCP ports. System environment variables override values from `.env`.
 The private `.env` file is ignored by Git; do not commit it.
+
+The ADS-B timezone describes the clock used by the host producing port 30003,
+not the timezone of the computer running Transit Warning. It is applied using
+the timestamp's own date, including the applicable daylight-saving rules.
 
 ## Running the application
 

@@ -19,6 +19,7 @@ TEST_CONFIG = InstallationConfig(
     observer_elevation_m=111.0,
     adsb_host="127.0.0.1",
     adsb_port=30003,
+    adsb_timestamp_timezone="Europe/Warsaw",
     mlat_host="127.0.0.1",
     mlat_port=30106,
     metar_station="EPRA",

@@ -29,6 +29,7 @@ LINES = [
     "MSG,3,1,1,ABC001,1,2026/08/16,12:00:00.000,2026/08/16,12:00:00.010,,10000,,,51.0,21.0\n",
     "MSG,3,1,1,ABC002,1,2026/08/16,12:00:00.100,2026/08/16,12:00:00.110,,11000,,,52.0,22.0\n",
 ]
+ADSB_TIMEZONE = "Europe/Warsaw"
 
 
 def line(icao, generated, logged):
@@ -62,16 +63,18 @@ class TimestampTests(unittest.TestCase):
         value = line("ABC001", "12:00:00.000", "12:00:00.010")
         converted = datetime(2026, 8, 16, 10, 0, tzinfo=pytz.utc)
         with patch("replay_server.port_timestamp_to_utc", return_value=converted) as converter:
-            self.assertEqual(logged_timestamp(value, ADSB_PORT), converted)
-        parsed, port = converter.call_args.args
+            self.assertEqual(logged_timestamp(value, ADSB_PORT, ADSB_TIMEZONE), converted)
+        parsed, port, timezone_name, adsb_port = converter.call_args.args
         self.assertEqual(parsed, datetime(2026, 8, 16, 12, 0, 0, 10000))
         self.assertEqual(port, ADSB_PORT)
+        self.assertEqual(timezone_name, ADSB_TIMEZONE)
+        self.assertEqual(adsb_port, ADSB_PORT)
 
     def test_ports_keep_their_distinct_timestamp_semantics(self):
         value = line("ABC001", "12:00:00.000", "12:00:00.010")
-        adsb = logged_timestamp(value, ADSB_PORT)
-        mlat = logged_timestamp(value, MLAT_PORT)
-        self.assertEqual(adsb - mlat, timedelta(hours=time.altzone / 60 / 60))
+        adsb = logged_timestamp(value, ADSB_PORT, ADSB_TIMEZONE)
+        mlat = logged_timestamp(value, MLAT_PORT, ADSB_TIMEZONE)
+        self.assertEqual(adsb - mlat, timedelta(hours=-2))
         self.assertEqual(adsb.utcoffset(), timedelta(0))
         self.assertEqual(mlat.utcoffset(), timedelta(0))
 
@@ -120,7 +123,8 @@ class DualStreamTests(unittest.TestCase):
             line("B00002", "10:00:01.000", "10:00:01.000"),
             line("B00003", "10:00:03.000", "10:00:03.000"),
         ]
-        merged = [(port, item.split(",")[4]) for _, port, item in merge_logged_streams(adsb, mlat)]
+        merged = [(port, item.split(",")[4]) for _, port, item in
+                  merge_logged_streams(adsb, mlat, ADSB_TIMEZONE)]
         self.assertEqual(merged, [
             (ADSB_PORT, "A00001"),
             (MLAT_PORT, "B00001"),
@@ -137,7 +141,8 @@ class DualStreamTests(unittest.TestCase):
                 consumed[port] += 1
                 yield line(f"{prefix}{index:05d}", "12:00:00.000", f"10:00:{index // 1000:02d}.{index % 1000:03d}")
 
-        merged = merge_logged_streams(source(ADSB_PORT, "A"), source(MLAT_PORT, "B"))
+        merged = merge_logged_streams(
+            source(ADSB_PORT, "A"), source(MLAT_PORT, "B"), ADSB_TIMEZONE)
         next(merged)
         self.assertLessEqual(consumed[ADSB_PORT], 2)
         self.assertLessEqual(consumed[MLAT_PORT], 2)
@@ -150,7 +155,8 @@ class DualStreamTests(unittest.TestCase):
         pairs = [socket.socketpair(), socket.socketpair()]
         senders = {ADSB_PORT: pairs[0][0], MLAT_PORT: pairs[1][0]}
         try:
-            self.assertEqual(replay_dual_streams(adsb, mlat, senders, None, threading.Event()), 4)
+            self.assertEqual(replay_dual_streams(
+                adsb, mlat, senders, None, threading.Event(), ADSB_TIMEZONE), 4)
             for sender in senders.values():
                 sender.shutdown(socket.SHUT_WR)
             self.assertEqual(receive_all(pairs[0][1]), "".join(adsb).replace("\n", "\r\n").encode())
@@ -167,7 +173,8 @@ class DualStreamTests(unittest.TestCase):
             with self.subTest(speed=speed), patch("replay_server.ReplayPacer") as pacer_type:
                 pacer_type.return_value.pace.return_value = False
                 clients = {ADSB_PORT: unittest.mock.Mock(), MLAT_PORT: unittest.mock.Mock()}
-                replay_dual_streams(*streams, clients, speed, threading.Event())
+                replay_dual_streams(
+                    *streams, clients, speed, threading.Event(), ADSB_TIMEZONE)
                 if speed is None:
                     pacer_type.assert_not_called()
                 else:
@@ -222,7 +229,7 @@ class DualServerTests(unittest.TestCase):
         mlat_path.write_text("".join(self.mlat_lines), encoding="utf-8")
         self.adsb_port, self.mlat_port = free_port(), free_port()
         self.server = DualReplayServer(
-            DualScenario("dual-test", adsb_path, mlat_path), None,
+            DualScenario("dual-test", adsb_path, mlat_path), None, ADSB_TIMEZONE,
             ports=(self.adsb_port, self.mlat_port),
         )
         self.server.start()

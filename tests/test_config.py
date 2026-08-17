@@ -11,6 +11,7 @@ REQUIRED = {
     "OBSERVER_LAT": "50.25",
     "OBSERVER_LON": "19.75",
     "OBSERVER_ELEVATION_M": "245.5",
+    "ADSB_TIMESTAMP_TIMEZONE": "Europe/Warsaw",
     "METAR_STATION": "epra",
 }
 
@@ -40,6 +41,7 @@ class InstallationConfigTests(unittest.TestCase):
                 observer_elevation_m=245.5,
                 adsb_host="adsb.example",
                 adsb_port=31003,
+                adsb_timestamp_timezone="Europe/Warsaw",
                 mlat_host="mlat.example",
                 mlat_port=31106,
                 metar_station="EPRA",
@@ -62,6 +64,7 @@ class InstallationConfigTests(unittest.TestCase):
                 "OBSERVER_LON=20\n"
                 "OBSERVER_ELEVATION_M=30\n"
                 "ADSB_HOST=from-file\n"
+                "ADSB_TIMESTAMP_TIMEZONE=Europe/Warsaw\n"
                 "METAR_STATION=EPWA\n",
                 encoding="utf-8",
             )
@@ -92,7 +95,8 @@ class InstallationConfigTests(unittest.TestCase):
             self.load({})
 
         message = str(raised.exception)
-        for name in ("OBSERVER_LAT", "OBSERVER_LON", "OBSERVER_ELEVATION_M", "METAR_STATION"):
+        for name in ("OBSERVER_LAT", "OBSERVER_LON", "OBSERVER_ELEVATION_M",
+                     "ADSB_TIMESTAMP_TIMEZONE", "METAR_STATION"):
             self.assertIn("{} is required".format(name), message)
 
     def test_rejects_invalid_coordinates_and_elevation(self):
@@ -133,6 +137,14 @@ class InstallationConfigTests(unittest.TestCase):
 
     def test_normalizes_metar_station_to_uppercase(self):
         self.assertEqual(self.load(REQUIRED).metar_station, "EPRA")
+
+    def test_accepts_valid_iana_timezone(self):
+        self.assertEqual(
+            self.load(REQUIRED).adsb_timestamp_timezone, "Europe/Warsaw")
+
+    def test_rejects_invalid_iana_timezone(self):
+        with self.assertRaisesRegex(ConfigurationError, "valid IANA timezone"):
+            self.load({**REQUIRED, "ADSB_TIMESTAMP_TIMEZONE": "Mars/Olympus_Mons"})
 
     def test_rejects_invalid_metar_stations(self):
         for value in ("", "EP", "EPRAA", "EP1A", "ĘPRA"):

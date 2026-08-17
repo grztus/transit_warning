@@ -85,7 +85,7 @@ from environment import (
 )
 from metar import fetch_awc_metar
 from transit_clock import ReplayClock, clock_from_args
-from transit_time import port_timestamp_to_utc
+from transit_time import AdsBTimestampOffsetValidator, port_timestamp_to_utc
 
 # Ustawienia GUI / GUI settings
 try:
@@ -126,6 +126,7 @@ replay_time_initialized = not isinstance(clock, ReplayClock)
 environment_replay = None
 environment_recorder = None
 daily_environment_recorder = None
+adsb_timestamp_validator = None
 
 # Global settings / Globalne ustawienia
 MAX_AGE_SECONDS = 60  # Maksymalny czas życia wpisu po ostatnim odbiorze sygnału (w sekundach) / Maximum entry lifetime after the last received signal (in seconds)
@@ -198,19 +199,26 @@ gatech = None
 
 adsb_host = None
 adsb_port = None
+adsb_timestamp_timezone = None
 mlat_host = None
 mlat_port = None
 
 
 def apply_installation_config(configuration: InstallationConfig):
     global my_lat, my_lon, my_elevation_const, metar_station, gatech
-    global adsb_host, adsb_port, mlat_host, mlat_port, port_status
+    global adsb_host, adsb_port, adsb_timestamp_timezone, adsb_timestamp_validator
+    global mlat_host, mlat_port, port_status
     my_lat = configuration.observer_lat
     my_lon = configuration.observer_lon
     my_elevation_const = configuration.observer_elevation_m
     metar_station = configuration.metar_station
     adsb_host = configuration.adsb_host
     adsb_port = configuration.adsb_port
+    adsb_timestamp_timezone = configuration.adsb_timestamp_timezone
+    adsb_timestamp_validator = (
+        AdsBTimestampOffsetValidator(adsb_timestamp_timezone)
+        if not isinstance(clock, ReplayClock) else None
+    )
     mlat_host = configuration.mlat_host
     mlat_port = configuration.mlat_port
     gatech = ephem.Observer()
@@ -709,21 +717,28 @@ def process_line(line, port):
 
     # Konwersja daty i czasu na UTC / Convert date and time to UTC
     try:
-        date_time = datetime.datetime.strptime(date + " " + time, '%Y/%m/%d %H:%M:%S.%f').replace(tzinfo=pytz.utc)
+        date_time = datetime.datetime.strptime(date + " " + time, '%Y/%m/%d %H:%M:%S.%f')
     except ValueError:
         print("Error parsing date and time: {} {}".format(date, time))
         return
 
     try:
-        logged_date_time = datetime.datetime.strptime(logged_date + " " + logged_time, '%Y/%m/%d %H:%M:%S.%f').replace(tzinfo=pytz.utc)
+        logged_date_time = datetime.datetime.strptime(logged_date + " " + logged_time, '%Y/%m/%d %H:%M:%S.%f')
     except ValueError:
         if isinstance(clock, ReplayClock):
             print("Error parsing logged date and time: {} {}".format(logged_date, logged_time))
             return
         logged_date_time = None
 
-    date_time_utc = port_timestamp_to_utc(date_time, port)
-    logged_date_time_utc = port_timestamp_to_utc(logged_date_time, port) if logged_date_time else None
+    date_time_utc = port_timestamp_to_utc(
+        date_time, port, adsb_timestamp_timezone, adsb_port)
+    logged_date_time_utc = (
+        port_timestamp_to_utc(logged_date_time, port, adsb_timestamp_timezone, adsb_port)
+        if logged_date_time else None
+    )
+    if (port == adsb_port and adsb_timestamp_validator is not None
+            and not isinstance(clock, ReplayClock)):
+        adsb_timestamp_validator.observe(date_time, clock.now_utc())
 
     if logged_date_time_utc is not None:
         advance_replay_time(logged_date_time_utc)

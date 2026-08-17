@@ -9,6 +9,7 @@ import pytz
 import transit_warning as transit
 from config import ConfigurationError, InstallationConfig
 from metar import AwcMetar
+from transit_time import AdsBTimestampOffsetValidator
 
 
 TEST_CONFIG = InstallationConfig(
@@ -17,6 +18,7 @@ TEST_CONFIG = InstallationConfig(
     observer_elevation_m=245.5,
     adsb_host="adsb.example",
     adsb_port=31003,
+    adsb_timestamp_timezone="Europe/Warsaw",
     mlat_host="mlat.example",
     mlat_port=31106,
     metar_station="EPRA",
@@ -37,6 +39,10 @@ class ApplicationConfigurationTests(unittest.TestCase):
         self.assertEqual(transit.my_lon, TEST_CONFIG.observer_lon)
         self.assertEqual(transit.my_elevation_const, TEST_CONFIG.observer_elevation_m)
         self.assertEqual(transit.metar_station, TEST_CONFIG.metar_station)
+        self.assertEqual(
+            transit.adsb_timestamp_timezone, TEST_CONFIG.adsb_timestamp_timezone)
+        self.assertIsInstance(
+            transit.adsb_timestamp_validator, AdsBTimestampOffsetValidator)
         self.assertIsInstance(transit.gatech, ephem.Observer)
         self.assertAlmostEqual(float(transit.gatech.lat) * 180.0 / ephem.pi, TEST_CONFIG.observer_lat)
         self.assertAlmostEqual(float(transit.gatech.lon) * 180.0 / ephem.pi, TEST_CONFIG.observer_lon)
