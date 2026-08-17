@@ -1,11 +1,14 @@
 import importlib
+import datetime
 import unittest
 from unittest.mock import Mock, call, patch
 
 import ephem
+import pytz
 
 import transit_warning as transit
 from config import ConfigurationError, InstallationConfig
+from metar import AwcMetar
 
 
 TEST_CONFIG = InstallationConfig(
@@ -16,7 +19,7 @@ TEST_CONFIG = InstallationConfig(
     adsb_port=31003,
     mlat_host="mlat.example",
     mlat_port=31106,
-    metar_url="https://weather.example/metar?airport=TEST",
+    metar_station="EPRA",
 )
 
 
@@ -33,21 +36,27 @@ class ApplicationConfigurationTests(unittest.TestCase):
         self.assertEqual(transit.my_lat, TEST_CONFIG.observer_lat)
         self.assertEqual(transit.my_lon, TEST_CONFIG.observer_lon)
         self.assertEqual(transit.my_elevation_const, TEST_CONFIG.observer_elevation_m)
+        self.assertEqual(transit.metar_station, TEST_CONFIG.metar_station)
         self.assertIsInstance(transit.gatech, ephem.Observer)
         self.assertAlmostEqual(float(transit.gatech.lat) * 180.0 / ephem.pi, TEST_CONFIG.observer_lat)
         self.assertAlmostEqual(float(transit.gatech.lon) * 180.0 / ephem.pi, TEST_CONFIG.observer_lon)
         self.assertEqual(transit.gatech.elevation, TEST_CONFIG.observer_elevation_m)
 
-    def test_metar_request_uses_configured_url(self):
+    def test_metar_request_uses_configured_station(self):
         transit.apply_installation_config(TEST_CONFIG)
         transit.metar_t = None
         transit.metar_attempt_t = None
-        response = Mock(status_code=200, text="METAR TEST 101200Z Q1015")
+        observation = AwcMetar(
+            icao_id="EPRA",
+            obs_time=datetime.datetime.now(pytz.utc),
+            altim=1015.0,
+            raw_ob="EPRA METAR Q1015",
+        )
 
-        with patch.object(transit.requests, "get", return_value=response) as get:
-            self.assertEqual(transit.get_metar_press(), 1015)
+        with patch.object(transit, "fetch_awc_metar", return_value=observation) as fetch:
+            self.assertEqual(transit.get_metar_press(), 1015.0)
 
-        get.assert_called_once_with(TEST_CONFIG.metar_url, timeout=5)
+        fetch.assert_called_once_with(TEST_CONFIG.metar_station)
 
     def test_main_starts_independent_configured_sources(self):
         threads = [Mock(), Mock()]

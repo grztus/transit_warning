@@ -21,7 +21,7 @@ TEST_CONFIG = InstallationConfig(
     adsb_port=30003,
     mlat_host="127.0.0.1",
     mlat_port=30106,
-    metar_url="https://weather.example/metar",
+    metar_station="EPRA",
 )
 
 

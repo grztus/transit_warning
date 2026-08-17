@@ -67,14 +67,13 @@ import time
 import math
 import ephem
 import re
-import requests
 import socket
 import threading
 from functools import wraps
 from math import atan2, sin, cos, acos, radians, degrees, atan, asin, sqrt, isnan
 import pytz  # Import pytz for timezone handling
 from config import ConfigurationError, InstallationConfig, load_installation_config
-from metar import fetch_metar_text, parse_metar_qnh
+from metar import fetch_awc_metar
 from transit_clock import ReplayClock, clock_from_args
 from transit_time import port_timestamp_to_utc
 
@@ -109,7 +108,7 @@ global pressure
 metar_t = None
 metar_attempt_t = None
 pressure = 1013  # Domyślne ciśnienie / Default pressure
-metar_url = None
+metar_station = None
 
 # Kolory terminala / Terminal Colors
 REDALERT = '\x1b[1;37;41m'
@@ -175,12 +174,12 @@ mlat_port = None
 
 
 def apply_installation_config(configuration: InstallationConfig):
-    global my_lat, my_lon, my_elevation_const, metar_url, gatech
+    global my_lat, my_lon, my_elevation_const, metar_station, gatech
     global adsb_host, adsb_port, mlat_host, mlat_port, port_status
     my_lat = configuration.observer_lat
     my_lon = configuration.observer_lon
     my_elevation_const = configuration.observer_elevation_m
-    metar_url = configuration.metar_url
+    metar_station = configuration.metar_station
     adsb_host = configuration.adsb_host
     adsb_port = configuration.adsb_port
     mlat_host = configuration.mlat_host
@@ -417,23 +416,23 @@ def get_metar_press():
     global metar_t
     global metar_attempt_t
     global pressure
+
+    if isinstance(clock, ReplayClock):
+        return pressure
+
     aktual_metar_t = clock.now_utc()
     if metar_t is not None and (aktual_metar_t - metar_t).total_seconds() < 900:
         return pressure
     if metar_attempt_t is not None and (aktual_metar_t - metar_attempt_t).total_seconds() < 60:
         return pressure
     metar_attempt_t = aktual_metar_t
-    try:
-        metar_data = fetch_metar_text(metar_url)
-    except requests.exceptions.RequestException as e:
-        print("Error retrieving METAR data: ", e)
-        return pressure
+    metar_data = fetch_awc_metar(metar_station)
     if metar_data is None:
         return pressure
-    parsed_pressure = parse_metar_qnh(metar_data)
-    if parsed_pressure is None:
+    metar_age = (aktual_metar_t - metar_data.obs_time).total_seconds()
+    if metar_age < 0 or metar_age > 90 * 60:
         return pressure
-    pressure = parsed_pressure
+    pressure = metar_data.altim
     metar_t = aktual_metar_t
     return pressure
 
@@ -642,7 +641,7 @@ def process_line(line, port):
         if is_int_try(elevation):
             elevation = int(elevation)
             if elevation > 6500:
-                pressure = int(get_metar_press())
+                pressure = get_metar_press()
                 elevation += (1013 - pressure) * 26
                 my_elevation = my_elevation_const
             else:
@@ -682,7 +681,7 @@ def process_line(line, port):
         if is_int_try(elevation):
             elevation = int(elevation)
             if elevation > 6500:
-                pressure = int(get_metar_press())
+                pressure = get_metar_press()
                 elevation += (1013 - pressure) * 26
                 my_elevation = my_elevation_const
             else:

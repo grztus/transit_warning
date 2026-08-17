@@ -4,8 +4,8 @@ from dataclasses import dataclass
 import math
 import os
 from pathlib import Path
+import re
 from typing import Mapping
-from urllib.parse import urlparse
 
 from dotenv import dotenv_values
 
@@ -27,7 +27,7 @@ class InstallationConfig:
     adsb_port: int
     mlat_host: str
     mlat_port: int
-    metar_url: str
+    metar_station: str
 
 
 def _required(values, name, errors):
@@ -77,18 +77,13 @@ def _host(values, name, default, errors):
     return value
 
 
-def _metar_url(values, errors):
-    value = _required(values, "METAR_URL", errors)
+def _metar_station(values, errors):
+    value = _required(values, "METAR_STATION", errors)
     if value is None:
         return None
-    try:
-        parsed = urlparse(value)
-        hostname = parsed.hostname
-    except ValueError:
-        hostname = None
-        parsed = None
-    if parsed is None or parsed.scheme.lower() not in {"http", "https"} or not hostname:
-        errors.append("METAR_URL must be a valid http or https URL")
+    value = value.upper()
+    if re.fullmatch(r"[A-Z]{4}", value, flags=re.ASCII) is None:
+        errors.append("METAR_STATION must contain exactly 4 ASCII letters A-Z")
         return None
     return value
 
@@ -116,7 +111,7 @@ def load_installation_config(
     adsb_port = _port(values, "ADSB_PORT", 30003, errors)
     mlat_host = _host(values, "MLAT_HOST", "127.0.0.1", errors)
     mlat_port = _port(values, "MLAT_PORT", 30106, errors)
-    metar_url = _metar_url(values, errors)
+    metar_station = _metar_station(values, errors)
 
     if (adsb_host is not None and adsb_port is not None
             and mlat_host is not None and mlat_port is not None
@@ -134,5 +129,5 @@ def load_installation_config(
         adsb_port=adsb_port,
         mlat_host=mlat_host,
         mlat_port=mlat_port,
-        metar_url=metar_url,
+        metar_station=metar_station,
     )

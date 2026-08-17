@@ -42,7 +42,7 @@ Edit `.env` and provide values for:
 - `OBSERVER_ELEVATION_M` — observer/antenna elevation in metres above sea level
 - `ADSB_HOST` — IP address or hostname of the ADS-B source
 - `MLAT_HOST` — IP address or hostname of the MLAT source
-- `METAR_URL` — full HTTP or HTTPS URL used to retrieve METAR data
+- `METAR_STATION` — four-letter ICAO station identifier used to retrieve METAR data from Aviation Weather Center (for example `EPRA`)
 
 Keep `ADSB_PORT=30003` and `MLAT_PORT=30106` if the local data sources use the
 default TCP ports. System environment variables override values from `.env`.

@@ -11,7 +11,7 @@ REQUIRED = {
     "OBSERVER_LAT": "50.25",
     "OBSERVER_LON": "19.75",
     "OBSERVER_ELEVATION_M": "245.5",
-    "METAR_URL": "https://weather.example/metar?airport=TEST",
+    "METAR_STATION": "epra",
 }
 
 
@@ -42,7 +42,7 @@ class InstallationConfigTests(unittest.TestCase):
                 adsb_port=31003,
                 mlat_host="mlat.example",
                 mlat_port=31106,
-                metar_url="https://weather.example/metar?airport=TEST",
+                metar_station="EPRA",
             ),
         )
 
@@ -62,7 +62,7 @@ class InstallationConfigTests(unittest.TestCase):
                 "OBSERVER_LON=20\n"
                 "OBSERVER_ELEVATION_M=30\n"
                 "ADSB_HOST=from-file\n"
-                "METAR_URL=https://file.example/metar\n",
+                "METAR_STATION=EPWA\n",
                 encoding="utf-8",
             )
             environment = {
@@ -75,6 +75,7 @@ class InstallationConfigTests(unittest.TestCase):
         self.assertEqual(result.observer_lat, 40.0)
         self.assertEqual(result.observer_lon, 20.0)
         self.assertEqual(result.adsb_host, "from-environment")
+        self.assertEqual(result.metar_station, "EPWA")
 
     def test_default_dotenv_path_is_independent_of_current_directory(self):
         expected = Path(__file__).resolve().parents[1] / ".env"
@@ -91,7 +92,7 @@ class InstallationConfigTests(unittest.TestCase):
             self.load({})
 
         message = str(raised.exception)
-        for name in ("OBSERVER_LAT", "OBSERVER_LON", "OBSERVER_ELEVATION_M", "METAR_URL"):
+        for name in ("OBSERVER_LAT", "OBSERVER_LON", "OBSERVER_ELEVATION_M", "METAR_STATION"):
             self.assertIn("{} is required".format(name), message)
 
     def test_rejects_invalid_coordinates_and_elevation(self):
@@ -130,11 +131,14 @@ class InstallationConfigTests(unittest.TestCase):
                 "MLAT_PORT": "30003",
             })
 
-    def test_rejects_invalid_metar_urls(self):
-        for value in ("", "weather.example/metar", "ftp://weather.example/metar", "https:///metar"):
+    def test_normalizes_metar_station_to_uppercase(self):
+        self.assertEqual(self.load(REQUIRED).metar_station, "EPRA")
+
+    def test_rejects_invalid_metar_stations(self):
+        for value in ("", "EP", "EPRAA", "EP1A", "ĘPRA"):
             with self.subTest(value=value):
                 with self.assertRaises(ConfigurationError):
-                    self.load({**REQUIRED, "METAR_URL": value})
+                    self.load({**REQUIRED, "METAR_STATION": value})
 
 
 if __name__ == "__main__":
