@@ -60,8 +60,11 @@ USA.
 # Importowanie niezbędnych bibliotek / Importing necessary libraries
 from __future__ import print_function
 import argparse
+import io
 import os
+from pathlib import Path
 import shutil
+import signal
 import sys
 import datetime
 import time
@@ -104,6 +107,11 @@ except NameError:
     pass
 
 from collections import deque
+
+
+DIAGNOSTICS_DIRECTORY = Path("diagnostics")
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+table_snapshot_requested = threading.Event()
 
 
 def parse_runtime_args(arguments):
@@ -771,8 +779,10 @@ def get_metar_press():
 
 # Funkcja do generowania tabeli wyjściowej / Function to generate output table
 @synchronized_plane_dict
-def tabela():
+def tabela(output=None, full=False, force=False):
     global last_t
+    output = sys.stdout if output is None else output
+    emit = lambda *args: print(*args, file=output)
     gatech.date = clock.ephem_now()  # Aktualizuj datę w ephemeris / Update date in ephemeris
     vm, vs = ephem.Moon(gatech), ephem.Sun(gatech)  # Pobierz dane o Księżycu i Słońcu / Get data about the Moon and the Sun
     vm.compute(gatech)  # Oblicz pozycję Księżyca / Compute Moon position
@@ -781,18 +791,21 @@ def tabela():
     sun_alt, sun_az = round(math.degrees(vs.alt), 1), round(math.degrees(vs.az), 1)  # Wysokość i azymut Słońca / Sun altitude and azimuth
     aktual_t = clock.now_utc()  # Aktualny czas w UTC / Current time in UTC
     diff_t = (aktual_t - last_t).total_seconds()  # Różnica czasu od ostatniego odświeżenia / Time difference from last refresh
-    if diff_t > 1:
-        last_t = aktual_t  # Ustaw ostatni czas odświeżenia / Set last refresh time
-        clear_screen()  # Wyczyść ekran / Clear the screen
-        print("Flight info |  Actual parameters  |-- Pred. closest  --|--- Current Az/Alt ---|----- Transits: Sun", sun_az, sun_alt,'  & Moon', moon_az, moon_alt )
-        print('{:9} {:>6} {:>7} {} {:>6} {} {:>8} {} {:>7} {} {:>6} {:>6} {:>5} {} {:>7} {:>7} {:>7} {:>8} {} {:>7} {:>7} {:>7} {:>7} {} {:>5}'.format(\
+    if force or diff_t > 1:
+        if not force:
+            last_t = aktual_t  # Ustaw ostatni czas odświeżenia / Set last refresh time
+            clear_screen(output)  # Wyczyść ekran / Clear the screen
+        emit("Flight info |  Actual parameters  |-- Pred. closest  --|--- Current Az/Alt ---|----- Transits: Sun", sun_az, sun_alt,'  & Moon', moon_az, moon_alt )
+        emit('{:9} {:>6} {:>7} {} {:>6} {} {:>8} {} {:>7} {} {:>6} {:>6} {:>5} {} {:>7} {:>7} {:>7} {:>8} {} {:>7} {:>7} {:>7} {:>7} {} {:>5}'.format(\
         ' icao or', ' (m)', '(d)', '|', '(km)', '|', '(km)', '|', '(d)', '|', '(d)', '(d)', '(l)', ' |', '(d)', '(km)', '(km)', '   (s)', '|', '(d)', '(km)', '(km)', '   (s)', ' |', '(s)'))
-        print('{:9} {:>6} {:>7} {} {:>6} {} {:>8} {} {:>7} {} {:>6} {:>6} {:>5} {} {:>7} {:>7} {:>7} {:>8} {} {:>7} {:>7} {:>7} {:>7} {} {:>5}'.format(\
+        emit('{:9} {:>6} {:>7} {} {:>6} {} {:>8} {} {:>7} {} {:>6} {:>6} {:>5} {} {:>7} {:>7} {:>7} {:>8} {} {:>7} {:>7} {:>7} {:>7} {} {:>5}'.format(\
         ' flight', 'elev', 'trck', '|', 'dist', '|', '[warn]','|', '[Alt]', '|', 'Alt', 'Azim', 'Azim', ' |', 'Sep', 'p2x', 'h2x', 'time2X', '|', 'Sep', 'p2x', 'h2x', 'time2X', ' |', 'age'))
-        print("-------------------------|--------|--------- |---------|----------------------|----------------------------------|----------------------------------|------------------|")
+        emit("-------------------------|--------|--------- |---------|----------------------|----------------------------------|----------------------------------|------------------|")
 
         render_plan = build_terminal_render_plan(
-            plane_dict, terminal_aircraft_row_limit(), warning_distance)
+            plane_dict,
+            len(plane_dict) if full else terminal_aircraft_row_limit(),
+            warning_distance)
         for pentry in render_plan.aircraft_ids:
             try:
                 distance = float(plane_dict[pentry][5])
@@ -896,16 +909,57 @@ def tabela():
                 wiersz += '{:>5.1f}'.format(diff_secx)
                 wiersz += ' {} {} '.format(len(plane_dict[pentry][15]), len(plane_dict[pentry][16]))
                 wiersz += '{:>5.1f}'.format(diff_seconds)
-                print(wiersz)
+                emit(wiersz)
 
-        print(" ")
-        print("{} (UTC) --- delay < {:.1f}s --- QNH {}hPa".format(clock.now_utc().time(), diff_t, pressure))
-        print(terminal_tracking_summary(my_lat, my_lon, render_plan))
+        emit(" ")
+        emit("{} (UTC) --- delay < {:.1f}s --- QNH {}hPa".format(clock.now_utc().time(), diff_t, pressure))
+        emit(terminal_tracking_summary(my_lat, my_lon, render_plan))
         # Print combined port and recorder statuses.
         for status_line in source_status_lines():
-            print(status_line)
+            emit(status_line)
 
     return sun_alt, sun_az, moon_alt, moon_az
+
+
+def request_table_snapshot(signum=None, frame=None):
+    """Signal handler: defer all rendering and I/O to the main loop."""
+    table_snapshot_requested.set()
+
+
+def install_table_snapshot_signal_handler():
+    if not hasattr(signal, "SIGUSR1"):
+        return False
+    signal.signal(signal.SIGUSR1, request_table_snapshot)
+    return True
+
+
+def render_full_table_snapshot():
+    output = io.StringIO()
+    tabela(output=output, full=True, force=True)
+    return ANSI_ESCAPE_RE.sub("", output.getvalue())
+
+
+def write_table_snapshot(directory=DIAGNOSTICS_DIRECTORY):
+    now = clock.now_utc()
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / now.strftime(
+        "table_snapshot_%Y%m%d_%H%M%S_UTC.txt")
+    path.write_text(render_full_table_snapshot(), encoding="utf-8")
+    return path
+
+
+def process_table_snapshot_request(directory=DIAGNOSTICS_DIRECTORY):
+    if not table_snapshot_requested.is_set():
+        return None
+    table_snapshot_requested.clear()
+    try:
+        path = write_table_snapshot(directory)
+    except Exception as error:
+        print("Table snapshot: FAILED ({})".format(error))
+        return None
+    print("Table snapshot: {}".format(path))
+    return path
 
 
 # Funkcja do czyszczenia słownika tranzytów / Function to clean the transit dictionary
@@ -1301,6 +1355,7 @@ def main():
     except ConfigurationError as error:
         raise SystemExit(str(error))
     apply_installation_config(configuration)
+    install_table_snapshot_signal_handler()
     stop_event.clear()
     with shutdown_lock:
         shutdown_complete = False
@@ -1343,6 +1398,7 @@ def main():
     try:
         while True:
             time.sleep(1)
+            process_table_snapshot_request()
             if daily_environment_recorder is not None:
                 daily_environment_recorder.rotate_if_needed(clock.now_utc())
             if session_recorder is not None:

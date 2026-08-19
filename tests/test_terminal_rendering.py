@@ -1,5 +1,10 @@
+import copy
+import datetime
 import io
+import math
+import tempfile
 import unittest
+from unittest.mock import Mock, patch
 
 import transit_warning as transit
 
@@ -9,6 +14,25 @@ def aircraft(distance=10, sun_time="", moon_time=""):
     entry[5] = distance
     entry[22] = sun_time
     entry[26] = moon_time
+    return entry
+
+
+def render_aircraft(now, distance=10, sun_time="", moon_time=""):
+    entry = aircraft(distance, sun_time, moon_time)
+    entry[0] = now
+    entry[4] = 1000.0
+    entry[6] = 180.0
+    entry[7] = 10.0
+    entry[11] = 180.0
+    entry[13] = 0.0
+    entry[15] = []
+    entry[16] = []
+    entry[17] = now
+    if sun_time:
+        entry[18:22] = [30.0, 31.0, 10.0, 20.0]
+    if moon_time:
+        entry[23:26] = [20.0, 21.0, 11.0]
+        entry[27] = 21.0
     return entry
 
 
@@ -149,6 +173,77 @@ class TerminalRenderingTests(unittest.TestCase):
             {"CLEARED": entry}, 10, 200)
 
         self.assertEqual(plan.aircraft_ids, ("CLEARED",))
+
+    def test_full_snapshot_ignores_terminal_limit_and_preserves_state(self):
+        now = datetime.datetime(
+            2026, 8, 19, 12, 0, tzinfo=datetime.timezone.utc)
+        planes = {
+            "P{:03d}".format(index): render_aircraft(now)
+            for index in range(55)
+        }
+        planes["SUNFIRST"] = render_aircraft(now, sun_time=5)
+        original = copy.deepcopy(planes)
+        clock = Mock()
+        clock.now_utc.return_value = now
+        clock.ephem_now.return_value = "controlled ephem date"
+        sun = Mock(alt=math.radians(30), az=math.radians(120))
+        moon = Mock(alt=math.radians(20), az=math.radians(80))
+
+        with patch.object(transit, "plane_dict", planes), \
+                patch.object(transit, "clock", clock), \
+                patch.object(transit, "gatech", Mock()), \
+                patch.object(transit, "my_lat", 51.39309), \
+                patch.object(transit, "my_lon", 21.18876), \
+                patch.object(transit, "my_elevation_const", 100), \
+                patch.object(transit.ephem, "Sun", return_value=sun), \
+                patch.object(transit.ephem, "Moon", return_value=moon), \
+                patch.object(transit, "terminal_aircraft_row_limit",
+                             return_value=29) as row_limit:
+            snapshot = transit.render_full_table_snapshot()
+
+        self.assertIn("Aircraft: 56/56 shown", snapshot)
+        self.assertEqual(snapshot.count("\nP"), 55)
+        self.assertLess(snapshot.index("SUNFIRST"), snapshot.index("P000"))
+        self.assertEqual(planes, original)
+        row_limit.assert_not_called()
+
+    def test_normal_39_line_renderer_still_limits_56_aircraft(self):
+        planes = {
+            "P{:03d}".format(index): aircraft()
+            for index in range(55)
+        }
+        planes["SUNFIRST"] = aircraft(sun_time=5)
+
+        plan = transit.build_terminal_render_plan(
+            planes, transit.terminal_aircraft_row_limit(39), 200)
+
+        self.assertEqual(plan.shown_count, 29)
+        self.assertEqual(plan.total_count, 56)
+        self.assertEqual(plan.aircraft_ids[0], "SUNFIRST")
+
+    def test_snapshot_signal_handler_only_sets_request_event(self):
+        transit.table_snapshot_requested.clear()
+        with patch.object(transit, "write_table_snapshot") as writer, \
+                patch.object(transit, "tabela") as table:
+            transit.request_table_snapshot()
+
+        self.assertTrue(transit.table_snapshot_requested.is_set())
+        writer.assert_not_called()
+        table.assert_not_called()
+        transit.table_snapshot_requested.clear()
+
+    def test_snapshot_writer_creates_diagnostics_file(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(transit, "render_full_table_snapshot",
+                             return_value="complete table\n"):
+            path = transit.write_table_snapshot(directory)
+
+            self.assertTrue(path.exists())
+            self.assertEqual(path.read_text(encoding="utf-8"),
+                             "complete table\n")
+            self.assertRegex(
+                path.name,
+                r"^table_snapshot_\d{8}_\d{6}_UTC\.txt$")
 
 
 if __name__ == "__main__":

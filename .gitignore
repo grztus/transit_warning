@@ -5,6 +5,7 @@
 *.log
 tests/data/*
 recordings/
+diagnostics/
 
 # Python
 __pycache__/
