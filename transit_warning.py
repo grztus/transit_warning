@@ -471,9 +471,12 @@ def build_terminal_render_plan(planes, row_limit, maximum_distance):
         moon_time = _positive_time2x(entry, 26)
 
         try:
-            is_renderable = float(entry[5]) <= maximum_distance
+            is_renderable = (
+                maximum_distance is None
+                or float(entry[5]) <= maximum_distance
+            )
         except (IndexError, TypeError, ValueError):
-            is_renderable = False
+            is_renderable = maximum_distance is None
         if not is_renderable:
             continue
 
@@ -805,14 +808,14 @@ def tabela(output=None, full=False, force=False):
         render_plan = build_terminal_render_plan(
             plane_dict,
             len(plane_dict) if full else terminal_aircraft_row_limit(),
-            warning_distance)
+            None if full else warning_distance)
         for pentry in render_plan.aircraft_ids:
             try:
                 distance = float(plane_dict[pentry][5])
-            except ValueError:
-                continue
+            except (TypeError, ValueError):
+                distance = None
 
-            if distance <= warning_distance:
+            if full or (distance is not None and distance <= warning_distance):
                 then = plane_dict[pentry][17] if plane_dict[pentry][17] else clock.now_utc()
                 diff_seconds = (clock.now_utc() - then).total_seconds()
                 diff_minutes = (clock.now_utc() - plane_dict[pentry][0]).total_seconds() / 60
@@ -831,11 +834,15 @@ def tabela(output=None, full=False, force=False):
                     wiersz += '{:>7} '.format('---')
                 wiersz += '{:>7} | '.format(plane_dict[pentry][11])
 
-                wiersz += '{}{:>6.1f}{} | '.format(dist_col(plane_dict[pentry][5]), distance, RESET)
+                if distance is not None:
+                    wiersz += '{}{:>6.1f}{} | '.format(
+                        dist_col(distance), distance, RESET)
+                else:
+                    wiersz += '{:>6} | '.format('---')
 
                 try:
                     warn_val = float(plane_dict[pentry][13])
-                except ValueError:
+                except (TypeError, ValueError):
                     warn_val = 0.0  # Default value if conversion fails
 
                 if plane_dict[pentry][12] == 'WARNING' and plane_dict[pentry][9] != "RECEDING":
@@ -875,8 +882,13 @@ def tabela(output=None, full=False, force=False):
                 else:
                     wiersz += '{}o{}'.format(GREENFG, RESET)
 
-                wiersz += '{:>6.1f} '.format(plane_dict[pentry][6])
-                wiersz += '{:>6} | '.format(wind_deg_to_str1(plane_dict[pentry][6]))
+                if is_float_try(plane_dict[pentry][6]):
+                    current_azimuth = float(plane_dict[pentry][6])
+                    wiersz += '{:>6.1f} '.format(current_azimuth)
+                    wiersz += '{:>6} | '.format(
+                        wind_deg_to_str1(current_azimuth))
+                else:
+                    wiersz += '{:>6} {:>6} | '.format('---', '---')
 
                 diff_secx = (clock.now_utc() - plane_dict[pentry][0]).total_seconds()
                 sun_values, moon_values = terminal_transit_values(

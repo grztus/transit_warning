@@ -181,6 +181,7 @@ class TerminalRenderingTests(unittest.TestCase):
             "P{:03d}".format(index): render_aircraft(now)
             for index in range(55)
         }
+        planes["P054"][4:8] = ["", "", "", ""]
         planes["SUNFIRST"] = render_aircraft(now, sun_time=5)
         original = copy.deepcopy(planes)
         clock = Mock()
@@ -202,6 +203,7 @@ class TerminalRenderingTests(unittest.TestCase):
             snapshot = transit.render_full_table_snapshot()
 
         self.assertIn("Aircraft: 56/56 shown", snapshot)
+        self.assertIn("P054", snapshot)
         self.assertEqual(snapshot.count("\nP"), 55)
         self.assertLess(snapshot.index("SUNFIRST"), snapshot.index("P000"))
         self.assertEqual(planes, original)
@@ -220,6 +222,26 @@ class TerminalRenderingTests(unittest.TestCase):
         self.assertEqual(plan.shown_count, 29)
         self.assertEqual(plan.total_count, 56)
         self.assertEqual(plan.aircraft_ids[0], "SUNFIRST")
+
+    def test_full_plan_includes_aircraft_outside_normal_distance(self):
+        planes = {
+            "NEAR{:02d}".format(index): aircraft(distance=10)
+            for index in range(32)
+        }
+        planes.update({
+            "FAR{:02d}".format(index): aircraft(distance=250)
+            for index in range(14)
+        })
+
+        normal = transit.build_terminal_render_plan(planes, 46, 200)
+        full = transit.build_terminal_render_plan(planes, 46, None)
+
+        self.assertEqual((normal.shown_count, normal.total_count), (32, 46))
+        self.assertEqual((full.shown_count, full.total_count), (46, 46))
+        self.assertEqual(
+            transit.terminal_tracking_summary(51.39309, 21.18876, full),
+            "LAT: 51.39309 LON: 21.18876 | Aircraft: 46/46 shown",
+        )
 
     def test_snapshot_signal_handler_only_sets_request_event(self):
         transit.table_snapshot_requested.clear()
