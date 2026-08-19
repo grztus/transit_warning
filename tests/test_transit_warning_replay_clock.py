@@ -93,6 +93,10 @@ class ProcessLineReplayClockTests(unittest.TestCase):
         self.original_tabela = transit.tabela
         self.original_transit_pred = transit.transit_pred
         self.original_environment_replay = transit.environment_replay
+        self.original_altitude_sources = transit.altitude_sources
+        self.original_motion_states = transit.aircraft_motion_states
+        self.original_freshness_status = (
+            transit.aircraft_motion_freshness_status)
         self.original_pressure = transit.pressure
         self.original_sun_alt = getattr(transit, "sun_alt", None)
         self.original_moon_alt = getattr(transit, "moon_alt", None)
@@ -105,6 +109,9 @@ class ProcessLineReplayClockTests(unittest.TestCase):
         transit.gong_t = None
         transit.last_update_time = None
         transit.plane_dict = {}
+        transit.altitude_sources = {}
+        transit.aircraft_motion_states = {}
+        transit.aircraft_motion_freshness_status = {}
         transit.sun_prediction_last_valid.clear()
         transit.moon_prediction_last_valid.clear()
         transit.sun_predicted_transit_utc.clear()
@@ -120,6 +127,10 @@ class ProcessLineReplayClockTests(unittest.TestCase):
         transit.tabela = self.original_tabela
         transit.transit_pred = self.original_transit_pred
         transit.environment_replay = self.original_environment_replay
+        transit.altitude_sources = self.original_altitude_sources
+        transit.aircraft_motion_states = self.original_motion_states
+        transit.aircraft_motion_freshness_status = (
+            self.original_freshness_status)
         transit.pressure = self.original_pressure
         transit.sun_alt = self.original_sun_alt
         transit.moon_alt = self.original_moon_alt
@@ -258,8 +269,8 @@ class ProcessLineReplayClockTests(unittest.TestCase):
     def msg3(self, timestamp, icao="ABC123", altitude="10000",
              latitude="51.2", longitude="21.2"):
         return (
-            "MSG,3,1,1,{icao},1,{date},{time},{date},{time},,{altitude},"
-            "180,,{latitude},{longitude}".format(
+            "MLAT,3,1,1,{icao},1,{date},{time},{date},{time},,{altitude},"
+            "450,180,{latitude},{longitude},0".format(
                 icao=icao,
                 date=timestamp.split()[0],
                 time=timestamp.split()[1],
@@ -311,6 +322,7 @@ class ProcessLineReplayClockTests(unittest.TestCase):
         sun_last_valid = transit.sun_prediction_last_valid["ABC123"]
         motion_state = copy.deepcopy(
             transit.aircraft_motion_states["ABC123"])
+        freshness = transit.aircraft_motion_freshness_status["ABC123"]
         prediction = Mock()
         transit.transit_pred = prediction
 
@@ -330,6 +342,8 @@ class ProcessLineReplayClockTests(unittest.TestCase):
             transit.sun_prediction_last_valid["ABC123"], sun_last_valid)
         self.assertEqual(
             transit.aircraft_motion_states["ABC123"], motion_state)
+        self.assertIs(
+            transit.aircraft_motion_freshness_status["ABC123"], freshness)
         self.assertEqual(transit.predicted_transit_remaining_seconds(
             "ABC123", "moon"), 85)
 

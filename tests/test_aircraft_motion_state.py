@@ -47,6 +47,8 @@ class AircraftMotionStateTests(unittest.TestCase):
         self.original_plane_dict = transit.plane_dict
         self.original_altitude_sources = transit.altitude_sources
         self.original_motion_states = transit.aircraft_motion_states
+        self.original_freshness_status = (
+            transit.aircraft_motion_freshness_status)
         self.original_pressure = transit.pressure
         self.original_tabela = transit.tabela
         self.original_transit_pred = transit.transit_pred
@@ -57,6 +59,7 @@ class AircraftMotionStateTests(unittest.TestCase):
         transit.plane_dict = {}
         transit.altitude_sources = {}
         transit.aircraft_motion_states = {}
+        transit.aircraft_motion_freshness_status = {}
         transit.pressure = 1013.25
         transit.tabela = lambda: (30.0, 120.0, 20.0, 90.0)
         transit.transit_pred = lambda *args: 0
@@ -66,6 +69,8 @@ class AircraftMotionStateTests(unittest.TestCase):
         transit.plane_dict = self.original_plane_dict
         transit.altitude_sources = self.original_altitude_sources
         transit.aircraft_motion_states = self.original_motion_states
+        transit.aircraft_motion_freshness_status = (
+            self.original_freshness_status)
         transit.pressure = self.original_pressure
         transit.tabela = self.original_tabela
         transit.transit_pred = self.original_transit_pred

@@ -74,6 +74,7 @@ import re
 import socket
 import threading
 from dataclasses import dataclass
+from enum import Enum
 from functools import wraps
 from math import atan2, sin, cos, acos, radians, degrees, atan, asin, sqrt, isnan
 import pytz  # Import pytz for timezone handling
@@ -151,6 +152,11 @@ shutdown_complete = False
 # Global settings / Globalne ustawienia
 MAX_AGE_SECONDS = 60  # Maksymalny czas życia wpisu po ostatnim odbiorze sygnału (w sekundach) / Maximum entry lifetime after the last received signal (in seconds)
 TRANSIT_PREDICTION_GRACE_SECONDS = 3.0
+MOTION_FRESH_POSITION_SECONDS = 3.0
+MOTION_FRESH_PARAMETER_SECONDS = 5.0
+MOTION_FRESH_DELTA_SECONDS = 3.0
+MOTION_STALE_SECONDS = 10.0
+MOTION_STALE_DELTA_SECONDS = 10.0
 
 # Deklaracja globalnych zmiennych / Declaration of global variables
 global metar_t
@@ -181,6 +187,7 @@ earth_R = 6371  # Promień Ziemi w km / Radius of the earth in km
 plane_dict = {}
 altitude_sources = {}
 aircraft_motion_states = {}
+aircraft_motion_freshness_status = {}
 sun_prediction_last_valid = {}
 moon_prediction_last_valid = {}
 sun_predicted_transit_utc = {}
@@ -240,6 +247,27 @@ class AircraftMotionFreshness:
     track_age: float | None
     groundspeed_age: float | None
     vertical_rate_age: float | None
+
+
+class MotionFreshnessStatus(str, Enum):
+    FRESH = "FRESH"
+    DEGRADED = "DEGRADED"
+    STALE = "STALE"
+
+
+@dataclass(frozen=True)
+class MotionFreshnessResult:
+    status: MotionFreshnessStatus
+    assessed_at_utc: datetime.datetime
+    position_age: float | None
+    altitude_age: float | None
+    track_age: float | None
+    groundspeed_age: float | None
+    vertical_rate_age: float | None
+    position_track_delta: float | None
+    position_groundspeed_delta: float | None
+    reason_codes: tuple[str, ...]
+    horizontal_source_coherent: bool
 
 
 def synchronized_plane_dict(function):
@@ -425,6 +453,114 @@ def get_aircraft_motion_freshness(icao, now_utc=None):
         groundspeed_age=age(state.groundspeed),
         vertical_rate_age=age(state.vertical_rate),
     )
+
+
+def assess_motion_freshness(motion_state, now_utc):
+    """Classify one timestamped motion state without consulting wall time."""
+    def age(parameter):
+        if parameter is None:
+            return None
+        return max(0.0, (now_utc - parameter.updated_at_utc).total_seconds())
+
+    position_age = age(motion_state.position) if motion_state else None
+    altitude_age = age(motion_state.altitude) if motion_state else None
+    track_age = age(motion_state.track) if motion_state else None
+    groundspeed_age = age(motion_state.groundspeed) if motion_state else None
+    vertical_rate_age = age(motion_state.vertical_rate) if motion_state else None
+    position_track_delta = (
+        abs(position_age - track_age)
+        if position_age is not None and track_age is not None else None)
+    position_groundspeed_delta = (
+        abs(position_age - groundspeed_age)
+        if position_age is not None and groundspeed_age is not None else None)
+
+    parameters = {
+        "POSITION": position_age,
+        "ALTITUDE": altitude_age,
+        "TRACK": track_age,
+        "GROUNDSPEED": groundspeed_age,
+    }
+    reasons = [
+        "MISSING_{}".format(name)
+        for name, parameter_age in parameters.items()
+        if parameter_age is None
+    ]
+    stale_age = False
+    for name, parameter_age in parameters.items():
+        if parameter_age is not None and parameter_age > MOTION_STALE_SECONDS:
+            stale_age = True
+            reasons.append("{}_AGE_GT_10".format(name))
+    stale_delta = False
+    for name, delta in (
+            ("POSITION_TRACK", position_track_delta),
+            ("POSITION_GROUNDSPEED", position_groundspeed_delta)):
+        if delta is not None and delta > MOTION_STALE_DELTA_SECONDS:
+            stale_delta = True
+            reasons.append("{}_DELTA_GT_10".format(name))
+
+    complete = all(value is not None for value in parameters.values())
+    non_stale_ages = complete and not stale_age and not stale_delta
+    fresh = (
+        non_stale_ages
+        and position_age <= MOTION_FRESH_POSITION_SECONDS
+        and track_age <= MOTION_FRESH_PARAMETER_SECONDS
+        and groundspeed_age <= MOTION_FRESH_PARAMETER_SECONDS
+        and altitude_age <= MOTION_FRESH_PARAMETER_SECONDS
+        and position_track_delta <= MOTION_FRESH_DELTA_SECONDS
+        and position_groundspeed_delta <= MOTION_FRESH_DELTA_SECONDS
+    )
+    if not complete or stale_age or stale_delta:
+        status = MotionFreshnessStatus.STALE
+    elif fresh:
+        status = MotionFreshnessStatus.FRESH
+    else:
+        status = MotionFreshnessStatus.DEGRADED
+        if position_age > MOTION_FRESH_POSITION_SECONDS:
+            reasons.append("POSITION_AGE_GT_3")
+        for name, parameter_age in (
+                ("TRACK", track_age),
+                ("GROUNDSPEED", groundspeed_age),
+                ("ALTITUDE", altitude_age)):
+            if parameter_age > MOTION_FRESH_PARAMETER_SECONDS:
+                reasons.append("{}_AGE_GT_5".format(name))
+        if position_track_delta > MOTION_FRESH_DELTA_SECONDS:
+            reasons.append("POSITION_TRACK_DELTA_GT_3")
+        if position_groundspeed_delta > MOTION_FRESH_DELTA_SECONDS:
+            reasons.append("POSITION_GROUNDSPEED_DELTA_GT_3")
+
+    horizontal = (
+        motion_state is not None
+        and motion_state.position is not None
+        and motion_state.track is not None
+        and motion_state.groundspeed is not None
+    )
+    if horizontal:
+        sources = {
+            motion_state.position.source,
+            motion_state.track.source,
+            motion_state.groundspeed.source,
+        }
+        horizontal = len(sources) == 1 or non_stale_ages
+
+    return MotionFreshnessResult(
+        status=status,
+        assessed_at_utc=now_utc,
+        position_age=position_age,
+        altitude_age=altitude_age,
+        track_age=track_age,
+        groundspeed_age=groundspeed_age,
+        vertical_rate_age=vertical_rate_age,
+        position_track_delta=position_track_delta,
+        position_groundspeed_delta=position_groundspeed_delta,
+        reason_codes=tuple(reasons),
+        horizontal_source_coherent=horizontal,
+    )
+
+
+def get_aircraft_motion_freshness_status(icao):
+    """Return the latest diagnostic freshness assessment for one aircraft."""
+    with plane_dict_lock:
+        return aircraft_motion_freshness_status.get(icao)
 
 last_update_time = clock.now_utc() if clock.is_ready() else None  # Inicjalizacja zmiennej na początku skryptu / Initialize variable at the beginning of the script
 
@@ -721,6 +857,7 @@ def clean_dict():
         del plane_dict[icao]
         altitude_sources.pop(icao, None)
         aircraft_motion_states.pop(icao, None)
+        aircraft_motion_freshness_status.pop(icao, None)
         sun_prediction_last_valid.pop(icao, None)
         moon_prediction_last_valid.pop(icao, None)
         sun_predicted_transit_utc.pop(icao, None)
@@ -1169,6 +1306,7 @@ def clean_transit_dict():
         del plane_dict[icao]
         altitude_sources.pop(icao, None)
         aircraft_motion_states.pop(icao, None)
+        aircraft_motion_freshness_status.pop(icao, None)
         sun_prediction_last_valid.pop(icao, None)
         moon_prediction_last_valid.pop(icao, None)
         sun_predicted_transit_utc.pop(icao, None)
@@ -1485,9 +1623,15 @@ def process_line(line, port):
                         plane_dict[icao][15].append(poz_az)
                         plane_dict[icao][16].append(poz_alt)
 
-    if (mtype in ["3", "4"]) and (
+    motion_freshness = None
+    if mtype in ["3", "4"]:
+        motion_freshness = assess_motion_freshness(
+            aircraft_motion_states.get(icao), clock.now_utc())
+        aircraft_motion_freshness_status[icao] = motion_freshness
+
+    if (mtype in ["3", "4"] and (
             icao in plane_dict and plane_dict[icao][2]
-            and plane_dict[icao][11] and is_float_try(plane_dict[icao][4])):
+            and plane_dict[icao][11] and is_float_try(plane_dict[icao][4]))):
         flight = plane_dict[icao][1]
         plane_lat = plane_dict[icao][2]
         plane_lon = plane_dict[icao][3]
@@ -1516,6 +1660,11 @@ def process_line(line, port):
             gong()
         if distance > alert_distance and plane_dict[icao][8] == "ENTERING":
             plane_dict[icao][8] = "LEAVING"
+        if motion_freshness.status == MotionFreshnessStatus.STALE:
+            sun_alt, sun_az, moon_alt, moon_az = tabela()
+            clean_dict()
+            clean_transit_dict()
+            return
         tst_int1 = transit_pred((my_lat, my_lon), (plane_lat, plane_lon), track, velocity, elevation, moon_alt, moon_az)
         tst_int2 = transit_pred((my_lat, my_lon), (plane_lat, plane_lon), track, velocity, elevation, sun_alt, sun_az)
         prediction_now = clock.now_utc()
