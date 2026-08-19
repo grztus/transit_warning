@@ -1,3 +1,4 @@
+import copy
 import datetime
 import math
 import unittest
@@ -267,6 +268,121 @@ class ProcessLineReplayClockTests(unittest.TestCase):
                 longitude=longitude,
             )
         )
+
+    def msg4(self, timestamp, icao="ABC123"):
+        return (
+            "MSG,4,1,1,{icao},1,{date},{time},{date},{time},,,450,180,,"
+            ",0".format(
+                icao=icao,
+                date=timestamp.split()[0],
+                time=timestamp.split()[1],
+            )
+        )
+
+    def msg5(self, timestamp, icao="ABC123", altitude="11000"):
+        return (
+            "MSG,5,1,1,{icao},1,{date},{time},{date},{time},,{altitude},"
+            ",,,,".format(
+                icao=icao,
+                date=timestamp.split()[0],
+                time=timestamp.split()[1],
+                altitude=altitude,
+            )
+        )
+
+    def mlat3(self, timestamp, icao="ABC123"):
+        return (
+            "MLAT,3,1,1,{icao},1,{date},{time},{date},{time},,10000,"
+            "450,180,51.2,21.2,0".format(
+                icao=icao,
+                date=timestamp.split()[0],
+                time=timestamp.split()[1],
+            )
+        )
+
+    def test_adsb_msg1_updates_callsign_without_touching_prediction(self):
+        transit.transit_pred = Mock(side_effect=[
+            self.prediction(38.0, 120), self.prediction(38.0, 130)])
+        transit.process_line(
+            self.msg3("2024/05/18 14:00:00.000"), 30003)
+        moon_time = transit.moon_predicted_transit_utc["ABC123"]
+        sun_time = transit.sun_predicted_transit_utc["ABC123"]
+        moon_last_valid = transit.moon_prediction_last_valid["ABC123"]
+        sun_last_valid = transit.sun_prediction_last_valid["ABC123"]
+        motion_state = copy.deepcopy(
+            transit.aircraft_motion_states["ABC123"])
+        prediction = Mock()
+        transit.transit_pred = prediction
+
+        transit.process_line(message(
+            "2024/05/18 14:00:35.000",
+            "2024/05/18 14:00:35.000"), 30003)
+
+        self.assertEqual(transit.plane_dict["ABC123"][1], "TEST123")
+        prediction.assert_not_called()
+        self.assertEqual(
+            transit.moon_predicted_transit_utc["ABC123"], moon_time)
+        self.assertEqual(
+            transit.sun_predicted_transit_utc["ABC123"], sun_time)
+        self.assertEqual(
+            transit.moon_prediction_last_valid["ABC123"], moon_last_valid)
+        self.assertEqual(
+            transit.sun_prediction_last_valid["ABC123"], sun_last_valid)
+        self.assertEqual(
+            transit.aircraft_motion_states["ABC123"], motion_state)
+        self.assertEqual(transit.predicted_transit_remaining_seconds(
+            "ABC123", "moon"), 85)
+
+    def test_msg5_then_msg1_does_not_trigger_prediction(self):
+        transit.transit_pred = Mock(side_effect=[
+            self.prediction(38.0, 120), self.prediction(38.0, 130)])
+        transit.process_line(
+            self.msg3("2024/05/18 14:00:00.000"), 30003)
+        previous_altitude = transit.plane_dict["ABC123"][4]
+        prediction = Mock()
+        transit.transit_pred = prediction
+
+        transit.process_line(
+            self.msg5("2024/05/18 14:00:10.000"), 30003)
+        transit.process_line(message(
+            "2024/05/18 14:00:11.000",
+            "2024/05/18 14:00:11.000"), 30003)
+
+        self.assertNotEqual(
+            transit.plane_dict["ABC123"][4], previous_altitude)
+        prediction.assert_not_called()
+
+    def test_msg1_without_previous_prediction_creates_no_prediction_state(self):
+        prediction = Mock()
+        transit.transit_pred = prediction
+
+        transit.process_line(message(
+            "2024/05/18 14:00:00.000",
+            "2024/05/18 14:00:00.000"), 30003)
+
+        self.assertEqual(transit.plane_dict["ABC123"][1], "TEST123")
+        prediction.assert_not_called()
+        self.assertNotIn("ABC123", transit.moon_predicted_transit_utc)
+        self.assertNotIn("ABC123", transit.sun_predicted_transit_utc)
+        self.assertNotIn("ABC123", transit.moon_prediction_last_valid)
+        self.assertNotIn("ABC123", transit.sun_prediction_last_valid)
+
+    def test_msg3_msg4_and_mlat3_remain_prediction_triggers(self):
+        transit.transit_pred = Mock(return_value=0)
+        transit.process_line(
+            self.msg3("2024/05/18 14:00:00.000"), 30003)
+        self.assertEqual(transit.transit_pred.call_count, 2)
+
+        transit.transit_pred.reset_mock()
+        transit.process_line(
+            self.msg4("2024/05/18 14:00:01.000"), 30003)
+        self.assertEqual(transit.transit_pred.call_count, 2)
+
+        transit.plane_dict = {}
+        transit.transit_pred.reset_mock()
+        transit.process_line(
+            self.mlat3("2024/05/18 12:00:02.000", "MLAT01"), 30106)
+        self.assertEqual(transit.transit_pred.call_count, 2)
 
     @staticmethod
     def prediction(altitude, time_to_transit):

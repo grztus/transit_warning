@@ -1485,7 +1485,7 @@ def process_line(line, port):
                         plane_dict[icao][15].append(poz_az)
                         plane_dict[icao][16].append(poz_alt)
 
-    if (mtype in ["1", "3", "4"]) and (
+    if (mtype in ["3", "4"]) and (
             icao in plane_dict and plane_dict[icao][2]
             and plane_dict[icao][11] and is_float_try(plane_dict[icao][4])):
         flight = plane_dict[icao][1]
