@@ -1369,7 +1369,8 @@ def process_line(line, port):
 
     if mtype == "3":
         reported_elevation = parts[11].strip()
-        track = parts[12].strip() if len(parts) > 12 else ''
+        track_index = 13 if a_m_type == "MLAT" else 12
+        track = parts[track_index].strip() if len(parts) > track_index else ''
         elevation = None
         if is_int_try(reported_elevation):
             altitude_baro_ft = int(reported_elevation)

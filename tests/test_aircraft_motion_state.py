@@ -146,6 +146,16 @@ class AircraftMotionStateTests(unittest.TestCase):
         self.assertEqual(state.track.source, "mlat")
         self.assertEqual(state.groundspeed.source, "mlat")
         self.assertEqual(state.vertical_rate.source, "mlat")
+        self.assertEqual(transit.plane_dict["ABC123"][11], "270")
+        self.assertEqual(
+            transit.plane_dict["ABC123"][14], round(210 * 1.852))
+        self.assertEqual(state.track.value, 270.0)
+        self.assertEqual(
+            state.groundspeed.value, float(round(210 * 1.852)))
+        self.assertNotEqual(
+            float(transit.plane_dict["ABC123"][11]),
+            state.groundspeed.value,
+        )
         self.assertTrue(all(
             parameter.updated_at_utc == expected_time
             for parameter in (
