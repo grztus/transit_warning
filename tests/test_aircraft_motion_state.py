@@ -52,6 +52,8 @@ class AircraftMotionStateTests(unittest.TestCase):
         self.original_pressure = transit.pressure
         self.original_tabela = transit.tabela
         self.original_transit_pred = transit.transit_pred
+        self.original_moving_body_transit_pred = (
+            transit.moving_body_transit_pred)
 
         transit.clock = ReplayClock()
         transit.apply_installation_config(TEST_CONFIG)
@@ -63,6 +65,7 @@ class AircraftMotionStateTests(unittest.TestCase):
         transit.pressure = 1013.25
         transit.tabela = lambda: (30.0, 120.0, 20.0, 90.0)
         transit.transit_pred = lambda *args: 0
+        transit.moving_body_transit_pred = lambda *args, **kwargs: 0
 
     def tearDown(self):
         transit.clock = self.original_clock
@@ -74,6 +77,8 @@ class AircraftMotionStateTests(unittest.TestCase):
         transit.pressure = self.original_pressure
         transit.tabela = self.original_tabela
         transit.transit_pred = self.original_transit_pred
+        transit.moving_body_transit_pred = (
+            self.original_moving_body_transit_pred)
 
     def process(self, value, port=31003):
         transit.process_line(value, port)

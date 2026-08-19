@@ -152,6 +152,9 @@ shutdown_complete = False
 # Global settings / Globalne ustawienia
 MAX_AGE_SECONDS = 60  # Maksymalny czas życia wpisu po ostatnim odbiorze sygnału (w sekundach) / Maximum entry lifetime after the last received signal (in seconds)
 TRANSIT_PREDICTION_GRACE_SECONDS = 3.0
+MOVING_BODY_CONVERGENCE_SECONDS = 0.5
+MOVING_BODY_MAX_CORRECTIONS = 6
+MOVING_BODY_CYCLE_TOLERANCE_SECONDS = 0.1
 MOTION_FRESH_POSITION_SECONDS = 3.0
 MOTION_FRESH_PARAMETER_SECONDS = 5.0
 MOTION_FRESH_DELTA_SECONDS = 3.0
@@ -192,6 +195,7 @@ sun_prediction_last_valid = {}
 moon_prediction_last_valid = {}
 sun_predicted_transit_utc = {}
 moon_predicted_transit_utc = {}
+transit_solver_diagnostics = {}
 plane_dict_lock = threading.RLock()
 plane_deque = deque()
 
@@ -253,6 +257,33 @@ class MotionFreshnessStatus(str, Enum):
     FRESH = "FRESH"
     DEGRADED = "DEGRADED"
     STALE = "STALE"
+
+
+class TransitSolverOutcome(str, Enum):
+    CONVERGED = "CONVERGED"
+    TWO_POINT_CYCLE = "TWO_POINT_CYCLE"
+    MAX_ITERATIONS = "MAX_ITERATIONS"
+    NO_INTERSECTION = "NO_INTERSECTION"
+    OUT_OF_RANGE = "OUT_OF_RANGE"
+    TECHNICAL_FALLBACK = "TECHNICAL_FALLBACK"
+
+
+@dataclass(frozen=True)
+class MovingBodyTransitDiagnostic:
+    body: str
+    prediction_base_utc: datetime.datetime
+    initial_time2x: float | None
+    final_time2x: float | None
+    correction_count: int
+    convergence_residual: float | None
+    outcome: TransitSolverOutcome
+    final_separation: float | None
+
+
+@dataclass(frozen=True)
+class MovingBodyTransitSolution:
+    result: tuple | None
+    diagnostic: MovingBodyTransitDiagnostic
 
 
 @dataclass(frozen=True)
@@ -833,6 +864,15 @@ def clear_transit_prediction_state(icao, entry, celestial_body,
     predicted_times.pop(icao, None)
 
 
+def _store_transit_solver_solution(icao, celestial_body, solution):
+    """Store production diagnostics while accepting simple test doubles."""
+    if isinstance(solution, MovingBodyTransitSolution):
+        transit_solver_diagnostics[(icao, celestial_body)] = (
+            solution.diagnostic)
+        return solution.result
+    return solution
+
+
 def expire_transit_prediction_after_grace(icao, entry, celestial_body,
                                           start_index, now_utc):
     """Keep one missing prediction briefly to absorb input-stream jitter."""
@@ -862,6 +902,8 @@ def clean_dict():
         moon_prediction_last_valid.pop(icao, None)
         sun_predicted_transit_utc.pop(icao, None)
         moon_predicted_transit_utc.pop(icao, None)
+        transit_solver_diagnostics.pop((icao, "sun"), None)
+        transit_solver_diagnostics.pop((icao, "moon"), None)
 
 # Funkcja do obliczania odległości między punktami (haversine) / Function to calculate distance between points (haversine)
 def haversine(origin, destination):
@@ -948,6 +990,151 @@ def transit_pred(obs2moon, plane_pos, track, velocity, elevation, moon_alt, moon
     ideal_lat, ideal_lon = degrees(ideal_lat), degrees(ideal_lon)
     ideal_lon = (ideal_lon + 540) % 360 - 180
     return lat3, lon3, azimuth1, altitude1, dst_h2x, dst_p2x, delta_time, 0, moon_az, moon_alt, clock.now_utc()
+
+
+def body_position_at_utc(body_name, when_utc):
+    """Return precise altitude/azimuth for one body at an explicit UTC time."""
+    if (when_utc.tzinfo is None
+            or when_utc.utcoffset() != datetime.timedelta(0)):
+        raise ValueError("body ephemeris requires timezone-aware UTC")
+    observer = ephem.Observer()
+    observer.lat = str(my_lat)
+    observer.lon = str(my_lon)
+    observer.elevation = float(my_elevation_const)
+    observer.date = ephem.Date(when_utc.astimezone(pytz.utc))
+    if body_name == "sun":
+        body = ephem.Sun(observer)
+    elif body_name == "moon":
+        body = ephem.Moon(observer)
+    else:
+        raise ValueError("unsupported celestial body: {}".format(body_name))
+    body.compute(observer)
+    return math.degrees(body.alt), math.degrees(body.az)
+
+
+def _moving_body_result_time(result):
+    try:
+        return float(result[6])
+    except (IndexError, TypeError, ValueError):
+        return None
+
+
+def _moving_body_result_separation(result):
+    if not result:
+        return None
+    try:
+        return vertical_transit_separation(result[3], result[9])
+    except (IndexError, TypeError, ValueError):
+        return None
+
+
+def _moving_body_solution(body_name, prediction_base_utc, initial_time,
+                          result, correction_count, residual, outcome):
+    return MovingBodyTransitSolution(
+        result=result,
+        diagnostic=MovingBodyTransitDiagnostic(
+            body=body_name,
+            prediction_base_utc=prediction_base_utc,
+            initial_time2x=initial_time,
+            final_time2x=_moving_body_result_time(result),
+            correction_count=correction_count,
+            convergence_residual=residual,
+            outcome=outcome,
+            final_separation=_moving_body_result_separation(result),
+        ),
+    )
+
+
+def moving_body_transit_pred(body_name, obs2body, plane_pos, track,
+                             velocity, elevation, prediction_base_utc,
+                             fallback_body_position=None):
+    """Iteratively solve the existing geometry against a moving Sun/Moon."""
+    geometry_args = (obs2body, plane_pos, track, velocity, elevation)
+    try:
+        body_alt, body_az = body_position_at_utc(
+            body_name, prediction_base_utc)
+    except Exception:
+        fallback_result = None
+        if fallback_body_position is not None:
+            fallback_alt, fallback_az = fallback_body_position
+            fallback_result = transit_pred(
+                *geometry_args, fallback_alt, fallback_az)
+            fallback_time = _moving_body_result_time(fallback_result)
+            if (fallback_time is None or fallback_time <= 0
+                    or fallback_time > 900):
+                fallback_result = None
+        return _moving_body_solution(
+            body_name, prediction_base_utc,
+            _moving_body_result_time(fallback_result), fallback_result,
+            0, None, TransitSolverOutcome.TECHNICAL_FALLBACK)
+
+    initial_result = transit_pred(*geometry_args, body_alt, body_az)
+    if not initial_result:
+        return _moving_body_solution(
+            body_name, prediction_base_utc, None, None, 0, None,
+            TransitSolverOutcome.NO_INTERSECTION)
+    initial_time = _moving_body_result_time(initial_result)
+    if initial_time is None or initial_time <= 0 or initial_time > 900:
+        return _moving_body_solution(
+            body_name, prediction_base_utc, initial_time, None, 0, None,
+            TransitSolverOutcome.OUT_OF_RANGE)
+
+    results = [initial_result]
+    current_time = initial_time
+    for correction_count in range(1, MOVING_BODY_MAX_CORRECTIONS + 1):
+        body_time = prediction_base_utc + datetime.timedelta(
+            seconds=current_time)
+        try:
+            body_alt, body_az = body_position_at_utc(body_name, body_time)
+        except Exception:
+            return _moving_body_solution(
+                body_name, prediction_base_utc, initial_time,
+                initial_result, correction_count - 1, None,
+                TransitSolverOutcome.TECHNICAL_FALLBACK)
+
+        next_result = transit_pred(*geometry_args, body_alt, body_az)
+        if not next_result:
+            return _moving_body_solution(
+                body_name, prediction_base_utc, initial_time, None,
+                correction_count, None,
+                TransitSolverOutcome.NO_INTERSECTION)
+        next_time = _moving_body_result_time(next_result)
+        if next_time is None or next_time <= 0 or next_time > 900:
+            return _moving_body_solution(
+                body_name, prediction_base_utc, initial_time, None,
+                correction_count, None,
+                TransitSolverOutcome.OUT_OF_RANGE)
+
+        residual = abs(next_time - current_time)
+        if residual < MOVING_BODY_CONVERGENCE_SECONDS:
+            return _moving_body_solution(
+                body_name, prediction_base_utc, initial_time, next_result,
+                correction_count, residual, TransitSolverOutcome.CONVERGED)
+
+        if (len(results) >= 2
+                and abs(next_time - _moving_body_result_time(results[-2]))
+                <= MOVING_BODY_CYCLE_TOLERANCE_SECONDS):
+            cycle_results = (results[-1], next_result)
+            final_result = max(
+                cycle_results,
+                key=lambda result: _moving_body_result_separation(result))
+            return _moving_body_solution(
+                body_name, prediction_base_utc, initial_time, final_result,
+                correction_count, residual,
+                TransitSolverOutcome.TWO_POINT_CYCLE)
+
+        results.append(next_result)
+        current_time = next_time
+
+    final_result = max(
+        results[-2:],
+        key=lambda result: _moving_body_result_separation(result))
+    return _moving_body_solution(
+        body_name, prediction_base_utc, initial_time, final_result,
+        MOVING_BODY_MAX_CORRECTIONS,
+        abs(_moving_body_result_time(results[-1])
+            - _moving_body_result_time(results[-2])),
+        TransitSolverOutcome.MAX_ITERATIONS)
 
 # Funkcje kolorowania odległości, wysokości, azymutu / Functions for coloring distance, altitude, azimuth
 def dist_col(distance):
@@ -1311,6 +1498,8 @@ def clean_transit_dict():
         moon_prediction_last_valid.pop(icao, None)
         sun_predicted_transit_utc.pop(icao, None)
         moon_predicted_transit_utc.pop(icao, None)
+        transit_solver_diagnostics.pop((icao, "sun"), None)
+        transit_solver_diagnostics.pop((icao, "moon"), None)
 
 # Function to manage sockets blocked in readline() during controlled shutdown.
 def _register_active_socket(port, sock):
@@ -1665,17 +1854,29 @@ def process_line(line, port):
             clean_dict()
             clean_transit_dict()
             return
-        tst_int1 = transit_pred((my_lat, my_lon), (plane_lat, plane_lon), track, velocity, elevation, moon_alt, moon_az)
-        tst_int2 = transit_pred((my_lat, my_lon), (plane_lat, plane_lon), track, velocity, elevation, sun_alt, sun_az)
-        prediction_now = clock.now_utc()
+        prediction_base_utc = clock.now_utc()
+        moon_solution = moving_body_transit_pred(
+            "moon", (my_lat, my_lon), (plane_lat, plane_lon), track,
+            velocity, elevation, prediction_base_utc,
+            fallback_body_position=(moon_alt, moon_az))
+        sun_solution = moving_body_transit_pred(
+            "sun", (my_lat, my_lon), (plane_lat, plane_lon), track,
+            velocity, elevation, prediction_base_utc,
+            fallback_body_position=(sun_alt, sun_az))
+        tst_int1 = _store_transit_solver_solution(
+            icao, "moon", moon_solution)
+        tst_int2 = _store_transit_solver_solution(
+            icao, "sun", sun_solution)
+        prediction_now = prediction_base_utc
         if tst_int1:
             alt_a = round(tst_int1[3], 2)
             dst_h2x = round(tst_int1[4], 2)
             dst_p2x = round(tst_int1[5], 2)
-            delta_time = int(tst_int1[6])
+            final_time2x = float(tst_int1[6])
+            delta_time = int(final_time2x)
             if 0 <= delta_time <= 900:  # Ignore past or excessively distant transits
                 plane_dict[icao][25] = dst_h2x
-                plane_dict[icao][23] = moon_alt
+                plane_dict[icao][23] = float(tst_int1[9])
                 plane_dict[icao][24] = alt_a
                 plane_dict[icao][26] = delta_time
                 plane_dict[icao][27] = dst_p2x
@@ -1688,7 +1889,7 @@ def process_line(line, port):
                     plane_dict[icao][30] = clock.now_utc()  # Ustaw czas rozpoczęcia tranzytu / Set transit start time
                 plane_dict[icao][29] = clock.now_utc()
                 update_transit_prediction_timestamp(
-                    icao, "moon", prediction_now, delta_time)
+                    icao, "moon", prediction_now, final_time2x)
             else:
                 clear_transit_prediction_state(
                     icao, plane_dict[icao], "moon", 23)
@@ -1703,10 +1904,11 @@ def process_line(line, port):
             alt_a = round(tst_int2[3], 2)
             dst_h2x = round(tst_int2[4], 2)
             dst_p2x = round(tst_int2[5], 2)
-            delta_time = int(tst_int2[6])
+            final_time2x = float(tst_int2[6])
+            delta_time = int(final_time2x)
             if 0 <= delta_time <= 900:  # Ignore past or excessively distant transits
                 plane_dict[icao][20] = dst_h2x
-                plane_dict[icao][18] = sun_alt
+                plane_dict[icao][18] = float(tst_int2[9])
                 plane_dict[icao][19] = alt_a
                 plane_dict[icao][22] = delta_time
                 plane_dict[icao][21] = dst_p2x
@@ -1719,7 +1921,7 @@ def process_line(line, port):
                     plane_dict[icao][30] = clock.now_utc()  # Ustaw czas rozpoczęcia tranzytu / Set transit start time
                 plane_dict[icao][30] = clock.now_utc()
                 update_transit_prediction_timestamp(
-                    icao, "sun", prediction_now, delta_time)
+                    icao, "sun", prediction_now, final_time2x)
             else:
                 clear_transit_prediction_state(
                     icao, plane_dict[icao], "sun", 18)

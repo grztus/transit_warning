@@ -200,7 +200,8 @@ class MotionFreshnessIntegrationTests(unittest.TestCase):
             name: getattr(transit, name) for name in (
                 "clock", "plane_dict", "altitude_sources",
                 "aircraft_motion_states", "aircraft_motion_freshness_status",
-                "pressure", "tabela", "transit_pred", "gong")
+                "pressure", "tabela", "transit_pred",
+                "moving_body_transit_pred", "gong")
         }
         transit.clock = ReplayClock()
         transit.apply_installation_config(TEST_CONFIG)
@@ -217,6 +218,12 @@ class MotionFreshnessIntegrationTests(unittest.TestCase):
         transit.sun_alt = 30.0
         transit.moon_alt = 20.0
         transit.tabela = lambda: (30.0, 120.0, 20.0, 90.0)
+        transit.moving_body_transit_pred = (
+            lambda body, observer, plane, track, velocity, elevation,
+            prediction_base_utc, fallback_body_position=None:
+            transit.transit_pred(
+                observer, plane, track, velocity, elevation,
+                fallback_body_position[0], fallback_body_position[1]))
         transit.gong = lambda: None
 
     def tearDown(self):
@@ -252,17 +259,17 @@ class MotionFreshnessIntegrationTests(unittest.TestCase):
             track=180, vertical_rate=0)
 
     def test_fresh_mlat_and_adsb_states_call_prediction(self):
-        transit.transit_pred = Mock(return_value=0)
+        transit.moving_body_transit_pred = Mock(return_value=0)
         self.process(self.mlat3("2026/08/19 12:00:00.000"))
-        self.assertEqual(transit.transit_pred.call_count, 2)
+        self.assertEqual(transit.moving_body_transit_pred.call_count, 2)
         self.assertEqual(
             transit.get_aircraft_motion_freshness_status("ABC123").status,
             transit.MotionFreshnessStatus.FRESH)
 
-        transit.transit_pred.reset_mock()
+        transit.moving_body_transit_pred.reset_mock()
         self.process(self.msg4("2026/08/19 12:00:01.000"), 30003)
         self.process(self.msg3("2026/08/19 12:00:02.000"), 30003)
-        self.assertEqual(transit.transit_pred.call_count, 4)
+        self.assertEqual(transit.moving_body_transit_pred.call_count, 4)
         self.assertEqual(
             transit.get_aircraft_motion_freshness_status("ABC123").status,
             transit.MotionFreshnessStatus.FRESH)
@@ -270,12 +277,12 @@ class MotionFreshnessIntegrationTests(unittest.TestCase):
     def test_degraded_state_still_calls_prediction(self):
         transit.transit_pred = Mock(return_value=0)
         self.process(self.msg4("2026/08/19 12:00:00.000"))
-        transit.transit_pred = Mock(side_effect=[
+        transit.moving_body_transit_pred = Mock(side_effect=[
             self.prediction(90), self.prediction(100)])
 
         self.process(self.msg3("2026/08/19 12:00:06.000"))
 
-        self.assertEqual(transit.transit_pred.call_count, 2)
+        self.assertEqual(transit.moving_body_transit_pred.call_count, 2)
         self.assertEqual(
             transit.get_aircraft_motion_freshness_status("ABC123").status,
             transit.MotionFreshnessStatus.DEGRADED)
@@ -291,11 +298,11 @@ class MotionFreshnessIntegrationTests(unittest.TestCase):
         prediction_block = list(transit.plane_dict["ABC123"][18:28])
         moon_last_valid = transit.moon_prediction_last_valid["ABC123"]
         sun_last_valid = transit.sun_prediction_last_valid["ABC123"]
-        transit.transit_pred = Mock()
+        transit.moving_body_transit_pred = Mock()
 
         self.process(self.msg3("2026/08/19 12:00:15.000"))
 
-        transit.transit_pred.assert_not_called()
+        transit.moving_body_transit_pred.assert_not_called()
         result = transit.get_aircraft_motion_freshness_status("ABC123")
         self.assertEqual(result.status, transit.MotionFreshnessStatus.STALE)
         self.assertEqual(

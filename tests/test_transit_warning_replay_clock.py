@@ -92,6 +92,8 @@ class ProcessLineReplayClockTests(unittest.TestCase):
         self.original_clock = transit.clock
         self.original_tabela = transit.tabela
         self.original_transit_pred = transit.transit_pred
+        self.original_moving_body_transit_pred = (
+            transit.moving_body_transit_pred)
         self.original_environment_replay = transit.environment_replay
         self.original_altitude_sources = transit.altitude_sources
         self.original_motion_states = transit.aircraft_motion_states
@@ -121,11 +123,19 @@ class ProcessLineReplayClockTests(unittest.TestCase):
         transit.sun_alt = 30.0
         transit.moon_alt = 20.0
         transit.tabela = lambda: (30.0, 120.0, 20.0, 90.0)
+        transit.moving_body_transit_pred = (
+            lambda body, observer, plane, track, velocity, elevation,
+            prediction_base_utc, fallback_body_position=None:
+            transit.transit_pred(
+                observer, plane, track, velocity, elevation,
+                fallback_body_position[0], fallback_body_position[1]))
 
     def tearDown(self):
         transit.clock = self.original_clock
         transit.tabela = self.original_tabela
         transit.transit_pred = self.original_transit_pred
+        transit.moving_body_transit_pred = (
+            self.original_moving_body_transit_pred)
         transit.environment_replay = self.original_environment_replay
         transit.altitude_sources = self.original_altitude_sources
         transit.aircraft_motion_states = self.original_motion_states
@@ -164,7 +174,7 @@ class ProcessLineReplayClockTests(unittest.TestCase):
         transit.clock.advance_to(utc("2024/05/18 12:00:20.000"))
         self.assertEqual(transit.predicted_transit_remaining_seconds(
             "ABC123", "moon"), 100)
-        transit.plane_dict["ABC123"][24] = 21.0
+        transit.plane_dict["ABC123"][24] = 38.0
         self.assertEqual(
             transit.visible_transit_candidate(
                 transit.plane_dict["ABC123"], "moon", "ABC123")[3],
