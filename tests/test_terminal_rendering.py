@@ -66,8 +66,6 @@ class TerminalRenderingTests(unittest.TestCase):
 
         self.assertEqual(plan.aircraft_ids, ("DUAL", "SUN_ONLY"))
         self.assertEqual(plan.aircraft_ids.count("DUAL"), 1)
-        self.assertEqual(plan.sun_candidate_count, 2)
-        self.assertEqual(plan.moon_candidate_count, 1)
 
     def test_non_candidates_keep_existing_order_after_candidates(self):
         planes = {
@@ -84,7 +82,7 @@ class TerminalRenderingTests(unittest.TestCase):
             ("CANDIDATE", "FIRST", "SECOND", "THIRD"),
         )
 
-    def test_counts_shown_tracked_and_candidates_when_clipped(self):
+    def test_counts_shown_and_tracked_when_clipped(self):
         planes = {
             "ORDINARY": aircraft(),
             "SUN": aircraft(sun_time=10),
@@ -97,8 +95,6 @@ class TerminalRenderingTests(unittest.TestCase):
         self.assertEqual(plan.aircraft_ids, ("SUN", "MOON"))
         self.assertEqual(plan.shown_count, 2)
         self.assertEqual(plan.total_count, 4)
-        self.assertEqual(plan.sun_candidate_count, 2)
-        self.assertEqual(plan.moon_candidate_count, 1)
 
     def test_counts_when_not_clipped(self):
         planes = {
@@ -110,12 +106,9 @@ class TerminalRenderingTests(unittest.TestCase):
 
         self.assertEqual(plan.shown_count, 2)
         self.assertEqual(plan.total_count, 2)
-        self.assertEqual(plan.sun_candidate_count, 0)
-        self.assertEqual(plan.moon_candidate_count, 1)
         self.assertEqual(
             transit.terminal_tracking_summary(51.39309, 21.18876, plan),
-            "LAT: 51.39309 LON: 21.18876 | Aircraft: 2/2 shown | "
-            "Transit candidates: Sun 0, Moon 1",
+            "LAT: 51.39309 LON: 21.18876 | Aircraft: 2/2 shown",
         )
 
     def test_low_terminal_limit_hides_only_lower_priority_aircraft(self):
@@ -156,8 +149,6 @@ class TerminalRenderingTests(unittest.TestCase):
             {"CLEARED": entry}, 10, 200)
 
         self.assertEqual(plan.aircraft_ids, ("CLEARED",))
-        self.assertEqual(plan.sun_candidate_count, 0)
-        self.assertEqual(plan.moon_candidate_count, 0)
 
 
 if __name__ == "__main__":

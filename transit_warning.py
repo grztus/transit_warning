@@ -425,8 +425,6 @@ class TerminalRenderPlan:
     aircraft_ids: tuple
     shown_count: int
     total_count: int
-    sun_candidate_count: int
-    moon_candidate_count: int
 
 
 def clear_screen(output=None):
@@ -458,17 +456,11 @@ def build_terminal_render_plan(planes, row_limit, maximum_distance):
     """Prioritize a display-only copy without changing tracked aircraft order."""
     candidates = []
     remaining = []
-    sun_candidate_count = 0
-    moon_candidate_count = 0
 
     for original_index, icao in enumerate(planes):
         entry = planes[icao]
         sun_time = _positive_time2x(entry, 22)
         moon_time = _positive_time2x(entry, 26)
-        if sun_time is not None:
-            sun_candidate_count += 1
-        if moon_time is not None:
-            moon_candidate_count += 1
 
         try:
             is_renderable = float(entry[5]) <= maximum_distance
@@ -504,21 +496,16 @@ def build_terminal_render_plan(planes, row_limit, maximum_distance):
         aircraft_ids=shown,
         shown_count=len(shown),
         total_count=len(planes),
-        sun_candidate_count=sun_candidate_count,
-        moon_candidate_count=moon_candidate_count,
     )
 
 
 def terminal_tracking_summary(observer_lat, observer_lon, render_plan):
     return (
-        "LAT: {} LON: {} | Aircraft: {}/{} shown | "
-        "Transit candidates: Sun {}, Moon {}".format(
+        "LAT: {} LON: {} | Aircraft: {}/{} shown".format(
             observer_lat,
             observer_lon,
             render_plan.shown_count,
             render_plan.total_count,
-            render_plan.sun_candidate_count,
-            render_plan.moon_candidate_count,
         )
     )
 
