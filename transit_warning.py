@@ -417,6 +417,16 @@ def advance_replay_time(timestamp_utc):
 TERMINAL_HOME_CLEAR = "\x1b[H\x1b[J"
 TABLE_FIXED_OUTPUT_LINES = 9
 TERMINAL_SCROLL_GUARD_LINES = 1
+TRANSIT_TIME_DISPLAY_PRECISION = 3
+
+
+@dataclass(frozen=True)
+class TerminalRenderPlan:
+    aircraft_ids: tuple
+    shown_count: int
+    total_count: int
+    sun_candidate_count: int
+    moon_candidate_count: int
 
 
 def clear_screen(output=None):
@@ -433,6 +443,83 @@ def terminal_aircraft_row_limit(terminal_lines=None):
     return max(
         0,
         terminal_lines - TABLE_FIXED_OUTPUT_LINES - TERMINAL_SCROLL_GUARD_LINES,
+    )
+
+
+def _positive_time2x(entry, index):
+    try:
+        value = float(entry[index])
+    except (IndexError, TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def build_terminal_render_plan(planes, row_limit, maximum_distance):
+    """Prioritize a display-only copy without changing tracked aircraft order."""
+    candidates = []
+    remaining = []
+    sun_candidate_count = 0
+    moon_candidate_count = 0
+
+    for original_index, icao in enumerate(planes):
+        entry = planes[icao]
+        sun_time = _positive_time2x(entry, 22)
+        moon_time = _positive_time2x(entry, 26)
+        if sun_time is not None:
+            sun_candidate_count += 1
+        if moon_time is not None:
+            moon_candidate_count += 1
+
+        try:
+            is_renderable = float(entry[5]) <= maximum_distance
+        except (IndexError, TypeError, ValueError):
+            is_renderable = False
+        if not is_renderable:
+            continue
+
+        if sun_time is None and moon_time is None:
+            remaining.append(icao)
+            continue
+
+        transit_times = [
+            (sun_time, 0),
+            (moon_time, 1),
+        ]
+        nearest_time, body_priority = min(
+            (item for item in transit_times if item[0] is not None),
+            key=lambda item: (round(item[0], TRANSIT_TIME_DISPLAY_PRECISION),
+                              item[1]),
+        )
+        candidates.append((
+            round(nearest_time, TRANSIT_TIME_DISPLAY_PRECISION),
+            body_priority,
+            original_index,
+            icao,
+        ))
+
+    candidates.sort()
+    ordered = [candidate[3] for candidate in candidates] + remaining
+    shown = tuple(ordered[:max(0, row_limit)])
+    return TerminalRenderPlan(
+        aircraft_ids=shown,
+        shown_count=len(shown),
+        total_count=len(planes),
+        sun_candidate_count=sun_candidate_count,
+        moon_candidate_count=moon_candidate_count,
+    )
+
+
+def terminal_tracking_summary(observer_lat, observer_lon, render_plan):
+    return (
+        "LAT: {} LON: {} | Aircraft: {}/{} shown | "
+        "Transit candidates: Sun {}, Moon {}".format(
+            observer_lat,
+            observer_lon,
+            render_plan.shown_count,
+            render_plan.total_count,
+            render_plan.sun_candidate_count,
+            render_plan.moon_candidate_count,
+        )
     )
 
 # Funkcja do czyszczenia słownika samolotów / Function to clean the plane dictionary
@@ -695,16 +782,15 @@ def tabela():
         ' flight', 'elev', 'trck', '|', 'dist', '|', '[warn]','|', '[Alt]', '|', 'Alt', 'Azim', 'Azim', ' |', 'Sep', 'p2x', 'h2x', 'time2X', '|', 'Sep', 'p2x', 'h2x', 'time2X', ' |', 'age'))
         print("-------------------------|--------|--------- |---------|----------------------|----------------------------------|----------------------------------|------------------|")
 
-        aircraft_rows_remaining = terminal_aircraft_row_limit()
-        for pentry in plane_dict:
+        render_plan = build_terminal_render_plan(
+            plane_dict, terminal_aircraft_row_limit(), warning_distance)
+        for pentry in render_plan.aircraft_ids:
             try:
                 distance = float(plane_dict[pentry][5])
             except ValueError:
                 continue
 
             if distance <= warning_distance:
-                if aircraft_rows_remaining <= 0:
-                    continue
                 then = plane_dict[pentry][17] if plane_dict[pentry][17] else clock.now_utc()
                 diff_seconds = (clock.now_utc() - then).total_seconds()
                 diff_minutes = (clock.now_utc() - plane_dict[pentry][0]).total_seconds() / 60
@@ -786,11 +872,10 @@ def tabela():
                 wiersz += ' {} {} '.format(len(plane_dict[pentry][15]), len(plane_dict[pentry][16]))
                 wiersz += '{:>5.1f}'.format(diff_seconds)
                 print(wiersz)
-                aircraft_rows_remaining -= 1
 
         print(" ")
         print("{} (UTC) --- delay < {:.1f}s --- QNH {}hPa".format(clock.now_utc().time(), diff_t, pressure))
-        print("LAT:", my_lat, "LON:", my_lon)
+        print(terminal_tracking_summary(my_lat, my_lon, render_plan))
         # Print combined port and recorder statuses.
         for status_line in source_status_lines():
             print(status_line)

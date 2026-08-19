@@ -4,6 +4,14 @@ import unittest
 import transit_warning as transit
 
 
+def aircraft(distance=10, sun_time="", moon_time=""):
+    entry = [""] * 32
+    entry[5] = distance
+    entry[22] = sun_time
+    entry[26] = moon_time
+    return entry
+
+
 class TerminalRenderingTests(unittest.TestCase):
     def test_clear_screen_homes_cursor_and_clears_to_end(self):
         output = io.StringIO()
@@ -23,6 +31,105 @@ class TerminalRenderingTests(unittest.TestCase):
 
     def test_small_terminal_never_produces_negative_row_limit(self):
         self.assertEqual(transit.terminal_aircraft_row_limit(5), 0)
+
+    def test_candidates_are_sorted_together_by_nearest_time(self):
+        planes = {
+            "MOON_LATER": aircraft(moon_time=8),
+            "SUN_MIDDLE": aircraft(sun_time=5),
+            "MOON_FIRST": aircraft(moon_time=2),
+        }
+
+        plan = transit.build_terminal_render_plan(planes, 10, 200)
+
+        self.assertEqual(
+            plan.aircraft_ids,
+            ("MOON_FIRST", "SUN_MIDDLE", "MOON_LATER"),
+        )
+
+    def test_practical_time_tie_prefers_sun(self):
+        planes = {
+            "MOON": aircraft(moon_time=10.0004),
+            "SUN": aircraft(sun_time=10.0),
+        }
+
+        plan = transit.build_terminal_render_plan(planes, 10, 200)
+
+        self.assertEqual(plan.aircraft_ids, ("SUN", "MOON"))
+
+    def test_dual_candidate_is_not_duplicated_and_uses_nearest_transit(self):
+        planes = {
+            "SUN_ONLY": aircraft(sun_time=4),
+            "DUAL": aircraft(sun_time=9, moon_time=3),
+        }
+
+        plan = transit.build_terminal_render_plan(planes, 10, 200)
+
+        self.assertEqual(plan.aircraft_ids, ("DUAL", "SUN_ONLY"))
+        self.assertEqual(plan.aircraft_ids.count("DUAL"), 1)
+        self.assertEqual(plan.sun_candidate_count, 2)
+        self.assertEqual(plan.moon_candidate_count, 1)
+
+    def test_non_candidates_keep_existing_order_after_candidates(self):
+        planes = {
+            "FIRST": aircraft(),
+            "CANDIDATE": aircraft(sun_time=20),
+            "SECOND": aircraft(),
+            "THIRD": aircraft(),
+        }
+
+        plan = transit.build_terminal_render_plan(planes, 10, 200)
+
+        self.assertEqual(
+            plan.aircraft_ids,
+            ("CANDIDATE", "FIRST", "SECOND", "THIRD"),
+        )
+
+    def test_counts_shown_tracked_and_candidates_when_clipped(self):
+        planes = {
+            "ORDINARY": aircraft(),
+            "SUN": aircraft(sun_time=10),
+            "MOON": aircraft(moon_time=12),
+            "OUTSIDE": aircraft(distance=250, sun_time=30),
+        }
+
+        plan = transit.build_terminal_render_plan(planes, 2, 200)
+
+        self.assertEqual(plan.aircraft_ids, ("SUN", "MOON"))
+        self.assertEqual(plan.shown_count, 2)
+        self.assertEqual(plan.total_count, 4)
+        self.assertEqual(plan.sun_candidate_count, 2)
+        self.assertEqual(plan.moon_candidate_count, 1)
+
+    def test_counts_when_not_clipped(self):
+        planes = {
+            "FIRST": aircraft(),
+            "MOON": aircraft(moon_time=7),
+        }
+
+        plan = transit.build_terminal_render_plan(planes, 20, 200)
+
+        self.assertEqual(plan.shown_count, 2)
+        self.assertEqual(plan.total_count, 2)
+        self.assertEqual(plan.sun_candidate_count, 0)
+        self.assertEqual(plan.moon_candidate_count, 1)
+        self.assertEqual(
+            transit.terminal_tracking_summary(51.39309, 21.18876, plan),
+            "LAT: 51.39309 LON: 21.18876 | Aircraft: 2/2 shown | "
+            "Transit candidates: Sun 0, Moon 1",
+        )
+
+    def test_low_terminal_limit_hides_only_lower_priority_aircraft(self):
+        planes = {
+            "FIRST": aircraft(),
+            "MOON": aircraft(moon_time=5),
+            "SUN": aircraft(sun_time=2),
+        }
+
+        plan = transit.build_terminal_render_plan(planes, 1, 200)
+
+        self.assertEqual(plan.aircraft_ids, ("SUN",))
+        self.assertEqual(plan.shown_count, 1)
+        self.assertEqual(plan.total_count, 3)
 
 
 if __name__ == "__main__":
