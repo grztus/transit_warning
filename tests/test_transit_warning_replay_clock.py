@@ -93,6 +93,8 @@ class ProcessLineReplayClockTests(unittest.TestCase):
         self.original_transit_pred = transit.transit_pred
         self.original_environment_replay = transit.environment_replay
         self.original_pressure = transit.pressure
+        self.original_sun_alt = getattr(transit, "sun_alt", None)
+        self.original_moon_alt = getattr(transit, "moon_alt", None)
         transit.clock = ReplayClock()
         transit.replay_time_initialized = False
         transit.metar_t = None
@@ -102,9 +104,13 @@ class ProcessLineReplayClockTests(unittest.TestCase):
         transit.gong_t = None
         transit.last_update_time = None
         transit.plane_dict = {}
+        transit.sun_prediction_last_valid.clear()
+        transit.moon_prediction_last_valid.clear()
         transit.environment_replay = None
         transit.pressure = 1013
-        transit.tabela = lambda: (0, 0, 0, 0)
+        transit.sun_alt = 30.0
+        transit.moon_alt = 20.0
+        transit.tabela = lambda: (30.0, 120.0, 20.0, 90.0)
 
     def tearDown(self):
         transit.clock = self.original_clock
@@ -112,6 +118,10 @@ class ProcessLineReplayClockTests(unittest.TestCase):
         transit.transit_pred = self.original_transit_pred
         transit.environment_replay = self.original_environment_replay
         transit.pressure = self.original_pressure
+        transit.sun_alt = self.original_sun_alt
+        transit.moon_alt = self.original_moon_alt
+        transit.sun_prediction_last_valid.clear()
+        transit.moon_prediction_last_valid.clear()
 
     def process(self, generated, logged, port=30106, icao="ABC123"):
         transit.process_line(message(generated, logged, icao), port)
@@ -237,7 +247,7 @@ class ProcessLineReplayClockTests(unittest.TestCase):
         self.assertEqual(transit.plane_dict["MSG005"][4], expected_metres)
         self.assertEqual(transit.plane_dict["MSG003"][4], expected_metres)
 
-    def test_missing_prediction_clears_old_sun_and_moon_blocks(self):
+    def test_missing_prediction_after_one_second_keeps_blocks(self):
         timestamp = "2024/05/18 12:00:00.000"
         transit.transit_pred = Mock(side_effect=[
             self.prediction(38.0, 120), self.prediction(38.0, 130)])
@@ -249,7 +259,76 @@ class ProcessLineReplayClockTests(unittest.TestCase):
         transit.process_line(
             self.msg3("2024/05/18 12:00:01.000"), 30106)
 
+        self.assertEqual(transit.plane_dict["ABC123"][22], 130)
+        self.assertEqual(transit.plane_dict["ABC123"][26], 120)
+
+    def test_prediction_returning_within_grace_refreshes_without_flicker(self):
+        transit.transit_pred = Mock(side_effect=[
+            self.prediction(38.0, 120), self.prediction(38.0, 130)])
+        transit.process_line(self.msg3("2024/05/18 12:00:00.000"), 30106)
+        transit.transit_pred = Mock(side_effect=[0, 0])
+        transit.process_line(self.msg3("2024/05/18 12:00:01.000"), 30106)
+
+        transit.transit_pred = Mock(side_effect=[
+            self.prediction(39.0, 110), self.prediction(39.0, 115)])
+        transit.process_line(self.msg3("2024/05/18 12:00:02.000"), 30106)
+
+        self.assertEqual(transit.plane_dict["ABC123"][22], 115)
+        self.assertEqual(transit.plane_dict["ABC123"][26], 110)
+        self.assertEqual(
+            transit.sun_prediction_last_valid["ABC123"],
+            utc("2024/05/18 12:00:02.000"))
+        self.assertEqual(
+            transit.moon_prediction_last_valid["ABC123"],
+            utc("2024/05/18 12:00:02.000"))
+
+    def test_missing_prediction_at_2_999_seconds_keeps_blocks(self):
+        transit.transit_pred = Mock(side_effect=[
+            self.prediction(38.0, 120), self.prediction(38.0, 130)])
+        transit.process_line(self.msg3("2024/05/18 12:00:00.000"), 30106)
+        transit.transit_pred = Mock(side_effect=[0, 0])
+
+        transit.process_line(self.msg3("2024/05/18 12:00:02.999"), 30106)
+
+        self.assertEqual(transit.plane_dict["ABC123"][22], 130)
+        self.assertEqual(transit.plane_dict["ABC123"][26], 120)
+
+    def test_missing_prediction_at_exactly_three_seconds_clears_blocks(self):
+        transit.transit_pred = Mock(side_effect=[
+            self.prediction(38.0, 120), self.prediction(38.0, 130)])
+        transit.process_line(self.msg3("2024/05/18 12:00:00.000"), 30106)
+        transit.transit_pred = Mock(side_effect=[0, 0])
+
+        transit.process_line(self.msg3("2024/05/18 12:00:03.000"), 30106)
+
         self.assertEqual(transit.plane_dict["ABC123"][18:28], [""] * 10)
+
+    def test_many_missing_frames_do_not_shorten_time_based_grace(self):
+        transit.transit_pred = Mock(side_effect=[
+            self.prediction(38.0, 120), self.prediction(38.0, 130)])
+        transit.process_line(self.msg3("2024/05/18 12:00:00.000"), 30106)
+        transit.transit_pred = Mock(return_value=0)
+
+        for timestamp in ("12:00:00.500", "12:00:01.000", "12:00:02.999"):
+            transit.process_line(self.msg3(
+                "2024/05/18 {}".format(timestamp)), 30106)
+
+        self.assertEqual(transit.plane_dict["ABC123"][22], 130)
+        self.assertEqual(transit.plane_dict["ABC123"][26], 120)
+
+    def test_sun_and_moon_grace_are_independent(self):
+        transit.transit_pred = Mock(side_effect=[
+            self.prediction(38.0, 120), self.prediction(38.0, 130)])
+        transit.process_line(self.msg3("2024/05/18 12:00:00.000"), 30106)
+        transit.transit_pred = Mock(side_effect=[
+            0, self.prediction(39.0, 115)])
+
+        transit.process_line(self.msg3("2024/05/18 12:00:03.000"), 30106)
+
+        self.assertEqual(transit.plane_dict["ABC123"][23:28], [""] * 5)
+        self.assertEqual(transit.plane_dict["ABC123"][22], 115)
+        self.assertNotIn("ABC123", transit.moon_prediction_last_valid)
+        self.assertIn("ABC123", transit.sun_prediction_last_valid)
 
     def test_moon_below_horizon_clears_previous_moon_prediction(self):
         timestamp = "2024/05/18 12:00:00.000"
@@ -281,7 +360,44 @@ class ProcessLineReplayClockTests(unittest.TestCase):
 
         self.assertEqual(transit.plane_dict["ABC123"][18:28], [""] * 10)
 
+    def test_missing_altitude_without_fallback_does_not_start_expiry(self):
+        transit.transit_pred = Mock(side_effect=[
+            self.prediction(38.0, 120), self.prediction(38.0, 130)])
+        transit.process_line(self.msg3("2024/05/18 12:00:00.000"), 30106)
+        transit.plane_dict["ABC123"][4] = ""
+        transit.transit_pred = Mock(return_value=0)
+
+        transit.process_line(self.msg3(
+            "2024/05/18 12:00:10.000", altitude="",
+            latitude="51.3", longitude="21.4"), 30106)
+
+        transit.transit_pred.assert_not_called()
+        self.assertEqual(transit.plane_dict["ABC123"][2:4], [51.3, 21.4])
+        self.assertEqual(transit.plane_dict["ABC123"][22], 130)
+        self.assertEqual(transit.plane_dict["ABC123"][26], 120)
+
+    def test_renderer_keeps_candidate_during_grace_and_drops_after_expiry(self):
+        transit.transit_pred = Mock(side_effect=[
+            self.prediction(38.0, 120), self.prediction(38.0, 130)])
+        transit.process_line(self.msg3("2024/05/18 12:00:00.000"), 30106)
+        ordinary = [""] * 32
+        ordinary[5] = 10
+        transit.transit_pred = Mock(return_value=0)
+
+        transit.process_line(self.msg3("2024/05/18 12:00:01.000"), 30106)
+        during_grace = transit.build_terminal_render_plan(
+            {"ORDINARY": ordinary, "ABC123": transit.plane_dict["ABC123"]},
+            2, 200)
+        transit.process_line(self.msg3("2024/05/18 12:00:03.000"), 30106)
+        after_expiry = transit.build_terminal_render_plan(
+            {"ORDINARY": ordinary, "ABC123": transit.plane_dict["ABC123"]},
+            2, 200)
+
+        self.assertEqual(during_grace.aircraft_ids[0], "ABC123")
+        self.assertEqual(after_expiry.aircraft_ids[0], "ORDINARY")
+
     def test_msg3_without_altitude_updates_position_without_type_error(self):
+        transit.transit_pred = Mock(return_value=0)
         transit.process_line(
             self.msg3("2024/05/18 12:00:00.000", altitude=""), 30003)
         transit.process_line(
@@ -292,6 +408,7 @@ class ProcessLineReplayClockTests(unittest.TestCase):
         self.assertIn("VALID", transit.plane_dict)
 
     def test_msg3_without_altitude_preserves_height_and_updates_position(self):
+        transit.transit_pred = Mock(return_value=0)
         transit.process_line(
             self.msg3("2024/05/18 12:00:00.000"), 30003)
         previous_elevation = transit.plane_dict["ABC123"][4]

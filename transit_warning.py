@@ -150,6 +150,7 @@ shutdown_complete = False
 
 # Global settings / Globalne ustawienia
 MAX_AGE_SECONDS = 60  # Maksymalny czas życia wpisu po ostatnim odbiorze sygnału (w sekundach) / Maximum entry lifetime after the last received signal (in seconds)
+TRANSIT_PREDICTION_GRACE_SECONDS = 3.0
 
 # Deklaracja globalnych zmiennych / Declaration of global variables
 global metar_t
@@ -179,6 +180,8 @@ earth_R = 6371  # Promień Ziemi w km / Radius of the earth in km
 # Inicjalizacja pustych słowników i kolejek / Initialize empty dictionaries and deques
 plane_dict = {}
 altitude_sources = {}
+sun_prediction_last_valid = {}
+moon_prediction_last_valid = {}
 plane_dict_lock = threading.RLock()
 plane_deque = deque()
 
@@ -542,6 +545,37 @@ def clear_transit_prediction(entry, start_index):
     entry[start_index:start_index + 5] = [""] * 5
 
 
+def update_transit_prediction_timestamp(icao, celestial_body, now_utc):
+    timestamps = (
+        sun_prediction_last_valid
+        if celestial_body == "sun" else moon_prediction_last_valid)
+    timestamps[icao] = now_utc
+
+
+def clear_transit_prediction_state(icao, entry, celestial_body,
+                                   start_index):
+    clear_transit_prediction(entry, start_index)
+    timestamps = (
+        sun_prediction_last_valid
+        if celestial_body == "sun" else moon_prediction_last_valid)
+    timestamps.pop(icao, None)
+
+
+def expire_transit_prediction_after_grace(icao, entry, celestial_body,
+                                          start_index, now_utc):
+    """Keep one missing prediction briefly to absorb input-stream jitter."""
+    timestamps = (
+        sun_prediction_last_valid
+        if celestial_body == "sun" else moon_prediction_last_valid)
+    last_valid = timestamps.get(icao)
+    has_active_prediction = is_float_try(entry[start_index + 4])
+    if (not has_active_prediction or last_valid is None
+            or (now_utc - last_valid).total_seconds()
+            >= TRANSIT_PREDICTION_GRACE_SECONDS):
+        clear_transit_prediction_state(
+            icao, entry, celestial_body, start_index)
+
+
 # Funkcja do czyszczenia słownika samolotów / Function to clean the plane dictionary
 @synchronized_plane_dict
 def clean_dict():
@@ -550,6 +584,8 @@ def clean_dict():
     for icao in to_delete:
         del plane_dict[icao]
         altitude_sources.pop(icao, None)
+        sun_prediction_last_valid.pop(icao, None)
+        moon_prediction_last_valid.pop(icao, None)
 
 # Funkcja do obliczania odległości między punktami (haversine) / Function to calculate distance between points (haversine)
 def haversine(origin, destination):
@@ -982,6 +1018,8 @@ def clean_transit_dict():
     for icao in to_delete:
         del plane_dict[icao]
         altitude_sources.pop(icao, None)
+        sun_prediction_last_valid.pop(icao, None)
+        moon_prediction_last_valid.pop(icao, None)
 
 # Function to manage sockets blocked in readline() during controlled shutdown.
 def _register_active_socket(port, sock):
@@ -1308,12 +1346,13 @@ def process_line(line, port):
             plane_dict[icao][8] = "LEAVING"
         tst_int1 = transit_pred((my_lat, my_lon), (plane_lat, plane_lon), track, velocity, elevation, moon_alt, moon_az)
         tst_int2 = transit_pred((my_lat, my_lon), (plane_lat, plane_lon), track, velocity, elevation, sun_alt, sun_az)
+        prediction_now = clock.now_utc()
         if tst_int1:
             alt_a = round(tst_int1[3], 2)
             dst_h2x = round(tst_int1[4], 2)
             dst_p2x = round(tst_int1[5], 2)
             delta_time = int(tst_int1[6])
-            if delta_time <= 900:  # Ignore transits with time to transit greater than 900 seconds
+            if 0 <= delta_time <= 900:  # Ignore past or excessively distant transits
                 plane_dict[icao][25] = dst_h2x
                 plane_dict[icao][23] = moon_alt
                 plane_dict[icao][24] = alt_a
@@ -1327,16 +1366,24 @@ def process_line(line, port):
                     plane_dict[icao][31] = True
                     plane_dict[icao][30] = clock.now_utc()  # Ustaw czas rozpoczęcia tranzytu / Set transit start time
                 plane_dict[icao][29] = clock.now_utc()
+                update_transit_prediction_timestamp(
+                    icao, "moon", prediction_now)
             else:
-                clear_transit_prediction(plane_dict[icao], 23)
+                clear_transit_prediction_state(
+                    icao, plane_dict[icao], "moon", 23)
         else:
-            clear_transit_prediction(plane_dict[icao], 23)
+            if moon_alt < 0.1:
+                clear_transit_prediction_state(
+                    icao, plane_dict[icao], "moon", 23)
+            else:
+                expire_transit_prediction_after_grace(
+                    icao, plane_dict[icao], "moon", 23, prediction_now)
         if tst_int2:
             alt_a = round(tst_int2[3], 2)
             dst_h2x = round(tst_int2[4], 2)
             dst_p2x = round(tst_int2[5], 2)
             delta_time = int(tst_int2[6])
-            if delta_time <= 900:  # Ignore transits with time to transit greater than 900 seconds
+            if 0 <= delta_time <= 900:  # Ignore past or excessively distant transits
                 plane_dict[icao][20] = dst_h2x
                 plane_dict[icao][18] = sun_alt
                 plane_dict[icao][19] = alt_a
@@ -1350,10 +1397,18 @@ def process_line(line, port):
                     plane_dict[icao][31] = True
                     plane_dict[icao][30] = clock.now_utc()  # Ustaw czas rozpoczęcia tranzytu / Set transit start time
                 plane_dict[icao][30] = clock.now_utc()
+                update_transit_prediction_timestamp(
+                    icao, "sun", prediction_now)
             else:
-                clear_transit_prediction(plane_dict[icao], 18)
+                clear_transit_prediction_state(
+                    icao, plane_dict[icao], "sun", 18)
         else:
-            clear_transit_prediction(plane_dict[icao], 18)
+            if sun_alt < 0.1:
+                clear_transit_prediction_state(
+                    icao, plane_dict[icao], "sun", 18)
+            else:
+                expire_transit_prediction_after_grace(
+                    icao, plane_dict[icao], "sun", 18, prediction_now)
     sun_alt, sun_az, moon_alt, moon_az = tabela()
     clean_dict()
     clean_transit_dict()
