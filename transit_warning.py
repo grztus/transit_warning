@@ -61,7 +61,7 @@ USA.
 from __future__ import print_function
 import argparse
 import os
-import subprocess
+import shutil
 import sys
 import datetime
 import time
@@ -414,11 +414,26 @@ def advance_replay_time(timestamp_utc):
             replay_time_initialized = True
 
 # Funkcja do czyszczenia ekranu / Function to clear the screen
-def clear_screen():
-    if os.name == 'nt':
-        subprocess.call('cls', shell=True)
-    else:
-        subprocess.call('clear', shell=True)
+TERMINAL_HOME_CLEAR = "\x1b[H\x1b[J"
+TABLE_FIXED_OUTPUT_LINES = 9
+TERMINAL_SCROLL_GUARD_LINES = 1
+
+
+def clear_screen(output=None):
+    """Start a terminal frame at the visible top-left corner."""
+    output = sys.stdout if output is None else output
+    output.write(TERMINAL_HOME_CLEAR)
+    output.flush()
+
+
+def terminal_aircraft_row_limit(terminal_lines=None):
+    """Return the aircraft rows that fit without scrolling the frame."""
+    if terminal_lines is None:
+        terminal_lines = shutil.get_terminal_size(fallback=(80, 24)).lines
+    return max(
+        0,
+        terminal_lines - TABLE_FIXED_OUTPUT_LINES - TERMINAL_SCROLL_GUARD_LINES,
+    )
 
 # Funkcja do czyszczenia słownika samolotów / Function to clean the plane dictionary
 @synchronized_plane_dict
@@ -680,6 +695,7 @@ def tabela():
         ' flight', 'elev', 'trck', '|', 'dist', '|', '[warn]','|', '[Alt]', '|', 'Alt', 'Azim', 'Azim', ' |', 'Sep', 'p2x', 'h2x', 'time2X', '|', 'Sep', 'p2x', 'h2x', 'time2X', ' |', 'age'))
         print("-------------------------|--------|--------- |---------|----------------------|----------------------------------|----------------------------------|------------------|")
 
+        aircraft_rows_remaining = terminal_aircraft_row_limit()
         for pentry in plane_dict:
             try:
                 distance = float(plane_dict[pentry][5])
@@ -687,6 +703,8 @@ def tabela():
                 continue
 
             if distance <= warning_distance:
+                if aircraft_rows_remaining <= 0:
+                    continue
                 then = plane_dict[pentry][17] if plane_dict[pentry][17] else clock.now_utc()
                 diff_seconds = (clock.now_utc() - then).total_seconds()
                 diff_minutes = (clock.now_utc() - plane_dict[pentry][0]).total_seconds() / 60
@@ -768,6 +786,7 @@ def tabela():
                 wiersz += ' {} {} '.format(len(plane_dict[pentry][15]), len(plane_dict[pentry][16]))
                 wiersz += '{:>5.1f}'.format(diff_seconds)
                 print(wiersz)
+                aircraft_rows_remaining -= 1
 
         print(" ")
         print("{} (UTC) --- delay < {:.1f}s --- QNH {}hPa".format(clock.now_utc().time(), diff_t, pressure))
