@@ -131,6 +131,34 @@ class TerminalRenderingTests(unittest.TestCase):
         self.assertEqual(plan.shown_count, 1)
         self.assertEqual(plan.total_count, 3)
 
+    def test_transit_columns_are_sun_first_and_moon_second(self):
+        entry = aircraft()
+        entry[18:28] = [37.9, 32.29, 17.9, 33.7, 135,
+                        -35.3, -30.0, 44.4, 240, 55.5]
+
+        sun, moon = transit.terminal_transit_values(entry)
+
+        self.assertAlmostEqual(sun[0], 5.61)
+        self.assertEqual(sun[1:], (33.7, 17.9, 135))
+        self.assertAlmostEqual(moon[0], 5.3)
+        self.assertEqual(moon[1:], (55.5, 44.4, 240))
+
+    def test_vertical_separation_is_never_negative(self):
+        self.assertAlmostEqual(
+            transit.vertical_transit_separation(32.29, 37.9), 5.61)
+
+    def test_cleared_prediction_is_not_a_render_candidate(self):
+        entry = aircraft(sun_time=135, moon_time=240)
+        transit.clear_transit_prediction(entry, 18)
+        transit.clear_transit_prediction(entry, 23)
+
+        plan = transit.build_terminal_render_plan(
+            {"CLEARED": entry}, 10, 200)
+
+        self.assertEqual(plan.aircraft_ids, ("CLEARED",))
+        self.assertEqual(plan.sun_candidate_count, 0)
+        self.assertEqual(plan.moon_candidate_count, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

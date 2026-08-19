@@ -122,6 +122,25 @@ class ProcessLineReplayClockTests(unittest.TestCase):
     def set_environment(self, *events):
         transit.environment_replay = EnvironmentReplay(events)
 
+    def msg3(self, timestamp, icao="ABC123", altitude="10000",
+             latitude="51.2", longitude="21.2"):
+        return (
+            "MSG,3,1,1,{icao},1,{date},{time},{date},{time},,{altitude},"
+            "180,,{latitude},{longitude}".format(
+                icao=icao,
+                date=timestamp.split()[0],
+                time=timestamp.split()[1],
+                altitude=altitude,
+                latitude=latitude,
+                longitude=longitude,
+            )
+        )
+
+    @staticmethod
+    def prediction(altitude, time_to_transit):
+        return (51.2, 21.2, 120.0, altitude, 17.9, 33.7,
+                time_to_transit, 0, 120.0, 37.9, None)
+
     def test_generated_stays_on_record_and_logged_initializes_clock_and_globals(self):
         generated = "2024/05/18 12:00:00.000"
         logged = "2024/05/18 12:00:00.250"
@@ -217,6 +236,73 @@ class ProcessLineReplayClockTests(unittest.TestCase):
         expected_metres = transit.correct_pressure_altitude(5000, 1000.0) * 0.3048
         self.assertEqual(transit.plane_dict["MSG005"][4], expected_metres)
         self.assertEqual(transit.plane_dict["MSG003"][4], expected_metres)
+
+    def test_missing_prediction_clears_old_sun_and_moon_blocks(self):
+        timestamp = "2024/05/18 12:00:00.000"
+        transit.transit_pred = Mock(side_effect=[
+            self.prediction(38.0, 120), self.prediction(38.0, 130)])
+        transit.process_line(self.msg3(timestamp), 30106)
+        self.assertEqual(transit.plane_dict["ABC123"][22], 130)
+        self.assertEqual(transit.plane_dict["ABC123"][26], 120)
+
+        transit.transit_pred = Mock(side_effect=[0, 0])
+        transit.process_line(
+            self.msg3("2024/05/18 12:00:01.000"), 30106)
+
+        self.assertEqual(transit.plane_dict["ABC123"][18:28], [""] * 10)
+
+    def test_moon_below_horizon_clears_previous_moon_prediction(self):
+        timestamp = "2024/05/18 12:00:00.000"
+        transit.transit_pred = Mock(side_effect=[
+            self.prediction(38.0, 120), self.prediction(38.0, 130)])
+        transit.process_line(self.msg3(timestamp), 30106)
+        transit.moon_alt = -35.3
+        transit.sun_alt = 37.9
+
+        original_prediction = self.prediction(38.0, 140)
+        transit.transit_pred = Mock(side_effect=lambda *args: (
+            0 if args[-2] < 0.1 else original_prediction))
+        transit.process_line(
+            self.msg3("2024/05/18 12:00:01.000"), 30106)
+
+        self.assertEqual(transit.plane_dict["ABC123"][23:28], [""] * 5)
+        self.assertEqual(transit.plane_dict["ABC123"][22], 140)
+
+    def test_prediction_over_900_seconds_clears_old_candidate(self):
+        timestamp = "2024/05/18 12:00:00.000"
+        transit.transit_pred = Mock(side_effect=[
+            self.prediction(38.0, 120), self.prediction(38.0, 130)])
+        transit.process_line(self.msg3(timestamp), 30106)
+
+        transit.transit_pred = Mock(side_effect=[
+            self.prediction(38.0, 901), self.prediction(38.0, 901)])
+        transit.process_line(
+            self.msg3("2024/05/18 12:00:01.000"), 30106)
+
+        self.assertEqual(transit.plane_dict["ABC123"][18:28], [""] * 10)
+
+    def test_msg3_without_altitude_updates_position_without_type_error(self):
+        transit.process_line(
+            self.msg3("2024/05/18 12:00:00.000", altitude=""), 30003)
+        transit.process_line(
+            self.msg3("2024/05/18 12:00:01.000", icao="VALID"), 30003)
+
+        self.assertEqual(transit.plane_dict["ABC123"][2:4], [51.2, 21.2])
+        self.assertEqual(transit.plane_dict["ABC123"][4], "")
+        self.assertIn("VALID", transit.plane_dict)
+
+    def test_msg3_without_altitude_preserves_height_and_updates_position(self):
+        transit.process_line(
+            self.msg3("2024/05/18 12:00:00.000"), 30003)
+        previous_elevation = transit.plane_dict["ABC123"][4]
+
+        transit.process_line(self.msg3(
+            "2024/05/18 12:00:01.000", altitude="",
+            latitude="51.3", longitude="21.4"), 30003)
+
+        self.assertEqual(transit.plane_dict["ABC123"][2:4], [51.3, 21.4])
+        self.assertEqual(transit.plane_dict["ABC123"][4], previous_elevation)
+        self.assertTrue(isinstance(transit.plane_dict["ABC123"][7], float))
 
     def test_missing_environment_file_keeps_fallback(self):
         transit.configure_environment_replay(None)

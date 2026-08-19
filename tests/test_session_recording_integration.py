@@ -54,6 +54,27 @@ class BlockingSocket:
         self.closed.set()
 
 
+class StopAfterLinesSocket:
+    def __init__(self, lines):
+        self.lines = iter(lines)
+
+    def connect(self, endpoint):
+        self.endpoint = endpoint
+
+    def makefile(self):
+        return self
+
+    def readline(self):
+        try:
+            return next(self.lines)
+        except StopIteration:
+            transit.stop_event.set()
+            return ""
+
+    def close(self):
+        pass
+
+
 class ReadFromPortRecordingTests(unittest.TestCase):
     def run_reader(self, sockets, recorder, processor, port=30003):
         transit.stop_event.clear()
@@ -94,6 +115,31 @@ class ReadFromPortRecordingTests(unittest.TestCase):
         processor = Mock()
         self.run_reader([FakeSocket(["line\n"])], recorder, processor)
         processor.assert_called_once_with("line", 30003)
+
+    def test_invalid_msg3_altitude_does_not_reconnect_healthy_socket(self):
+        transit.apply_installation_config(TEST_CONFIG)
+        invalid = (
+            "MSG,3,1,1,BADALT,1,2024/05/18,12:00:00.000,"
+            "2024/05/18,12:00:00.000,,,180,,51.2,21.2\n"
+        )
+        following = "NEXT LINE\n"
+        sock = StopAfterLinesSocket([invalid, following])
+        socket_factory = Mock(return_value=sock)
+        processed = []
+
+        def processor(line, port):
+            processed.append(line)
+            if len(processed) == 1:
+                transit.process_line(line, port)
+
+        transit.stop_event.clear()
+        with patch.object(transit.socket, "socket", socket_factory):
+            transit.read_from_port(
+                "receiver", TEST_CONFIG.adsb_port, processor, None)
+        transit.stop_event.clear()
+
+        self.assertEqual(processed, [invalid.strip(), following.strip()])
+        self.assertEqual(socket_factory.call_count, 1)
 
     def test_shutdown_closes_socket_and_wakes_blocking_readline(self):
         transit.stop_event.clear()

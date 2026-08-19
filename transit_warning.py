@@ -522,6 +522,28 @@ def terminal_tracking_summary(observer_lat, observer_lon, render_plan):
         )
     )
 
+
+def vertical_transit_separation(predicted_alt, body_alt):
+    """Return the existing vertical-only transit separation as a magnitude."""
+    if not is_float_try(predicted_alt) or not is_float_try(body_alt):
+        return 90.0
+    return abs(float(predicted_alt) - float(body_alt))
+
+
+def terminal_transit_values(entry):
+    """Return display blocks in header order: Sun first, then Moon."""
+    return (
+        (vertical_transit_separation(entry[19], entry[18]),
+         entry[21], entry[20], entry[22]),
+        (vertical_transit_separation(entry[24], entry[23]),
+         entry[27], entry[25], entry[26]),
+    )
+
+
+def clear_transit_prediction(entry, start_index):
+    entry[start_index:start_index + 5] = [""] * 5
+
+
 # Funkcja do czyszczenia słownika samolotów / Function to clean the plane dictionary
 @synchronized_plane_dict
 def clean_dict():
@@ -800,8 +822,13 @@ def tabela():
                 else:
                     wiersz = '{}{:<9}{}'.format(RESET, pentry, RESET)
 
-                elevation = int(plane_dict[pentry][4]) if is_float_try(plane_dict[pentry][4]) else 9999
-                wiersz += '{}{:>7}{} '.format(elev_col(elevation), elevation, RESET)
+                has_elevation = is_float_try(plane_dict[pentry][4])
+                elevation = int(plane_dict[pentry][4]) if has_elevation else None
+                if has_elevation:
+                    wiersz += '{}{:>7}{} '.format(
+                        elev_col(elevation), elevation, RESET)
+                else:
+                    wiersz += '{:>7} '.format('---')
                 wiersz += '{:>7} | '.format(plane_dict[pentry][11])
 
                 wiersz += '{}{:>6.1f}{} | '.format(dist_col(plane_dict[pentry][5]), distance, RESET)
@@ -820,13 +847,22 @@ def tabela():
                 else:
                     wiersz += '[{}{:>7.1f}{}]'.format(PURPLE, warn_val, RESET)
 
-                if is_float_try(plane_dict[pentry][13]):
+                if has_elevation and is_float_try(plane_dict[pentry][13]):
                     altitudeX = round(degrees(atan((elevation - my_elevation_const) / (float(plane_dict[pentry][13]) * 1000))), 1) if plane_dict[pentry][13] else 0
                 else:
-                    altitudeX = 0.0
+                    altitudeX = None
 
-                wiersz += '[{}{:>7.1f}{}] | '.format(alt_col(altitudeX), altitudeX, RESET)
-                wiersz += '{}{:>6.1f}{}'.format(alt_col(plane_dict[pentry][7]), plane_dict[pentry][7], RESET)
+                if altitudeX is not None:
+                    wiersz += '[{}{:>7.1f}{}] | '.format(
+                        alt_col(altitudeX), altitudeX, RESET)
+                else:
+                    wiersz += '[{:>7}] | '.format('---')
+                if is_float_try(plane_dict[pentry][7]):
+                    current_altitude = float(plane_dict[pentry][7])
+                    wiersz += '{}{:>6.1f}{}'.format(
+                        alt_col(current_altitude), current_altitude, RESET)
+                else:
+                    wiersz += '{:>6}'.format('---')
 
                 if diff_seconds >= 999:
                     wiersz += '{}x{}'.format(RED, RESET)
@@ -843,27 +879,29 @@ def tabela():
                 wiersz += '{:>6} | '.format(wind_deg_to_str1(plane_dict[pentry][6]))
 
                 diff_secx = (clock.now_utc() - plane_dict[pentry][0]).total_seconds()
-                separation_deg = float(plane_dict[pentry][24] - plane_dict[pentry][23]) if is_float_try(plane_dict[pentry][24]) and is_float_try(plane_dict[pentry][23]) else 90.0
+                sun_values, moon_values = terminal_transit_values(
+                    plane_dict[pentry])
+                separation_deg = sun_values[0]
 
                 if -transit_separation_GREENALERT_FG < separation_deg < transit_separation_GREENALERT_FG:
-                    wiersz += '{}{:>7.2f}{} {:>7.1f} {:>7.1f} {:>8.1f}'.format(GREENALERT, separation_deg, RESET, plane_dict[pentry][27], plane_dict[pentry][25], plane_dict[pentry][26])
+                    wiersz += '{}{:>7.2f}{} {:>7.1f} {:>7.1f} {:>8.1f}'.format(GREENALERT, separation_deg, RESET, *sun_values[1:])
                 elif -transit_separation_REDALERT_FG < separation_deg < transit_separation_REDALERT_FG:
-                    wiersz += '{}{:>7.2f}{} {:>7.1f} {:>7.1f} {:>8.1f}'.format(REDALERT, separation_deg, RESET, plane_dict[pentry][27], plane_dict[pentry][25], plane_dict[pentry][26])
+                    wiersz += '{}{:>7.2f}{} {:>7.1f} {:>7.1f} {:>8.1f}'.format(REDALERT, separation_deg, RESET, *sun_values[1:])
                 elif -transit_separation_notignored < separation_deg < transit_separation_notignored:
-                    wiersz += '{}{:>7.2f}{} {:>7.1f} {:>7.1f} {:>8.1f}'.format(RED, separation_deg, RESET, plane_dict[pentry][27], plane_dict[pentry][25], plane_dict[pentry][26])
+                    wiersz += '{}{:>7.2f}{} {:>7.1f} {:>7.1f} {:>8.1f}'.format(RED, separation_deg, RESET, *sun_values[1:])
                 else:
                     wiersz += '{:>7} {:>7} {:>7} {:>8}'.format('---', '---', '---', '---')
 
                 wiersz += ' | '
 
-                separation_deg2 = float(plane_dict[pentry][19] - plane_dict[pentry][18]) if is_float_try(plane_dict[pentry][19]) and is_float_try(plane_dict[pentry][18]) else 90.0
+                separation_deg2 = moon_values[0]
 
                 if -transit_separation_GREENALERT_FG < separation_deg2 < transit_separation_GREENALERT_FG:
-                    wiersz += '{}{:>7.2f}{} {:>7.1f} {:>7.1f} {:>8.1f}'.format(GREENALERT, separation_deg2, RESET, plane_dict[pentry][21], plane_dict[pentry][20], plane_dict[pentry][22])
+                    wiersz += '{}{:>7.2f}{} {:>7.1f} {:>7.1f} {:>8.1f}'.format(GREENALERT, separation_deg2, RESET, *moon_values[1:])
                 elif -transit_separation_REDALERT_FG < separation_deg2 < transit_separation_REDALERT_FG:
-                    wiersz += '{}{:>7.2f}{} {:>7.1f} {:>7.1f} {:>8.1f}'.format(REDALERT, separation_deg2, RESET, plane_dict[pentry][21], plane_dict[pentry][20], plane_dict[pentry][22])
+                    wiersz += '{}{:>7.2f}{} {:>7.1f} {:>7.1f} {:>8.1f}'.format(REDALERT, separation_deg2, RESET, *moon_values[1:])
                 elif -transit_separation_notignored < separation_deg2 < transit_separation_notignored:
-                    wiersz += '{}{:>7.2f}{} {:>7.1f} {:>7.1f} {:>8.1f}'.format(RED, separation_deg2, RESET, plane_dict[pentry][21], plane_dict[pentry][20], plane_dict[pentry][22])
+                    wiersz += '{}{:>7.2f}{} {:>7.1f} {:>7.1f} {:>8.1f}'.format(RED, separation_deg2, RESET, *moon_values[1:])
                 else:
                     wiersz += '{:>7} {:>7} {:>7} {:>8}'.format('---', '---', '---', '---')
 
@@ -1103,10 +1141,11 @@ def process_line(line, port):
             last_update_time = clock.now_utc()
 
     if mtype == "3":
-        elevation = parts[11].strip()
+        reported_elevation = parts[11].strip()
         track = parts[12].strip() if len(parts) > 12 else ''
-        if is_int_try(elevation):
-            altitude_baro_ft = int(elevation)
+        elevation = None
+        if is_int_try(reported_elevation):
+            altitude_baro_ft = int(reported_elevation)
             pressure = get_metar_press()
             corrected_altitude_ft = correct_pressure_altitude(
                 altitude_baro_ft, pressure)
@@ -1116,8 +1155,8 @@ def process_line(line, port):
                 date_time_utc, mtype)
             if metric_units:
                 elevation = corrected_altitude_m
-            else:
-                elevation = ""
+        elif icao in plane_dict and is_float_try(plane_dict[icao][4]):
+            elevation = float(plane_dict[icao][4])
         try:
             plane_lat = float(parts[14])
         except ValueError:
@@ -1132,14 +1171,18 @@ def process_line(line, port):
             azimuth = round(((degrees(azimuth) + 360) % 360), 1)
             if distance == 0:
                 distance = 0.01
-            altitude = degrees(atan((elevation - my_elevation_const) / (distance * 1000)))
-            altitude = round(altitude, 1)
+            altitude = (
+                round(degrees(atan(
+                    (elevation - my_elevation_const) / (distance * 1000))), 1)
+                if elevation is not None else ""
+            )
             if icao not in plane_dict:
-                plane_dict[icao] = [date_time_utc, "", plane_lat, plane_lon, elevation, distance, azimuth, altitude, "", "", distance, track, "", "", "", [], [], "", "", "", "", "", "", "", "", "", "", "", "", "", None, False]
+                plane_dict[icao] = [date_time_utc, "", plane_lat, plane_lon, elevation if elevation is not None else "", distance, azimuth, altitude, "", "", distance, track, "", "", "", [], [], "", "", "", "", "", "", "", "", "", "", "", "", "", None, False]
                 plane_dict[icao][15] = []
                 plane_dict[icao][16] = []
-                plane_dict[icao][15].append(azimuth)
-                plane_dict[icao][16].append(altitude)
+                if altitude != "":
+                    plane_dict[icao][15].append(azimuth)
+                    plane_dict[icao][16].append(altitude)
                 last_update_time = clock.now_utc()
             else:
                 min_distance = plane_dict[icao][10]
@@ -1157,10 +1200,12 @@ def process_line(line, port):
                 plane_dict[icao][0] = date_time_utc
                 plane_dict[icao][2] = plane_lat
                 plane_dict[icao][3] = plane_lon
-                plane_dict[icao][4] = elevation
+                if elevation is not None:
+                    plane_dict[icao][4] = elevation
                 plane_dict[icao][5] = distance
                 plane_dict[icao][6] = azimuth
-                plane_dict[icao][7] = altitude
+                if altitude != "":
+                    plane_dict[icao][7] = altitude
                 if track:  # Aktualizuj track tylko, jeśli nie jest pusty / Update track only if not empty
                     plane_dict[icao][11] = track
                 last_update_time = clock.now_utc()
@@ -1173,10 +1218,13 @@ def process_line(line, port):
                     plane_dict[icao][17] = date_time_utc
                     poz_az = str(plane_dict[icao][6])
                     poz_alt = str(plane_dict[icao][7])
-                    plane_dict[icao][15].append(poz_az)
-                    plane_dict[icao][16].append(poz_alt)
+                    if altitude != "":
+                        plane_dict[icao][15].append(poz_az)
+                        plane_dict[icao][16].append(poz_alt)
 
-    if (mtype in ["1", "3", "4"]) and (icao in plane_dict and plane_dict[icao][2] and plane_dict[icao][11]):
+    if (mtype in ["1", "3", "4"]) and (
+            icao in plane_dict and plane_dict[icao][2]
+            and plane_dict[icao][11] and is_float_try(plane_dict[icao][4])):
         flight = plane_dict[icao][1]
         plane_lat = plane_dict[icao][2]
         plane_lon = plane_dict[icao][3]
@@ -1218,13 +1266,18 @@ def process_line(line, port):
                 plane_dict[icao][24] = alt_a
                 plane_dict[icao][26] = delta_time
                 plane_dict[icao][27] = dst_p2x
-                separation_deg = float(plane_dict[icao][24] - plane_dict[icao][23]) if is_float_try(plane_dict[icao][24]) and is_float_try(plane_dict[icao][23]) else 90.0
+                separation_deg = vertical_transit_separation(
+                    plane_dict[icao][24], plane_dict[icao][23])
                 if -transit_separation_sound_alert < separation_deg < transit_separation_sound_alert:
                     gong()
                 if delta_time <= 2:  # Ustaw flagę tranzytu jeśli czas do tranzytu jest mniejszy lub równy 2 sekundy / Set transit flag if time to transit is less than or equal to 2 second
                     plane_dict[icao][31] = True
                     plane_dict[icao][30] = clock.now_utc()  # Ustaw czas rozpoczęcia tranzytu / Set transit start time
                 plane_dict[icao][29] = clock.now_utc()
+            else:
+                clear_transit_prediction(plane_dict[icao], 23)
+        else:
+            clear_transit_prediction(plane_dict[icao], 23)
         if tst_int2:
             alt_a = round(tst_int2[3], 2)
             dst_h2x = round(tst_int2[4], 2)
@@ -1236,13 +1289,18 @@ def process_line(line, port):
                 plane_dict[icao][19] = alt_a
                 plane_dict[icao][22] = delta_time
                 plane_dict[icao][21] = dst_p2x
-                separation_deg2 = float(plane_dict[icao][19] - plane_dict[icao][18]) if is_float_try(plane_dict[icao][19]) and is_float_try(plane_dict[icao][18]) else 90.0
+                separation_deg2 = vertical_transit_separation(
+                    plane_dict[icao][19], plane_dict[icao][18])
                 if -transit_separation_sound_alert < separation_deg2 < transit_separation_sound_alert:
                     gong()
                 if delta_time <= 2:  # Ustaw flagę tranzytu jeśli czas do tranzytu jest mniejszy lub równy 2 sekundy / Set transit flag if time to transit is less than or equal to 2 second
                     plane_dict[icao][31] = True
                     plane_dict[icao][30] = clock.now_utc()  # Ustaw czas rozpoczęcia tranzytu / Set transit start time
                 plane_dict[icao][30] = clock.now_utc()
+            else:
+                clear_transit_prediction(plane_dict[icao], 18)
+        else:
+            clear_transit_prediction(plane_dict[icao], 18)
     sun_alt, sun_az, moon_alt, moon_az = tabela()
     clean_dict()
     clean_transit_dict()
