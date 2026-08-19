@@ -73,7 +73,7 @@ import ephem
 import re
 import socket
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from functools import wraps
 from math import atan2, sin, cos, acos, radians, degrees, atan, asin, sqrt, isnan
@@ -196,8 +196,18 @@ moon_prediction_last_valid = {}
 sun_predicted_transit_utc = {}
 moon_predicted_transit_utc = {}
 transit_solver_diagnostics = {}
+vertical_transit_diagnostics = {}
 plane_dict_lock = threading.RLock()
 plane_deque = deque()
+
+VERTICAL_RATE_HISTORY_MAXLEN = 10
+VERTICAL_RATE_LEVEL_THRESHOLD_FPM = 300.0
+VERTICAL_RATE_VALID_AGE_SECONDS = 2.0
+VERTICAL_RATE_IGNORE_AGE_SECONDS = 5.0
+VERTICAL_RATE_STABILITY_SAMPLES = 3
+VERTICAL_RATE_MAX_SPREAD_FPM = 256.0
+VERTICAL_PREDICTION_MAX_SECONDS = 120.0
+VERTICAL_ALTITUDE_MAX_AGE_SECONDS = 10.0
 
 
 @dataclass(frozen=True)
@@ -242,6 +252,8 @@ class AircraftMotionState:
     track: MotionParameter | None = None
     groundspeed: MotionParameter | None = None
     vertical_rate: MotionParameter | None = None
+    vertical_rate_history: deque = field(default_factory=lambda: deque(
+        maxlen=VERTICAL_RATE_HISTORY_MAXLEN))
 
 
 @dataclass(frozen=True)
@@ -257,6 +269,37 @@ class MotionFreshnessStatus(str, Enum):
     FRESH = "FRESH"
     DEGRADED = "DEGRADED"
     STALE = "STALE"
+
+
+class VerticalPredictionMode(str, Enum):
+    LEVEL = "LEVEL"
+    DYNAMIC_VALID = "DYNAMIC_VALID"
+    VR_DEGRADED = "VR_DEGRADED"
+    VR_IGNORE = "VR_IGNORE"
+
+
+@dataclass(frozen=True)
+class VerticalPredictionResult:
+    predicted_altitude_m: float
+    mode: VerticalPredictionMode
+    reason: str
+    last_vertical_rate_fpm: float | None
+    vertical_rate_age_seconds: float | None
+    stability_samples: tuple[MotionParameter, ...]
+    spread_fpm: float | None
+    source: str | None
+    applied_seconds: float
+    current_altitude_m: float
+    altitude_delta_m: float
+    altitude_age_seconds: float | None
+
+
+@dataclass(frozen=True)
+class VerticalTransitDiagnostic:
+    body: str
+    prediction: VerticalPredictionResult
+    separation_before: float
+    separation_after: float
 
 
 class TransitSolverOutcome(str, Enum):
@@ -435,11 +478,11 @@ def _update_motion_parameter(icao, name, value, updated_at_utc, port):
     source = _motion_source_for_port(port)
     if source is None:
         return
-    setattr(
-        _motion_state_for_update(icao),
-        name,
-        MotionParameter(float(value), updated_at_utc, source),
-    )
+    state = _motion_state_for_update(icao)
+    parameter = MotionParameter(float(value), updated_at_utc, source)
+    setattr(state, name, parameter)
+    if name == "vertical_rate":
+        state.vertical_rate_history.append(parameter)
 
 
 def _update_motion_position(
@@ -463,6 +506,9 @@ def get_aircraft_motion_state(icao):
             track=state.track,
             groundspeed=state.groundspeed,
             vertical_rate=state.vertical_rate,
+            vertical_rate_history=deque(
+                state.vertical_rate_history,
+                maxlen=VERTICAL_RATE_HISTORY_MAXLEN),
         )
 
 
@@ -834,6 +880,130 @@ def vertical_transit_separation(predicted_alt, body_alt):
     return abs(float(predicted_alt) - float(body_alt))
 
 
+def predict_transit_altitude(current_altitude_m, motion_state, now_utc,
+                             final_time2x_seconds):
+    """Conservatively project altitude after a confirmed vertical trend."""
+    current_altitude_m = float(current_altitude_m)
+    altitude = motion_state.altitude if motion_state is not None else None
+    vertical_rate = (
+        motion_state.vertical_rate if motion_state is not None else None)
+    history = tuple(
+        list(motion_state.vertical_rate_history)[
+            -VERTICAL_RATE_STABILITY_SAMPLES:]
+        if motion_state is not None else ())
+    altitude_age = (
+        max(0.0, (now_utc - altitude.updated_at_utc).total_seconds())
+        if altitude is not None else None)
+    vertical_rate_age = (
+        max(0.0, (now_utc - vertical_rate.updated_at_utc).total_seconds())
+        if vertical_rate is not None else None)
+    last_vr = vertical_rate.value if vertical_rate is not None else None
+    source = vertical_rate.source if vertical_rate is not None else None
+    spread = (
+        max(sample.value for sample in history)
+        - min(sample.value for sample in history)
+        if len(history) == VERTICAL_RATE_STABILITY_SAMPLES else None)
+
+    def result(mode, reason, predicted=current_altitude_m,
+               applied_seconds=0.0):
+        return VerticalPredictionResult(
+            predicted_altitude_m=predicted,
+            mode=mode,
+            reason=reason,
+            last_vertical_rate_fpm=last_vr,
+            vertical_rate_age_seconds=vertical_rate_age,
+            stability_samples=history,
+            spread_fpm=spread,
+            source=source,
+            applied_seconds=applied_seconds,
+            current_altitude_m=current_altitude_m,
+            altitude_delta_m=predicted - current_altitude_m,
+            altitude_age_seconds=altitude_age,
+        )
+
+    if altitude is None:
+        return result(VerticalPredictionMode.VR_IGNORE, "altitude_missing")
+    if (altitude_age is None
+            or altitude_age > VERTICAL_ALTITUDE_MAX_AGE_SECONDS):
+        return result(VerticalPredictionMode.VR_IGNORE, "altitude_stale")
+    if vertical_rate is None:
+        return result(VerticalPredictionMode.VR_IGNORE,
+                      "vertical_rate_missing")
+    if vertical_rate_age > VERTICAL_RATE_IGNORE_AGE_SECONDS:
+        return result(VerticalPredictionMode.VR_IGNORE,
+                      "vertical_rate_stale")
+    if abs(last_vr) < VERTICAL_RATE_LEVEL_THRESHOLD_FPM:
+        return result(VerticalPredictionMode.LEVEL,
+                      "below_dynamic_threshold")
+    if vertical_rate_age > VERTICAL_RATE_VALID_AGE_SECONDS:
+        return result(VerticalPredictionMode.VR_DEGRADED,
+                      "vertical_rate_degraded_age")
+    if len(history) < VERTICAL_RATE_STABILITY_SAMPLES:
+        return result(VerticalPredictionMode.VR_DEGRADED,
+                      "insufficient_history")
+    if any(abs(sample.value) < VERTICAL_RATE_LEVEL_THRESHOLD_FPM
+           for sample in history):
+        return result(VerticalPredictionMode.VR_DEGRADED,
+                      "history_below_dynamic_threshold")
+    signs = {sample.value > 0 for sample in history}
+    if len(signs) != 1:
+        return result(VerticalPredictionMode.VR_DEGRADED,
+                      "recent_sign_reversal")
+    if spread > VERTICAL_RATE_MAX_SPREAD_FPM:
+        return result(VerticalPredictionMode.VR_DEGRADED,
+                      "vertical_rate_spread")
+
+    applied_seconds = min(
+        max(float(final_time2x_seconds), 0.0),
+        VERTICAL_PREDICTION_MAX_SECONDS)
+    altitude_delta_m = (
+        last_vr * applied_seconds / 60.0 * 0.3048)
+    return result(
+        VerticalPredictionMode.DYNAMIC_VALID,
+        "confirmed_vertical_trend",
+        current_altitude_m + altitude_delta_m,
+        applied_seconds,
+    )
+
+
+def apply_vertical_prediction_to_transit_result(
+        icao, celestial_body, transit_result, current_altitude_m, now_utc):
+    """Update only the final vertical angle of a solved 2D transit."""
+    if not transit_result:
+        return transit_result
+    prediction = predict_transit_altitude(
+        current_altitude_m,
+        aircraft_motion_states.get(icao),
+        now_utc,
+        transit_result[6],
+    )
+    before = vertical_transit_separation(
+        transit_result[3], transit_result[9])
+    updated = list(transit_result)
+    if prediction.mode == VerticalPredictionMode.DYNAMIC_VALID:
+        h2x_km = float(transit_result[4])
+        if h2x_km == 0:
+            h2x_km = 0.001
+        updated[3] = degrees(atan(
+            (prediction.predicted_altitude_m - my_elevation_const)
+            / (h2x_km * 1000)))
+    after = vertical_transit_separation(updated[3], updated[9])
+    vertical_transit_diagnostics[(icao, celestial_body)] = (
+        VerticalTransitDiagnostic(
+            body=celestial_body,
+            prediction=prediction,
+            separation_before=before,
+            separation_after=after,
+        ))
+    return tuple(updated)
+
+
+def get_vertical_transit_diagnostic(icao, celestial_body):
+    """Return the latest immutable post-solver vertical diagnostic."""
+    with plane_dict_lock:
+        return vertical_transit_diagnostics.get((icao, celestial_body))
+
+
 def terminal_transit_values(entry):
     """Return display blocks in header order: Sun first, then Moon."""
     return (
@@ -862,6 +1032,7 @@ def clear_transit_prediction_state(icao, entry, celestial_body,
     last_valid, predicted_times = _prediction_timestamps(celestial_body)
     last_valid.pop(icao, None)
     predicted_times.pop(icao, None)
+    vertical_transit_diagnostics.pop((icao, celestial_body), None)
 
 
 def _store_transit_solver_solution(icao, celestial_body, solution):
@@ -904,6 +1075,8 @@ def clean_dict():
         moon_predicted_transit_utc.pop(icao, None)
         transit_solver_diagnostics.pop((icao, "sun"), None)
         transit_solver_diagnostics.pop((icao, "moon"), None)
+        vertical_transit_diagnostics.pop((icao, "sun"), None)
+        vertical_transit_diagnostics.pop((icao, "moon"), None)
 
 # Funkcja do obliczania odległości między punktami (haversine) / Function to calculate distance between points (haversine)
 def haversine(origin, destination):
@@ -1500,6 +1673,8 @@ def clean_transit_dict():
         moon_predicted_transit_utc.pop(icao, None)
         transit_solver_diagnostics.pop((icao, "sun"), None)
         transit_solver_diagnostics.pop((icao, "moon"), None)
+        vertical_transit_diagnostics.pop((icao, "sun"), None)
+        vertical_transit_diagnostics.pop((icao, "moon"), None)
 
 # Function to manage sockets blocked in readline() during controlled shutdown.
 def _register_active_socket(port, sock):
@@ -1868,6 +2043,10 @@ def process_line(line, port):
         tst_int2 = _store_transit_solver_solution(
             icao, "sun", sun_solution)
         prediction_now = prediction_base_utc
+        tst_int1 = apply_vertical_prediction_to_transit_result(
+            icao, "moon", tst_int1, elevation, prediction_now)
+        tst_int2 = apply_vertical_prediction_to_transit_result(
+            icao, "sun", tst_int2, elevation, prediction_now)
         if tst_int1:
             alt_a = round(tst_int1[3], 2)
             dst_h2x = round(tst_int1[4], 2)
