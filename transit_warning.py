@@ -180,6 +180,7 @@ earth_R = 6371  # Promień Ziemi w km / Radius of the earth in km
 # Inicjalizacja pustych słowników i kolejek / Initialize empty dictionaries and deques
 plane_dict = {}
 altitude_sources = {}
+aircraft_motion_states = {}
 sun_prediction_last_valid = {}
 moon_prediction_last_valid = {}
 plane_dict_lock = threading.RLock()
@@ -204,6 +205,39 @@ class AltitudeDiagnostics:
     delta_adsb_mlat_ft: int | None
     adsb_age_seconds: float | None
     mlat_age_seconds: float | None
+
+
+@dataclass(frozen=True)
+class MotionParameter:
+    value: float
+    updated_at_utc: datetime.datetime
+    source: str
+
+
+@dataclass(frozen=True)
+class PositionParameter:
+    latitude: float
+    longitude: float
+    updated_at_utc: datetime.datetime
+    source: str
+
+
+@dataclass
+class AircraftMotionState:
+    position: PositionParameter | None = None
+    altitude: MotionParameter | None = None
+    track: MotionParameter | None = None
+    groundspeed: MotionParameter | None = None
+    vertical_rate: MotionParameter | None = None
+
+
+@dataclass(frozen=True)
+class AircraftMotionFreshness:
+    position_age: float | None
+    altitude_age: float | None
+    track_age: float | None
+    groundspeed_age: float | None
+    vertical_rate_age: float | None
 
 
 def synchronized_plane_dict(function):
@@ -322,6 +356,73 @@ def get_altitude_diagnostics(icao, now_utc=None):
             mlat_age_seconds=(now - mlat.timestamp_utc).total_seconds()
             if mlat is not None else None,
         )
+
+
+def _motion_source_for_port(port):
+    if port == adsb_port:
+        return "adsb"
+    if port == mlat_port:
+        return "mlat"
+    return None
+
+
+def _motion_state_for_update(icao):
+    return aircraft_motion_states.setdefault(icao, AircraftMotionState())
+
+
+def _update_motion_parameter(icao, name, value, updated_at_utc, port):
+    source = _motion_source_for_port(port)
+    if source is None:
+        return
+    setattr(
+        _motion_state_for_update(icao),
+        name,
+        MotionParameter(float(value), updated_at_utc, source),
+    )
+
+
+def _update_motion_position(
+        icao, latitude, longitude, updated_at_utc, port):
+    source = _motion_source_for_port(port)
+    if source is None:
+        return
+    _motion_state_for_update(icao).position = PositionParameter(
+        float(latitude), float(longitude), updated_at_utc, source)
+
+
+def get_aircraft_motion_state(icao):
+    """Return a stable diagnostic snapshot of one aircraft's motion state."""
+    with plane_dict_lock:
+        state = aircraft_motion_states.get(icao)
+        if state is None:
+            return None
+        return AircraftMotionState(
+            position=state.position,
+            altitude=state.altitude,
+            track=state.track,
+            groundspeed=state.groundspeed,
+            vertical_rate=state.vertical_rate,
+        )
+
+
+def get_aircraft_motion_freshness(icao, now_utc=None):
+    """Return per-parameter ages without applying a freshness policy."""
+    state = get_aircraft_motion_state(icao)
+    if state is None:
+        return None
+    now = clock.now_utc() if now_utc is None else now_utc
+
+    def age(parameter):
+        return ((now - parameter.updated_at_utc).total_seconds()
+                if parameter is not None else None)
+
+    return AircraftMotionFreshness(
+        position_age=age(state.position),
+        altitude_age=age(state.altitude),
+        track_age=age(state.track),
+        groundspeed_age=age(state.groundspeed),
+        vertical_rate_age=age(state.vertical_rate),
+    )
 
 last_update_time = clock.now_utc() if clock.is_ready() else None  # Inicjalizacja zmiennej na początku skryptu / Initialize variable at the beginning of the script
 
@@ -594,6 +695,7 @@ def clean_dict():
     for icao in to_delete:
         del plane_dict[icao]
         altitude_sources.pop(icao, None)
+        aircraft_motion_states.pop(icao, None)
         sun_prediction_last_valid.pop(icao, None)
         moon_prediction_last_valid.pop(icao, None)
 
@@ -1038,6 +1140,7 @@ def clean_transit_dict():
     for icao in to_delete:
         del plane_dict[icao]
         altitude_sources.pop(icao, None)
+        aircraft_motion_states.pop(icao, None)
         sun_prediction_last_valid.pop(icao, None)
         moon_prediction_last_valid.pop(icao, None)
 
@@ -1222,6 +1325,9 @@ def process_line(line, port):
             _record_altitude_measurement(
                 icao, port, altitude_baro_ft, corrected_altitude_m,
                 date_time_utc, mtype)
+            _update_motion_parameter(
+                icao, "altitude", corrected_altitude_m,
+                date_time_utc, port)
             if metric_units:
                 elevation = corrected_altitude_m
             else:
@@ -1236,12 +1342,22 @@ def process_line(line, port):
                 plane_dict[icao][1] = flight
 
     if mtype == "4" or (mtype == "3" and a_m_type == "MLAT"):
-        velocity = parts[12].strip()
+        reported_velocity = parts[12].strip()
         track = parts[13].strip() if len(parts) > 13 else ''
-        if is_int_try(velocity):
-            velocity = round(int(velocity) * 1.852)
+        reported_vertical_rate = parts[16].strip() if len(parts) > 16 else ''
+        if is_int_try(reported_velocity):
+            velocity = round(int(reported_velocity) * 1.852)
+            _update_motion_parameter(
+                icao, "groundspeed", velocity, date_time_utc, port)
         else:
             velocity = 900
+        if is_float_try(track):
+            _update_motion_parameter(
+                icao, "track", track, date_time_utc, port)
+        if is_float_try(reported_vertical_rate):
+            _update_motion_parameter(
+                icao, "vertical_rate", reported_vertical_rate,
+                date_time_utc, port)
         if icao not in plane_dict:
             plane_dict[icao] = [date_time_utc, "", "", "", "", "", "", "", "", "", "", track, "", "", velocity, [], [], "", "", "", "", "", "", "", "", "", "", "", "", "", None, False]
         else:
@@ -1264,6 +1380,9 @@ def process_line(line, port):
             _record_altitude_measurement(
                 icao, port, altitude_baro_ft, corrected_altitude_m,
                 date_time_utc, mtype)
+            _update_motion_parameter(
+                icao, "altitude", corrected_altitude_m,
+                date_time_utc, port)
             if metric_units:
                 elevation = corrected_altitude_m
         elif icao in plane_dict and is_float_try(plane_dict[icao][4]):
@@ -1277,6 +1396,8 @@ def process_line(line, port):
         except ValueError:
             plane_lon = 0.0
         if plane_lat and plane_lon:
+            _update_motion_position(
+                icao, plane_lat, plane_lon, date_time_utc, port)
             distance = round(haversine((my_lat, my_lon), (plane_lat, plane_lon)), 1)
             azimuth = atan2(sin(radians(plane_lon - my_lon)) * cos(radians(plane_lat)), cos(radians(my_lat)) * sin(radians(plane_lat)) - sin(radians(my_lat)) * cos(radians(plane_lat)) * cos(radians(plane_lon - my_lon)))
             azimuth = round(((degrees(azimuth) + 360) % 360), 1)
