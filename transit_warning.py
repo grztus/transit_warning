@@ -183,6 +183,8 @@ altitude_sources = {}
 aircraft_motion_states = {}
 sun_prediction_last_valid = {}
 moon_prediction_last_valid = {}
+sun_predicted_transit_utc = {}
+moon_predicted_transit_utc = {}
 plane_dict_lock = threading.RLock()
 plane_deque = deque()
 
@@ -556,31 +558,54 @@ def terminal_aircraft_row_limit(terminal_lines=None):
     )
 
 
-def visible_transit_candidate(entry, celestial_body):
+def _prediction_timestamps(celestial_body):
+    if celestial_body == "sun":
+        return sun_prediction_last_valid, sun_predicted_transit_utc
+    return moon_prediction_last_valid, moon_predicted_transit_utc
+
+
+def predicted_transit_remaining_seconds(icao, celestial_body, now_utc=None):
+    """Return whole future seconds remaining on the configured clock."""
+    predicted_times = _prediction_timestamps(celestial_body)[1]
+    predicted_utc = predicted_times.get(icao)
+    if predicted_utc is None:
+        return None
+    now_utc = clock.now_utc() if now_utc is None else now_utc
+    return max(0, int((predicted_utc - now_utc).total_seconds()))
+
+
+def visible_transit_candidate(entry, celestial_body, icao=None, now_utc=None):
     """Return a numeric display block only for a visible transit candidate."""
     indices = (
         (18, 19, 21, 20, 22)
         if celestial_body == "sun" else (23, 24, 27, 25, 26))
     try:
-        body_alt, predicted_alt, p2x, h2x, time2x = (
+        body_alt, predicted_alt, p2x, h2x, stored_time2x = (
             float(entry[index]) for index in indices)
     except (IndexError, TypeError, ValueError):
         return None
+    dynamic_time2x = (
+        predicted_transit_remaining_seconds(icao, celestial_body, now_utc)
+        if icao is not None else None)
+    time2x = stored_time2x if dynamic_time2x is None else dynamic_time2x
     separation = vertical_transit_separation(predicted_alt, body_alt)
     if time2x <= 0 or separation >= transit_separation_notignored:
         return None
     return separation, p2x, h2x, time2x
 
 
-def build_terminal_render_plan(planes, row_limit, maximum_distance):
+def build_terminal_render_plan(planes, row_limit, maximum_distance,
+                               now_utc=None):
     """Prioritize a display-only copy without changing tracked aircraft order."""
     candidates = []
     remaining = []
 
     for original_index, icao in enumerate(planes):
         entry = planes[icao]
-        sun_candidate = visible_transit_candidate(entry, "sun")
-        moon_candidate = visible_transit_candidate(entry, "moon")
+        sun_candidate = visible_transit_candidate(
+            entry, "sun", icao, now_utc)
+        moon_candidate = visible_transit_candidate(
+            entry, "moon", icao, now_utc)
         sun_time = sun_candidate[3] if sun_candidate is not None else None
         moon_time = moon_candidate[3] if moon_candidate is not None else None
 
@@ -656,20 +681,20 @@ def clear_transit_prediction(entry, start_index):
     entry[start_index:start_index + 5] = [""] * 5
 
 
-def update_transit_prediction_timestamp(icao, celestial_body, now_utc):
-    timestamps = (
-        sun_prediction_last_valid
-        if celestial_body == "sun" else moon_prediction_last_valid)
-    timestamps[icao] = now_utc
+def update_transit_prediction_timestamp(icao, celestial_body, now_utc,
+                                        time2x_seconds):
+    last_valid, predicted_times = _prediction_timestamps(celestial_body)
+    last_valid[icao] = now_utc
+    predicted_times[icao] = now_utc + datetime.timedelta(
+        seconds=time2x_seconds)
 
 
 def clear_transit_prediction_state(icao, entry, celestial_body,
                                    start_index):
     clear_transit_prediction(entry, start_index)
-    timestamps = (
-        sun_prediction_last_valid
-        if celestial_body == "sun" else moon_prediction_last_valid)
-    timestamps.pop(icao, None)
+    last_valid, predicted_times = _prediction_timestamps(celestial_body)
+    last_valid.pop(icao, None)
+    predicted_times.pop(icao, None)
 
 
 def expire_transit_prediction_after_grace(icao, entry, celestial_body,
@@ -698,6 +723,8 @@ def clean_dict():
         aircraft_motion_states.pop(icao, None)
         sun_prediction_last_valid.pop(icao, None)
         moon_prediction_last_valid.pop(icao, None)
+        sun_predicted_transit_utc.pop(icao, None)
+        moon_predicted_transit_utc.pop(icao, None)
 
 # Funkcja do obliczania odległości między punktami (haversine) / Function to calculate distance between points (haversine)
 def haversine(origin, destination):
@@ -956,7 +983,8 @@ def tabela(output=None, full=False, force=False):
         render_plan = build_terminal_render_plan(
             plane_dict,
             len(plane_dict) if full else terminal_aircraft_row_limit(),
-            None if full else warning_distance)
+            None if full else warning_distance,
+            aktual_t)
         for pentry in render_plan.aircraft_ids:
             try:
                 distance = float(plane_dict[pentry][5])
@@ -1040,7 +1068,7 @@ def tabela(output=None, full=False, force=False):
 
                 diff_secx = (clock.now_utc() - plane_dict[pentry][0]).total_seconds()
                 sun_values = visible_transit_candidate(
-                    plane_dict[pentry], "sun")
+                    plane_dict[pentry], "sun", pentry, aktual_t)
 
                 if (sun_values is not None
                         and sun_values[0] < transit_separation_GREENALERT_FG):
@@ -1059,7 +1087,7 @@ def tabela(output=None, full=False, force=False):
                 wiersz += ' | '
 
                 moon_values = visible_transit_candidate(
-                    plane_dict[pentry], "moon")
+                    plane_dict[pentry], "moon", pentry, aktual_t)
 
                 if (moon_values is not None
                         and moon_values[0] < transit_separation_GREENALERT_FG):
@@ -1143,6 +1171,8 @@ def clean_transit_dict():
         aircraft_motion_states.pop(icao, None)
         sun_prediction_last_valid.pop(icao, None)
         moon_prediction_last_valid.pop(icao, None)
+        sun_predicted_transit_utc.pop(icao, None)
+        moon_predicted_transit_utc.pop(icao, None)
 
 # Function to manage sockets blocked in readline() during controlled shutdown.
 def _register_active_socket(port, sock):
@@ -1509,7 +1539,7 @@ def process_line(line, port):
                     plane_dict[icao][30] = clock.now_utc()  # Ustaw czas rozpoczęcia tranzytu / Set transit start time
                 plane_dict[icao][29] = clock.now_utc()
                 update_transit_prediction_timestamp(
-                    icao, "moon", prediction_now)
+                    icao, "moon", prediction_now, delta_time)
             else:
                 clear_transit_prediction_state(
                     icao, plane_dict[icao], "moon", 23)
@@ -1540,7 +1570,7 @@ def process_line(line, port):
                     plane_dict[icao][30] = clock.now_utc()  # Ustaw czas rozpoczęcia tranzytu / Set transit start time
                 plane_dict[icao][30] = clock.now_utc()
                 update_transit_prediction_timestamp(
-                    icao, "sun", prediction_now)
+                    icao, "sun", prediction_now, delta_time)
             else:
                 clear_transit_prediction_state(
                     icao, plane_dict[icao], "sun", 18)

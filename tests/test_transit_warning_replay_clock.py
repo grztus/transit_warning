@@ -106,6 +106,8 @@ class ProcessLineReplayClockTests(unittest.TestCase):
         transit.plane_dict = {}
         transit.sun_prediction_last_valid.clear()
         transit.moon_prediction_last_valid.clear()
+        transit.sun_predicted_transit_utc.clear()
+        transit.moon_predicted_transit_utc.clear()
         transit.environment_replay = None
         transit.pressure = 1013
         transit.sun_alt = 30.0
@@ -122,6 +124,126 @@ class ProcessLineReplayClockTests(unittest.TestCase):
         transit.moon_alt = self.original_moon_alt
         transit.sun_prediction_last_valid.clear()
         transit.moon_prediction_last_valid.clear()
+        transit.sun_predicted_transit_utc.clear()
+        transit.moon_predicted_transit_utc.clear()
+
+    def test_valid_prediction_records_absolute_transit_times(self):
+        transit.transit_pred = Mock(side_effect=[
+            self.prediction(38.0, 120), self.prediction(38.0, 130)])
+
+        transit.process_line(self.msg3("2024/05/18 12:00:00.000"), 30106)
+
+        now = utc("2024/05/18 12:00:00.000")
+        self.assertEqual(
+            transit.moon_predicted_transit_utc["ABC123"],
+            now + datetime.timedelta(seconds=120))
+        self.assertEqual(
+            transit.sun_predicted_transit_utc["ABC123"],
+            now + datetime.timedelta(seconds=130))
+
+    def test_remaining_time_counts_down_without_new_messages(self):
+        transit.transit_pred = Mock(side_effect=[
+            self.prediction(38.0, 120), self.prediction(38.0, 130)])
+        transit.process_line(self.msg3("2024/05/18 12:00:00.000"), 30106)
+
+        transit.clock.advance_to(utc("2024/05/18 12:00:01.000"))
+        self.assertEqual(transit.predicted_transit_remaining_seconds(
+            "ABC123", "moon"), 119)
+        transit.clock.advance_to(utc("2024/05/18 12:00:20.000"))
+        self.assertEqual(transit.predicted_transit_remaining_seconds(
+            "ABC123", "moon"), 100)
+        transit.plane_dict["ABC123"][24] = 21.0
+        self.assertEqual(
+            transit.visible_transit_candidate(
+                transit.plane_dict["ABC123"], "moon", "ABC123")[3],
+            100)
+
+    def test_lot3pw_like_gap_continues_countdown(self):
+        transit.transit_pred = Mock(side_effect=[
+            self.prediction(38.0, 119), self.prediction(38.0, 130)])
+        transit.process_line(self.msg3("2024/05/18 12:00:00.000"), 30106)
+
+        transit.clock.advance_to(utc("2024/05/18 12:00:28.000"))
+
+        self.assertEqual(transit.predicted_transit_remaining_seconds(
+            "ABC123", "moon"), 91)
+        self.assertEqual(transit.plane_dict["ABC123"][26], 119)
+
+    def test_new_predictions_replace_absolute_time_upward_and_downward(self):
+        transit.transit_pred = Mock(side_effect=[
+            self.prediction(38.0, 120), self.prediction(38.0, 130)])
+        transit.process_line(self.msg3("2024/05/18 12:00:00.000"), 30106)
+        transit.clock.advance_to(utc("2024/05/18 12:00:30.000"))
+        self.assertEqual(transit.predicted_transit_remaining_seconds(
+            "ABC123", "moon"), 90)
+
+        transit.transit_pred = Mock(side_effect=[
+            self.prediction(38.0, 105), self.prediction(38.0, 80)])
+        transit.process_line(self.msg3("2024/05/18 12:00:30.000"), 30106)
+
+        self.assertEqual(transit.predicted_transit_remaining_seconds(
+            "ABC123", "moon"), 105)
+        self.assertEqual(transit.predicted_transit_remaining_seconds(
+            "ABC123", "sun"), 80)
+
+    def test_grace_keeps_absolute_time_until_expiry(self):
+        transit.transit_pred = Mock(side_effect=[
+            self.prediction(38.0, 120), self.prediction(38.0, 130)])
+        transit.process_line(self.msg3("2024/05/18 12:00:00.000"), 30106)
+        original = transit.moon_predicted_transit_utc["ABC123"]
+        transit.transit_pred = Mock(return_value=0)
+
+        transit.process_line(self.msg3("2024/05/18 12:00:01.000"), 30106)
+        self.assertEqual(
+            transit.moon_predicted_transit_utc["ABC123"], original)
+        self.assertEqual(transit.predicted_transit_remaining_seconds(
+            "ABC123", "moon"), 119)
+
+        transit.process_line(self.msg3("2024/05/18 12:00:03.000"), 30106)
+        self.assertNotIn("ABC123", transit.moon_predicted_transit_utc)
+        self.assertNotIn("ABC123", transit.sun_predicted_transit_utc)
+
+    def test_remaining_zero_and_past_are_not_future_candidates(self):
+        transit.transit_pred = Mock(side_effect=[
+            self.prediction(38.0, 2), self.prediction(38.0, 3)])
+        transit.process_line(self.msg3("2024/05/18 12:00:00.000"), 30106)
+        entry = transit.plane_dict["ABC123"]
+
+        transit.clock.advance_to(utc("2024/05/18 12:00:02.000"))
+        self.assertEqual(transit.predicted_transit_remaining_seconds(
+            "ABC123", "moon"), 0)
+        self.assertIsNone(transit.visible_transit_candidate(
+            entry, "moon", "ABC123"))
+        transit.clock.advance_to(utc("2024/05/18 12:00:04.000"))
+        self.assertEqual(transit.predicted_transit_remaining_seconds(
+            "ABC123", "moon"), 0)
+        self.assertIsNone(transit.visible_transit_candidate(
+            entry, "moon", "ABC123"))
+
+    def test_aircraft_cleanup_removes_both_absolute_transit_times(self):
+        transit.transit_pred = Mock(side_effect=[
+            self.prediction(38.0, 120), self.prediction(38.0, 130)])
+        transit.process_line(self.msg3("2024/05/18 12:00:00.000"), 30106)
+        transit.clock.advance_to(utc("2024/05/18 12:01:01.000"))
+
+        transit.clean_dict()
+
+        self.assertNotIn("ABC123", transit.plane_dict)
+        self.assertNotIn("ABC123", transit.moon_predicted_transit_utc)
+        self.assertNotIn("ABC123", transit.sun_predicted_transit_utc)
+
+    def test_explicit_now_avoids_real_clock_path(self):
+        now = utc("2024/05/18 12:00:00.000")
+        transit.moon_predicted_transit_utc["ABC123"] = (
+            now + datetime.timedelta(seconds=10))
+        fake_clock = Mock()
+
+        with patch.object(transit, "clock", fake_clock):
+            remaining = transit.predicted_transit_remaining_seconds(
+                "ABC123", "moon", now)
+
+        self.assertEqual(remaining, 10)
+        fake_clock.now_utc.assert_not_called()
 
     def process(self, generated, logged, port=30106, icao="ABC123"):
         transit.process_line(message(generated, logged, icao), port)
@@ -346,6 +468,8 @@ class ProcessLineReplayClockTests(unittest.TestCase):
 
         self.assertEqual(transit.plane_dict["ABC123"][23:28], [""] * 5)
         self.assertEqual(transit.plane_dict["ABC123"][22], 140)
+        self.assertNotIn("ABC123", transit.moon_predicted_transit_utc)
+        self.assertIn("ABC123", transit.sun_predicted_transit_utc)
 
     def test_prediction_over_900_seconds_clears_old_candidate(self):
         timestamp = "2024/05/18 12:00:00.000"
@@ -359,6 +483,8 @@ class ProcessLineReplayClockTests(unittest.TestCase):
             self.msg3("2024/05/18 12:00:01.000"), 30106)
 
         self.assertEqual(transit.plane_dict["ABC123"][18:28], [""] * 10)
+        self.assertNotIn("ABC123", transit.moon_predicted_transit_utc)
+        self.assertNotIn("ABC123", transit.sun_predicted_transit_utc)
 
     def test_missing_altitude_without_fallback_does_not_start_expiry(self):
         transit.transit_pred = Mock(side_effect=[

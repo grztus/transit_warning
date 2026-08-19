@@ -42,6 +42,14 @@ def render_aircraft(now, distance=10, sun_time="", moon_time=""):
 
 
 class TerminalRenderingTests(unittest.TestCase):
+    def setUp(self):
+        transit.sun_predicted_transit_utc.clear()
+        transit.moon_predicted_transit_utc.clear()
+
+    def tearDown(self):
+        transit.sun_predicted_transit_utc.clear()
+        transit.moon_predicted_transit_utc.clear()
+
     def test_clear_screen_homes_cursor_and_clears_to_end(self):
         output = io.StringIO()
 
@@ -94,6 +102,26 @@ class TerminalRenderingTests(unittest.TestCase):
         plan = transit.build_terminal_render_plan(planes, 10, 200)
 
         self.assertEqual(plan.aircraft_ids, ("DUAL", "SUN_ONLY"))
+        self.assertEqual(plan.aircraft_ids.count("DUAL"), 1)
+
+    def test_dual_candidate_sorting_uses_nearest_dynamic_remaining_time(self):
+        now = datetime.datetime(
+            2026, 8, 19, 12, 0, tzinfo=datetime.timezone.utc)
+        planes = {
+            "DUAL": aircraft(sun_time=50, moon_time=60),
+            "SUN": aircraft(sun_time=20),
+        }
+        transit.sun_predicted_transit_utc.update({
+            "DUAL": now + datetime.timedelta(seconds=15),
+            "SUN": now + datetime.timedelta(seconds=20),
+        })
+        transit.moon_predicted_transit_utc["DUAL"] = (
+            now + datetime.timedelta(seconds=5))
+
+        plan = transit.build_terminal_render_plan(
+            planes, 10, 200, now)
+
+        self.assertEqual(plan.aircraft_ids, ("DUAL", "SUN"))
         self.assertEqual(plan.aircraft_ids.count("DUAL"), 1)
 
     def test_non_candidates_keep_existing_order_after_candidates(self):
