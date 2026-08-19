@@ -455,12 +455,20 @@ def terminal_aircraft_row_limit(terminal_lines=None):
     )
 
 
-def _positive_time2x(entry, index):
+def visible_transit_candidate(entry, celestial_body):
+    """Return a numeric display block only for a visible transit candidate."""
+    indices = (
+        (18, 19, 21, 20, 22)
+        if celestial_body == "sun" else (23, 24, 27, 25, 26))
     try:
-        value = float(entry[index])
+        body_alt, predicted_alt, p2x, h2x, time2x = (
+            float(entry[index]) for index in indices)
     except (IndexError, TypeError, ValueError):
         return None
-    return value if value > 0 else None
+    separation = vertical_transit_separation(predicted_alt, body_alt)
+    if time2x <= 0 or separation >= transit_separation_notignored:
+        return None
+    return separation, p2x, h2x, time2x
 
 
 def build_terminal_render_plan(planes, row_limit, maximum_distance):
@@ -470,8 +478,10 @@ def build_terminal_render_plan(planes, row_limit, maximum_distance):
 
     for original_index, icao in enumerate(planes):
         entry = planes[icao]
-        sun_time = _positive_time2x(entry, 22)
-        moon_time = _positive_time2x(entry, 26)
+        sun_candidate = visible_transit_candidate(entry, "sun")
+        moon_candidate = visible_transit_candidate(entry, "moon")
+        sun_time = sun_candidate[3] if sun_candidate is not None else None
+        moon_time = moon_candidate[3] if moon_candidate is not None else None
 
         try:
             is_renderable = (
@@ -927,28 +937,38 @@ def tabela(output=None, full=False, force=False):
                     wiersz += '{:>6} {:>6} | '.format('---', '---')
 
                 diff_secx = (clock.now_utc() - plane_dict[pentry][0]).total_seconds()
-                sun_values, moon_values = terminal_transit_values(
-                    plane_dict[pentry])
-                separation_deg = sun_values[0]
+                sun_values = visible_transit_candidate(
+                    plane_dict[pentry], "sun")
 
-                if -transit_separation_GREENALERT_FG < separation_deg < transit_separation_GREENALERT_FG:
+                if (sun_values is not None
+                        and sun_values[0] < transit_separation_GREENALERT_FG):
+                    separation_deg = sun_values[0]
                     wiersz += '{}{:>7.2f}{} {:>7.1f} {:>7.1f} {:>8.1f}'.format(GREENALERT, separation_deg, RESET, *sun_values[1:])
-                elif -transit_separation_REDALERT_FG < separation_deg < transit_separation_REDALERT_FG:
+                elif (sun_values is not None
+                      and sun_values[0] < transit_separation_REDALERT_FG):
+                    separation_deg = sun_values[0]
                     wiersz += '{}{:>7.2f}{} {:>7.1f} {:>7.1f} {:>8.1f}'.format(REDALERT, separation_deg, RESET, *sun_values[1:])
-                elif -transit_separation_notignored < separation_deg < transit_separation_notignored:
+                elif sun_values is not None:
+                    separation_deg = sun_values[0]
                     wiersz += '{}{:>7.2f}{} {:>7.1f} {:>7.1f} {:>8.1f}'.format(RED, separation_deg, RESET, *sun_values[1:])
                 else:
                     wiersz += '{:>7} {:>7} {:>7} {:>8}'.format('---', '---', '---', '---')
 
                 wiersz += ' | '
 
-                separation_deg2 = moon_values[0]
+                moon_values = visible_transit_candidate(
+                    plane_dict[pentry], "moon")
 
-                if -transit_separation_GREENALERT_FG < separation_deg2 < transit_separation_GREENALERT_FG:
+                if (moon_values is not None
+                        and moon_values[0] < transit_separation_GREENALERT_FG):
+                    separation_deg2 = moon_values[0]
                     wiersz += '{}{:>7.2f}{} {:>7.1f} {:>7.1f} {:>8.1f}'.format(GREENALERT, separation_deg2, RESET, *moon_values[1:])
-                elif -transit_separation_REDALERT_FG < separation_deg2 < transit_separation_REDALERT_FG:
+                elif (moon_values is not None
+                      and moon_values[0] < transit_separation_REDALERT_FG):
+                    separation_deg2 = moon_values[0]
                     wiersz += '{}{:>7.2f}{} {:>7.1f} {:>7.1f} {:>8.1f}'.format(REDALERT, separation_deg2, RESET, *moon_values[1:])
-                elif -transit_separation_notignored < separation_deg2 < transit_separation_notignored:
+                elif moon_values is not None:
+                    separation_deg2 = moon_values[0]
                     wiersz += '{}{:>7.2f}{} {:>7.1f} {:>7.1f} {:>8.1f}'.format(RED, separation_deg2, RESET, *moon_values[1:])
                 else:
                     wiersz += '{:>7} {:>7} {:>7} {:>8}'.format('---', '---', '---', '---')

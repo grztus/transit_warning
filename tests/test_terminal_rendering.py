@@ -14,6 +14,11 @@ def aircraft(distance=10, sun_time="", moon_time=""):
     entry[5] = distance
     entry[22] = sun_time
     entry[26] = moon_time
+    if sun_time:
+        entry[18:22] = [30.0, 31.0, 10.0, 20.0]
+    if moon_time:
+        entry[23:26] = [20.0, 21.0, 11.0]
+        entry[27] = 21.0
     return entry
 
 
@@ -105,6 +110,57 @@ class TerminalRenderingTests(unittest.TestCase):
             plan.aircraft_ids,
             ("CANDIDATE", "FIRST", "SECOND", "THIRD"),
         )
+
+    def test_hidden_prediction_does_not_precede_visible_bti26f_candidate(self):
+        hidden = aircraft(sun_time=18)
+        hidden[18:22] = [51.0, 2.8, 1.4, 41.9]
+        bti26f = aircraft(sun_time=568.0)
+        bti26f[18:22] = [51.0, 38.15, 0.8, 66.3]
+        planes = {"HIDDEN": hidden}
+        planes.update({"P{:02d}".format(index): aircraft()
+                       for index in range(20)})
+        planes["BTI26F"] = bti26f
+
+        plan = transit.build_terminal_render_plan(planes, 22, 200)
+
+        self.assertEqual(
+            plan.aircraft_ids[:4],
+            ("BTI26F", "HIDDEN", "P00", "P01"),
+        )
+        self.assertIsNone(
+            transit.visible_transit_candidate(hidden, "sun"))
+        self.assertAlmostEqual(
+            transit.visible_transit_candidate(bti26f, "sun")[0], 12.85)
+
+    def test_sun_candidate_requires_separation_strictly_below_limit(self):
+        visible = aircraft(sun_time=10)
+        visible[18:20] = [30.0, 44.999]
+        boundary = aircraft(sun_time=5)
+        boundary[18:20] = [30.0, 45.0]
+
+        plan = transit.build_terminal_render_plan(
+            {"BOUNDARY": boundary, "VISIBLE": visible}, 2, 200)
+
+        self.assertIsNotNone(
+            transit.visible_transit_candidate(visible, "sun"))
+        self.assertIsNone(
+            transit.visible_transit_candidate(boundary, "sun"))
+        self.assertEqual(plan.aircraft_ids, ("VISIBLE", "BOUNDARY"))
+
+    def test_moon_candidate_requires_separation_strictly_below_limit(self):
+        visible = aircraft(moon_time=12)
+        visible[23:25] = [20.0, 34.999]
+        boundary = aircraft(moon_time=6)
+        boundary[23:25] = [20.0, 35.0]
+
+        plan = transit.build_terminal_render_plan(
+            {"BOUNDARY": boundary, "VISIBLE": visible}, 2, 200)
+
+        self.assertIsNotNone(
+            transit.visible_transit_candidate(visible, "moon"))
+        self.assertIsNone(
+            transit.visible_transit_candidate(boundary, "moon"))
+        self.assertEqual(plan.aircraft_ids, ("VISIBLE", "BOUNDARY"))
 
     def test_counts_shown_and_tracked_when_clipped(self):
         planes = {
