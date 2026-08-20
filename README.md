@@ -51,6 +51,8 @@ Configure these fields:
 - `ADSB_PORT` — ADS-B TCP port; normally `30003`
 - `ADSB_TIMESTAMP_TIMEZONE` — IANA timezone of the SBS/dump1090-fa source,
   for example `Europe/Warsaw`
+- `BEAST_HOST` — Beast/Mode-S source IP address or hostname (default `192.168.56.1`)
+- `BEAST_PORT` — Beast TCP port used for TC29 intent; normally `30005`
 - `MLAT_HOST` — MLAT source IP address or hostname
 - `MLAT_PORT` — MLAT TCP port; normally `30106`
 - `METAR_STATION` — four-letter ICAO station used to retrieve METAR data from

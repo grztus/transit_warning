@@ -68,7 +68,7 @@ class ApplicationConfigurationTests(unittest.TestCase):
         fetch.assert_called_once_with(TEST_CONFIG.metar_station)
 
     def test_main_starts_independent_configured_sources(self):
-        threads = [Mock(), Mock()]
+        threads = [Mock(), Mock(), Mock()]
         thread_factory = Mock(side_effect=threads)
         with patch.object(transit, "load_installation_config", return_value=TEST_CONFIG), \
                 patch.object(transit, "initialize_daily_environment") as initialize_daily, \
@@ -89,6 +89,8 @@ class ApplicationConfigurationTests(unittest.TestCase):
                 call(target=transit.read_from_port,
                      args=(TEST_CONFIG.mlat_host, TEST_CONFIG.mlat_port,
                            transit.process_line, None)),
+                call(target=transit.read_beast_intent,
+                     args=(TEST_CONFIG.beast_host, TEST_CONFIG.beast_port)),
             ],
         )
         for thread in threads:

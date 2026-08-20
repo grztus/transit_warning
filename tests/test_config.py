@@ -57,6 +57,8 @@ class InstallationConfigTests(unittest.TestCase):
         self.assertEqual(result.adsb_port, 30003)
         self.assertEqual(result.mlat_host, "127.0.0.1")
         self.assertEqual(result.mlat_port, 30106)
+        self.assertEqual(result.beast_host, "192.168.56.1")
+        self.assertEqual(result.beast_port, 30005)
 
     def test_environment_overrides_dotenv_values(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -118,7 +120,7 @@ class InstallationConfigTests(unittest.TestCase):
                     self.load(values)
 
     def test_rejects_invalid_ports(self):
-        for name in ("ADSB_PORT", "MLAT_PORT"):
+        for name in ("ADSB_PORT", "MLAT_PORT", "BEAST_PORT"):
             for value in ("not-a-port", "0", "65536"):
                 with self.subTest(name=name, value=value):
                     with self.assertRaises(ConfigurationError):
@@ -132,7 +134,7 @@ class InstallationConfigTests(unittest.TestCase):
                     self.load({**REQUIRED, "TRANSITION_ALTITUDE_FT": value})
 
     def test_rejects_empty_hosts(self):
-        for name in ("ADSB_HOST", "MLAT_HOST"):
+        for name in ("ADSB_HOST", "MLAT_HOST", "BEAST_HOST"):
             with self.subTest(name=name):
                 with self.assertRaisesRegex(ConfigurationError, "{} must not be empty".format(name)):
                     self.load({**REQUIRED, name: "  "})

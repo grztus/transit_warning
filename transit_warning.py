@@ -79,6 +79,7 @@ from functools import wraps
 from math import atan2, sin, cos, acos, radians, degrees, atan, asin, sqrt, isnan
 import pytz  # Import pytz for timezone handling
 from config import ConfigurationError, InstallationConfig, load_installation_config
+from beast_intent import BeastFrameParser, decode_tc29, modes_crc
 from environment import (
     DailyEnvironmentRecorder,
     EnvironmentEvent,
@@ -190,6 +191,7 @@ earth_R = 6371  # Promień Ziemi w km / Radius of the earth in km
 plane_dict = {}
 altitude_sources = {}
 aircraft_motion_states = {}
+aircraft_intent_states = {}
 aircraft_motion_freshness_status = {}
 sun_prediction_last_valid = {}
 moon_prediction_last_valid = {}
@@ -208,6 +210,8 @@ VERTICAL_RATE_STABILITY_SAMPLES = 3
 VERTICAL_RATE_MAX_SPREAD_FPM = 256.0
 VERTICAL_PREDICTION_MAX_SECONDS = 120.0
 VERTICAL_ALTITUDE_MAX_AGE_SECONDS = 10.0
+INTENT_FRESHNESS_SECONDS = 10.0
+INTENT_HISTORY_MAXLEN = 10
 
 
 @dataclass(frozen=True)
@@ -257,6 +261,29 @@ class AircraftMotionState:
 
 
 @dataclass(frozen=True)
+class IntentParameter:
+    value: float
+    updated_at_utc: datetime.datetime
+    source: str
+
+
+@dataclass(frozen=True)
+class SelectedAltitudeHistoryEntry:
+    selected_altitude_ft: float
+    nav_qnh_hpa: float | None
+    updated_at_utc: datetime.datetime
+    source: str
+
+
+@dataclass
+class AircraftIntentState:
+    selected_altitude: IntentParameter | None = None
+    nav_qnh: IntentParameter | None = None
+    selected_altitude_history: deque = field(default_factory=lambda: deque(
+        maxlen=INTENT_HISTORY_MAXLEN))
+
+
+@dataclass(frozen=True)
 class AircraftMotionFreshness:
     position_age: float | None
     altitude_age: float | None
@@ -300,6 +327,30 @@ class VerticalTransitDiagnostic:
     prediction: VerticalPredictionResult
     separation_before: float
     separation_after: float
+    selected_altitude_ft: float | None = None
+    selected_altitude_source: str | None = None
+    selected_altitude_age_seconds: float | None = None
+    nav_qnh_hpa: float | None = None
+    nav_qnh_age_seconds: float | None = None
+    target_altitude_m: float | None = None
+    target_direction_valid: bool | None = None
+    intent_clamped: bool = False
+    intent_reason: str = "TC29_NOT_EVALUATED"
+    predicted_altitude_before_clamp_m: float | None = None
+    predicted_altitude_after_clamp_m: float | None = None
+    separation_before_clamp: float | None = None
+
+
+@dataclass
+class BeastIntentDiagnostics:
+    frames_received: int = 0
+    invalid_crc_frames: int = 0
+    tc29_updates: int = 0
+    reconnects: int = 0
+    resync_count: int = 0
+
+
+beast_intent_diagnostics = BeastIntentDiagnostics()
 
 
 class TransitSolverOutcome(str, Enum):
@@ -385,13 +436,15 @@ adsb_port = None
 adsb_timestamp_timezone = None
 mlat_host = None
 mlat_port = None
+beast_host = None
+beast_port = None
 
 
 def apply_installation_config(configuration: InstallationConfig):
     global my_lat, my_lon, my_elevation_const, transition_altitude_ft
     global metar_station, gatech
     global adsb_host, adsb_port, adsb_timestamp_timezone, adsb_timestamp_validator
-    global mlat_host, mlat_port, port_status
+    global mlat_host, mlat_port, beast_host, beast_port, port_status
     my_lat = configuration.observer_lat
     my_lon = configuration.observer_lon
     my_elevation_const = configuration.observer_elevation_m
@@ -406,6 +459,8 @@ def apply_installation_config(configuration: InstallationConfig):
     )
     mlat_host = configuration.mlat_host
     mlat_port = configuration.mlat_port
+    beast_host = configuration.beast_host
+    beast_port = configuration.beast_port
     gatech = ephem.Observer()
     gatech.lat, gatech.lon = str(my_lat), str(my_lon)
     gatech.elevation = my_elevation_const
@@ -966,17 +1021,117 @@ def predict_transit_altitude(current_altitude_m, motion_state, now_utc,
     )
 
 
+def update_aircraft_intent(intent, received_at_utc):
+    """Store one valid TC29 intent sample independently from motion state."""
+    with plane_dict_lock:
+        state = aircraft_intent_states.setdefault(
+            intent.icao, AircraftIntentState())
+        selected = IntentParameter(
+            intent.selected_altitude_ft, received_at_utc,
+            intent.selected_altitude_source)
+        state.selected_altitude = selected
+        history_entry = SelectedAltitudeHistoryEntry(
+            intent.selected_altitude_ft, intent.nav_qnh_hpa,
+            received_at_utc, intent.selected_altitude_source)
+        if (not state.selected_altitude_history
+                or (state.selected_altitude_history[-1].selected_altitude_ft,
+                    state.selected_altitude_history[-1].nav_qnh_hpa,
+                    state.selected_altitude_history[-1].source)
+                != (history_entry.selected_altitude_ft,
+                    history_entry.nav_qnh_hpa, history_entry.source)):
+            state.selected_altitude_history.append(history_entry)
+        if intent.nav_qnh_hpa is not None:
+            state.nav_qnh = IntentParameter(
+                intent.nav_qnh_hpa, received_at_utc, "ADS-B TC29")
+
+
+def clamp_vertical_prediction_to_selected_altitude(
+        icao, prediction, now_utc, qnh_hpa):
+    """Conservatively stop a valid 2E projection at fresh MCP/FCU intent."""
+    details = {
+        "selected_altitude_ft": None, "selected_altitude_source": None,
+        "selected_altitude_age_seconds": None, "nav_qnh_hpa": None,
+        "nav_qnh_age_seconds": None, "target_altitude_m": None,
+        "target_direction_valid": None, "intent_clamped": False,
+        "intent_reason": "TC29_2E_NOT_DYNAMIC",
+        "predicted_altitude_before_clamp_m": prediction.predicted_altitude_m,
+        "predicted_altitude_after_clamp_m": prediction.predicted_altitude_m,
+        "separation_before_clamp": None,
+    }
+    if prediction.mode != VerticalPredictionMode.DYNAMIC_VALID:
+        return prediction, details
+    state = aircraft_intent_states.get(icao)
+    if state is None or state.selected_altitude is None:
+        details["intent_reason"] = "TC29_NO_DATA"
+        return prediction, details
+    selected = state.selected_altitude
+    details.update(selected_altitude_ft=selected.value,
+                   selected_altitude_source=selected.source,
+                   selected_altitude_age_seconds=max(
+                       0.0, (now_utc - selected.updated_at_utc).total_seconds()))
+    if state.nav_qnh is None:
+        details["intent_reason"] = "TC29_NO_QNH"
+        return prediction, details
+    nav_qnh = state.nav_qnh
+    selected_age = max(0.0, (now_utc - selected.updated_at_utc).total_seconds())
+    qnh_age = max(0.0, (now_utc - nav_qnh.updated_at_utc).total_seconds())
+    details.update(nav_qnh_hpa=nav_qnh.value,
+                   nav_qnh_age_seconds=qnh_age)
+    if selected.source != "MCP/FCU":
+        details["intent_reason"] = "TC29_SOURCE_UNSUPPORTED"
+        return prediction, details
+    if selected_age > INTENT_FRESHNESS_SECONDS:
+        details["intent_reason"] = "TC29_STALE"
+        return prediction, details
+    if qnh_age > INTENT_FRESHNESS_SECONDS:
+        details["intent_reason"] = "TC29_QNH_STALE"
+        return prediction, details
+    target_ft = selected.value + (float(qnh_hpa) - nav_qnh.value) * 26.0
+    target_m = target_ft * 0.3048
+    details["target_altitude_m"] = target_m
+    vr = prediction.last_vertical_rate_fpm
+    current = prediction.current_altitude_m
+    if vr is None or (vr > 0 and target_m <= current) or (vr < 0 and target_m >= current):
+        details.update(target_direction_valid=False,
+                       intent_reason="TC29_DIRECTION_MISMATCH")
+        return prediction, details
+    details["target_direction_valid"] = True
+    predicted = (min(prediction.predicted_altitude_m, target_m)
+                 if vr > 0 else max(prediction.predicted_altitude_m, target_m))
+    if predicted == prediction.predicted_altitude_m:
+        details["intent_reason"] = "TC29_NOT_NEEDED"
+        return prediction, details
+    details.update(intent_clamped=True, intent_reason="TC29_CLAMP_APPLIED",
+                   predicted_altitude_after_clamp_m=predicted)
+    return VerticalPredictionResult(
+        predicted_altitude_m=predicted,
+        mode=prediction.mode,
+        reason=prediction.reason,
+        last_vertical_rate_fpm=prediction.last_vertical_rate_fpm,
+        vertical_rate_age_seconds=prediction.vertical_rate_age_seconds,
+        stability_samples=prediction.stability_samples,
+        spread_fpm=prediction.spread_fpm,
+        source=prediction.source,
+        applied_seconds=prediction.applied_seconds,
+        current_altitude_m=prediction.current_altitude_m,
+        altitude_delta_m=predicted - prediction.current_altitude_m,
+        altitude_age_seconds=prediction.altitude_age_seconds,
+    ), details
+
+
 def apply_vertical_prediction_to_transit_result(
         icao, celestial_body, transit_result, current_altitude_m, now_utc):
     """Update only the final vertical angle of a solved 2D transit."""
     if not transit_result:
         return transit_result
-    prediction = predict_transit_altitude(
+    prediction_2e = predict_transit_altitude(
         current_altitude_m,
         aircraft_motion_states.get(icao),
         now_utc,
         transit_result[6],
     )
+    prediction, intent_details = clamp_vertical_prediction_to_selected_altitude(
+        icao, prediction_2e, now_utc, pressure)
     before = vertical_transit_separation(
         transit_result[3], transit_result[9])
     updated = list(transit_result)
@@ -988,12 +1143,21 @@ def apply_vertical_prediction_to_transit_result(
             (prediction.predicted_altitude_m - my_elevation_const)
             / (h2x_km * 1000)))
     after = vertical_transit_separation(updated[3], updated[9])
+    altitude_before_clamp = float(transit_result[3])
+    if prediction_2e.mode == VerticalPredictionMode.DYNAMIC_VALID:
+        h2x_km = float(transit_result[4]) or 0.001
+        altitude_before_clamp = degrees(atan(
+            (prediction_2e.predicted_altitude_m - my_elevation_const)
+            / (h2x_km * 1000)))
+    intent_details["separation_before_clamp"] = vertical_transit_separation(
+        altitude_before_clamp, transit_result[9])
     vertical_transit_diagnostics[(icao, celestial_body)] = (
         VerticalTransitDiagnostic(
             body=celestial_body,
             prediction=prediction,
             separation_before=before,
             separation_after=after,
+            **intent_details,
         ))
     return tuple(updated)
 
@@ -1068,6 +1232,7 @@ def clean_dict():
         del plane_dict[icao]
         altitude_sources.pop(icao, None)
         aircraft_motion_states.pop(icao, None)
+        aircraft_intent_states.pop(icao, None)
         aircraft_motion_freshness_status.pop(icao, None)
         sun_prediction_last_valid.pop(icao, None)
         moon_prediction_last_valid.pop(icao, None)
@@ -1666,6 +1831,7 @@ def clean_transit_dict():
         del plane_dict[icao]
         altitude_sources.pop(icao, None)
         aircraft_motion_states.pop(icao, None)
+        aircraft_intent_states.pop(icao, None)
         aircraft_motion_freshness_status.pop(icao, None)
         sun_prediction_last_valid.pop(icao, None)
         moon_prediction_last_valid.pop(icao, None)
@@ -1785,6 +1951,47 @@ def read_from_port(host, port, process_line, session_recorder=None):
                 except Exception:
                     pass
     port_status[port] = False
+
+
+def read_beast_intent(host, port):
+    """Consume live Beast data for TC29 enrichment; failures are fail-open."""
+    while not stop_event.is_set():
+        sock = None
+        try:
+            parser = BeastFrameParser()
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            if not _register_active_socket(port, sock):
+                sock.close()
+                break
+            sock.connect((host, port))
+            beast_intent_diagnostics.reconnects += 1
+            while not stop_event.is_set():
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                for frame in parser.feed(chunk):
+                    beast_intent_diagnostics.frames_received += 1
+                    if len(frame.modes) == 14 and modes_crc(frame.modes) != 0:
+                        beast_intent_diagnostics.invalid_crc_frames += 1
+                        continue
+                    intent = decode_tc29(frame)
+                    if intent is not None:
+                        update_aircraft_intent(intent, clock.now_utc())
+                        beast_intent_diagnostics.tc29_updates += 1
+                beast_intent_diagnostics.resync_count = parser.resync_count
+        except Exception as error:
+            if stop_event.is_set():
+                break
+            print("Beast intent error on port {}: {}".format(port, error))
+            if stop_event.wait(5):
+                break
+        finally:
+            if sock is not None:
+                _unregister_active_socket(port, sock)
+                try:
+                    sock.close()
+                except Exception:
+                    pass
 
 
 # Funkcja do przetwarzania linii danych / Function to process a line of data
@@ -2160,6 +2367,11 @@ def main():
         target=read_from_port,
         args=(mlat_host, mlat_port, process_line, session_recorder),
     )]
+    if not isinstance(clock, ReplayClock):
+        threads.append(threading.Thread(
+            target=read_beast_intent,
+            args=(beast_host, beast_port),
+        ))
     for thread in threads:
         thread.start()
 
