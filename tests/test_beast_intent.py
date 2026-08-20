@@ -1,5 +1,7 @@
 import datetime
+import io
 import unittest
+from unittest.mock import Mock, patch
 
 from beast_intent import (BeastFrameParser, decode_tc29, modes_crc)
 
@@ -199,3 +201,53 @@ class IntentClampTests(unittest.TestCase):
         state = t.aircraft_intent_states["ABC123"]
         self.assertEqual(len(state.selected_altitude_history), 10)
         self.assertEqual(state.selected_altitude.value, 12352)
+
+
+class BeastTerminalOutputTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import transit_warning as transit
+        cls.transit = transit
+
+    def test_connection_error_is_diagnostic_only_and_keeps_retry_delay(self):
+        transit = self.transit
+        now = datetime.datetime(
+            2026, 8, 20, 12, 0, tzinfo=datetime.timezone.utc)
+        failed_socket = Mock()
+        failed_socket.connect.side_effect = OSError("connection refused")
+        stop = Mock()
+        stop.is_set.return_value = False
+        stop.wait.return_value = True
+        diagnostics = transit.BeastIntentDiagnostics()
+        output = io.StringIO()
+
+        with patch.object(transit.socket, "socket", return_value=failed_socket), \
+                patch.object(transit, "stop_event", stop), \
+                patch.object(transit, "beast_intent_diagnostics", diagnostics), \
+                patch.object(transit.clock, "now_utc", return_value=now), \
+                patch.object(transit.sys, "stdout", output), \
+                patch("builtins.print") as print_mock:
+            transit.read_beast_intent("receiver", 30005)
+
+        self.assertEqual(output.getvalue(), "")
+        print_mock.assert_not_called()
+        self.assertEqual(diagnostics.last_error, "connection refused")
+        self.assertEqual(diagnostics.last_error_utc, now)
+        stop.wait.assert_called_once_with(5)
+        failed_socket.close.assert_called()
+
+    def test_gong_emits_only_bel_without_newline(self):
+        transit = self.transit
+        now = datetime.datetime(
+            2026, 8, 20, 12, 0, 3, tzinfo=datetime.timezone.utc)
+        previous_gong_t = transit.gong_t
+        output = io.StringIO()
+        try:
+            transit.gong_t = now - datetime.timedelta(seconds=3)
+            with patch.object(transit.clock, "now_utc", return_value=now), \
+                    patch.object(transit.sys, "stdout", output):
+                transit.gong()
+        finally:
+            transit.gong_t = previous_gong_t
+
+        self.assertEqual(output.getvalue(), "\a")

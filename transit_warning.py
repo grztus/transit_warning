@@ -348,6 +348,8 @@ class BeastIntentDiagnostics:
     tc29_updates: int = 0
     reconnects: int = 0
     resync_count: int = 0
+    last_error: str | None = None
+    last_error_utc: datetime.datetime | None = None
 
 
 beast_intent_diagnostics = BeastIntentDiagnostics()
@@ -1555,7 +1557,8 @@ def gong():
     diff_gong_t = (aktual_gong_t - gong_t).total_seconds()
     if diff_gong_t > 2:
         gong_t = aktual_gong_t
-        print('\a')  # TERMINAL GONG!
+        sys.stdout.write('\a')  # TERMINAL GONG!
+        sys.stdout.flush()
 
 # Funkcje sprawdzające, czy wartość jest floatem lub intem / Functions to check if a value is float or int
 def is_float_try(value):
@@ -1982,7 +1985,8 @@ def read_beast_intent(host, port):
         except Exception as error:
             if stop_event.is_set():
                 break
-            print("Beast intent error on port {}: {}".format(port, error))
+            beast_intent_diagnostics.last_error = str(error)
+            beast_intent_diagnostics.last_error_utc = clock.now_utc()
             if stop_event.wait(5):
                 break
         finally:
