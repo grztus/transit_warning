@@ -89,6 +89,7 @@ from environment import (
     iter_environment_events,
 )
 from metar import fetch_awc_metar
+from beast_recording import BeastRecorder
 from recording import RecordingStatus, SessionRecorder, archive_session
 from transit_clock import ReplayClock, clock_from_args
 from transit_time import AdsBTimestampOffsetValidator, port_timestamp_to_utc
@@ -142,6 +143,7 @@ environment_recorder = None
 daily_environment_recorder = None
 adsb_timestamp_validator = None
 session_recorder = None
+beast_recorder = None
 session_recording_requested = False
 stop_event = threading.Event()
 active_sockets = {}
@@ -383,6 +385,8 @@ gatech = None
 adsb_host = None
 adsb_port = None
 adsb_timestamp_timezone = None
+beast_host = None
+beast_port = None
 mlat_host = None
 mlat_port = None
 
@@ -391,7 +395,7 @@ def apply_installation_config(configuration: InstallationConfig):
     global my_lat, my_lon, my_elevation_const, transition_altitude_ft
     global metar_station, gatech
     global adsb_host, adsb_port, adsb_timestamp_timezone, adsb_timestamp_validator
-    global mlat_host, mlat_port, port_status
+    global beast_host, beast_port, mlat_host, mlat_port, port_status
     my_lat = configuration.observer_lat
     my_lon = configuration.observer_lon
     my_elevation_const = configuration.observer_elevation_m
@@ -400,6 +404,8 @@ def apply_installation_config(configuration: InstallationConfig):
     adsb_host = configuration.adsb_host
     adsb_port = configuration.adsb_port
     adsb_timestamp_timezone = configuration.adsb_timestamp_timezone
+    beast_host = configuration.beast_host
+    beast_port = configuration.beast_port
     adsb_timestamp_validator = (
         AdsBTimestampOffsetValidator(adsb_timestamp_timezone)
         if not isinstance(clock, ReplayClock) else None
@@ -1706,7 +1712,7 @@ def close_active_sockets():
             pass
 
 
-def shutdown_runtime(threads, recorder):
+def shutdown_runtime(threads, recorder, binary_recorder=None):
     global shutdown_complete
     with shutdown_lock:
         if shutdown_complete:
@@ -1719,6 +1725,11 @@ def shutdown_runtime(threads, recorder):
             thread.join(timeout=2.0)
         except Exception:
             pass
+    if binary_recorder is not None:
+        try:
+            binary_recorder.close()
+        except Exception as error:
+            print("Beast recorder shutdown failed: {}".format(error))
     if recorder is not None:
         try:
             recorder.close(clock.now_utc())
@@ -1785,6 +1796,53 @@ def read_from_port(host, port, process_line, session_recorder=None):
                 except Exception:
                     pass
     port_status[port] = False
+
+
+def read_beast_port(host, port, recorder, utc_now=None, monotonic=time.monotonic):
+    """Record Beast Binary chunks without decoding; reconnect fail-open."""
+    utc_now = utc_now or clock.now_utc
+    connection_id = 0
+    outage_reported = False
+    while not stop_event.is_set():
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            if not _register_active_socket(port, sock):
+                sock.close()
+                break
+            sock.connect((host, port))
+            connection_id += 1
+            outage_reported = False
+            while not stop_event.is_set():
+                chunk = sock.recv(65536)
+                if not chunk:
+                    if not outage_reported:
+                        print("Beast port {} disconnected; reconnecting".format(port))
+                        outage_reported = True
+                    break
+                try:
+                    if not recorder.record_chunk(
+                            chunk, utc_now(), monotonic(), connection_id):
+                        return
+                    outage_reported = False
+                except Exception as error:
+                    print("Beast recorder error: {}".format(error))
+                    return
+        except Exception as error:
+            if stop_event.is_set():
+                break
+            if not outage_reported:
+                print("Beast port {} unavailable: {}".format(port, error))
+                outage_reported = True
+        finally:
+            if sock is not None:
+                _unregister_active_socket(port, sock)
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+        if not stop_event.is_set() and stop_event.wait(5):
+            break
 
 
 # Funkcja do przetwarzania linii danych / Function to process a line of data
@@ -2117,7 +2175,8 @@ def process_line(line, port):
 
 
 def main():
-    global daily_environment_recorder, session_recorder, session_recording_requested
+    global daily_environment_recorder, session_recorder, beast_recorder
+    global session_recording_requested
     global shutdown_complete
     try:
         configuration = load_installation_config()
@@ -2129,6 +2188,7 @@ def main():
     with shutdown_lock:
         shutdown_complete = False
     session_recorder = None
+    beast_recorder = None
     session_recording_requested = runtime_args.record
     try:
         configure_environment_replay(runtime_args.environment_replay)
@@ -2152,6 +2212,16 @@ def main():
             print("Session recorder initialization failed: {}".format(error))
             session_recorder = None
 
+    if session_recorder is not None and session_recorder.writers:
+        try:
+            beast_recorder = BeastRecorder(
+                session_recorder.session_dir, beast_host, beast_port,
+                error_handler=lambda message: print(message),
+            )
+        except Exception as error:
+            print("Beast recorder initialization failed: {}".format(error))
+            beast_recorder = None
+
     # Uruchomienie wątków do czytania z portów / Start threads to read from ports
     threads = [threading.Thread(
         target=read_from_port,
@@ -2160,6 +2230,12 @@ def main():
         target=read_from_port,
         args=(mlat_host, mlat_port, process_line, session_recorder),
     )]
+    if (beast_recorder is not None
+            and beast_recorder.status == RecordingStatus.RECORDING):
+        threads.append(threading.Thread(
+            target=read_beast_port,
+            args=(beast_host, beast_port, beast_recorder),
+        ))
     for thread in threads:
         thread.start()
 
@@ -2172,6 +2248,8 @@ def main():
                 daily_environment_recorder.rotate_if_needed(clock.now_utc())
             if session_recorder is not None:
                 session_recorder.flush_if_due()
+            if beast_recorder is not None:
+                beast_recorder.flush_if_due()
             if replay_time_initialized:
                 sun_alt, sun_az, moon_alt, moon_az = tabela()
                 clean_dict()
@@ -2179,7 +2257,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        shutdown_runtime(threads, session_recorder)
+        shutdown_runtime(threads, session_recorder, beast_recorder)
 
 
 if __name__ == "__main__":

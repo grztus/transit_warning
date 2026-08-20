@@ -31,6 +31,8 @@ class InstallationConfig:
     mlat_host: str
     mlat_port: int
     metar_station: str
+    beast_host: str = "192.168.56.1"
+    beast_port: int = 30005
 
 
 def _required(values, name, errors):
@@ -142,6 +144,8 @@ def load_installation_config(
     adsb_host = _host(values, "ADSB_HOST", "127.0.0.1", errors)
     adsb_port = _port(values, "ADSB_PORT", 30003, errors)
     adsb_timestamp_timezone = _iana_timezone(values, errors)
+    beast_host = _host(values, "BEAST_HOST", "192.168.56.1", errors)
+    beast_port = _port(values, "BEAST_PORT", 30005, errors)
     mlat_host = _host(values, "MLAT_HOST", "127.0.0.1", errors)
     mlat_port = _port(values, "MLAT_PORT", 30106, errors)
     metar_station = _metar_station(values, errors)
@@ -162,6 +166,8 @@ def load_installation_config(
         adsb_host=adsb_host,
         adsb_port=adsb_port,
         adsb_timestamp_timezone=adsb_timestamp_timezone,
+        beast_host=beast_host,
+        beast_port=beast_port,
         mlat_host=mlat_host,
         mlat_port=mlat_port,
         metar_station=metar_station,

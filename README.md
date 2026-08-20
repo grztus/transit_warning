@@ -51,6 +51,9 @@ Configure these fields:
 - `ADSB_PORT` — ADS-B TCP port; normally `30003`
 - `ADSB_TIMESTAMP_TIMEZONE` — IANA timezone of the SBS/dump1090-fa source,
   for example `Europe/Warsaw`
+- `BEAST_HOST` — Beast Binary source IP address or hostname used by `--record`;
+  defaults to `192.168.56.1`
+- `BEAST_PORT` — Beast Binary TCP port; defaults to `30005`
 - `MLAT_HOST` — MLAT source IP address or hostname
 - `MLAT_PORT` — MLAT TCP port; normally `30106`
 - `METAR_STATION` — four-letter ICAO station used to retrieve METAR data from
@@ -94,7 +97,9 @@ Start session recording with:
 python transit_warning.py --record
 ```
 
-One run creates one session directory with independent ADS-B and MLAT streams:
+One run creates one session directory with independent ADS-B, MLAT, and
+byte-exact Beast Binary streams. An unavailable Beast source does not stop the
+other recorders or Transit Warning:
 
 ```text
 recordings/
@@ -103,7 +108,9 @@ recordings/
 └── sessions/
     └── YYYYMMDD_HHMMSS/
         ├── manifest.json
-        └── streams.zip
+        ├── streams.zip
+        ├── beast.bin
+        └── beast_timing.jsonl
 ```
 
 Pressing Ctrl+C performs a controlled shutdown: it stops the TCP readers,
@@ -117,6 +124,11 @@ archiving succeeded.
 `streams.zip` contains only the ADS-B and MLAT logs. Daily environment/QNH files
 remain under `recordings/environment/` and are never included in the session
 archive.
+
+`beast.bin` preserves the bytes received from port 30005 without decoding or
+reframing. `beast_timing.jsonl` stores sparse byte-offset, UTC reception-time,
+monotonic-time, and connection-generation checkpoints for later offline
+synchronization. Beast data is not yet used by replay or transit prediction.
 
 RealClock also supports writing an additional explicit environment sidecar:
 

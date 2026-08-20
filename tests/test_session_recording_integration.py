@@ -199,6 +199,8 @@ class MainSessionRecordingTests(unittest.TestCase):
         recorder = Mock()
         recorder.adsb_writer.status = RecordingStatus.RECORDING
         recorder.mlat_writer.status = RecordingStatus.RECORDING
+        beast = Mock()
+        beast.status = RecordingStatus.RECORDING
 
         def create_recorder(*args, **kwargs):
             order.append("session")
@@ -208,15 +210,23 @@ class MainSessionRecordingTests(unittest.TestCase):
             order.append("thread")
             return Mock()
 
+        def create_beast(*args, **kwargs):
+            order.append("beast")
+            return beast
+
         patches = self.main_patches(True)
         with patches[0], patches[1], patches[2], patches[3], \
                 patch.object(transit, "SessionRecorder", side_effect=create_recorder) as factory, \
+                patch.object(transit, "BeastRecorder", side_effect=create_beast) as beast_factory, \
                 patch.object(transit, "archive_session", return_value=True), \
                 patch.object(transit.threading, "Thread", side_effect=create_thread), patches[5]:
             transit.main()
 
-        self.assertEqual(order, ["session", "thread", "thread"])
+        self.assertEqual(order, ["session", "beast", "thread", "thread", "thread"])
         factory.assert_called_once()
+        beast_factory.assert_called_once_with(
+            recorder.session_dir, TEST_CONFIG.beast_host, TEST_CONFIG.beast_port,
+            error_handler=unittest.mock.ANY)
         args = factory.call_args.args
         self.assertEqual(args[1:], (
             TEST_CONFIG.adsb_port, TEST_CONFIG.mlat_port,
@@ -390,6 +400,21 @@ class AutomaticSessionArchiveTests(unittest.TestCase):
             {"manifest.json", "streams.zip"})
         self.assertEqual(
             environment_path.read_text(encoding="utf-8"), '{"type":"qnh"}\n')
+
+    def test_archive_ignores_and_preserves_beast_sidecars(self):
+        recorder, ended_at = self.make_recorder(5)
+        beast = recorder.session_dir / "beast.bin"
+        timing = recorder.session_dir / "beast_timing.jsonl"
+        beast.write_bytes(b"\x1a3raw")
+        timing.write_text('{"version":1}\n', encoding="utf-8")
+
+        self.shutdown(recorder, ended_at)
+
+        with zipfile.ZipFile(recorder.session_dir / "streams.zip") as archive:
+            self.assertEqual(set(archive.namelist()), {
+                "adsb_30003.log", "mlat_30106.log"})
+        self.assertEqual(beast.read_bytes(), b"\x1a3raw")
+        self.assertEqual(timing.read_text(encoding="utf-8"), '{"version":1}\n')
 
     def test_partial_session_archives_without_deleting_raw(self):
         recorder, ended_at = self.make_recorder(3)

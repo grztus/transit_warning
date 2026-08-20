@@ -20,6 +20,8 @@ TEST_CONFIG = InstallationConfig(
     adsb_host="adsb.example",
     adsb_port=31003,
     adsb_timestamp_timezone="Europe/Warsaw",
+    beast_host="beast.example",
+    beast_port=31005,
     mlat_host="mlat.example",
     mlat_port=31106,
     metar_station="EPRA",
@@ -44,6 +46,8 @@ class ApplicationConfigurationTests(unittest.TestCase):
         self.assertEqual(transit.metar_station, TEST_CONFIG.metar_station)
         self.assertEqual(
             transit.adsb_timestamp_timezone, TEST_CONFIG.adsb_timestamp_timezone)
+        self.assertEqual(transit.beast_host, TEST_CONFIG.beast_host)
+        self.assertEqual(transit.beast_port, TEST_CONFIG.beast_port)
         self.assertIsInstance(
             transit.adsb_timestamp_validator, AdsBTimestampOffsetValidator)
         self.assertIsInstance(transit.gatech, ephem.Observer)

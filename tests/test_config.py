@@ -28,6 +28,8 @@ class InstallationConfigTests(unittest.TestCase):
             **REQUIRED,
             "ADSB_HOST": "adsb.example",
             "ADSB_PORT": "31003",
+            "BEAST_HOST": "beast.example",
+            "BEAST_PORT": "31005",
             "MLAT_HOST": "mlat.example",
             "MLAT_PORT": "31106",
         }
@@ -44,6 +46,8 @@ class InstallationConfigTests(unittest.TestCase):
                 adsb_host="adsb.example",
                 adsb_port=31003,
                 adsb_timestamp_timezone="Europe/Warsaw",
+                beast_host="beast.example",
+                beast_port=31005,
                 mlat_host="mlat.example",
                 mlat_port=31106,
                 metar_station="EPRA",
@@ -55,6 +59,8 @@ class InstallationConfigTests(unittest.TestCase):
 
         self.assertEqual(result.adsb_host, "127.0.0.1")
         self.assertEqual(result.adsb_port, 30003)
+        self.assertEqual(result.beast_host, "192.168.56.1")
+        self.assertEqual(result.beast_port, 30005)
         self.assertEqual(result.mlat_host, "127.0.0.1")
         self.assertEqual(result.mlat_port, 30106)
 
@@ -118,7 +124,7 @@ class InstallationConfigTests(unittest.TestCase):
                     self.load(values)
 
     def test_rejects_invalid_ports(self):
-        for name in ("ADSB_PORT", "MLAT_PORT"):
+        for name in ("ADSB_PORT", "BEAST_PORT", "MLAT_PORT"):
             for value in ("not-a-port", "0", "65536"):
                 with self.subTest(name=name, value=value):
                     with self.assertRaises(ConfigurationError):
@@ -132,7 +138,7 @@ class InstallationConfigTests(unittest.TestCase):
                     self.load({**REQUIRED, "TRANSITION_ALTITUDE_FT": value})
 
     def test_rejects_empty_hosts(self):
-        for name in ("ADSB_HOST", "MLAT_HOST"):
+        for name in ("ADSB_HOST", "BEAST_HOST", "MLAT_HOST"):
             with self.subTest(name=name):
                 with self.assertRaisesRegex(ConfigurationError, "{} must not be empty".format(name)):
                     self.load({**REQUIRED, name: "  "})
