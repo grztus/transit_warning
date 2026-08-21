@@ -93,6 +93,7 @@ from metar import fetch_awc_metar
 from recording import RecordingStatus, SessionRecorder, archive_session
 from transit_clock import ReplayClock, clock_from_args
 from transit_time import AdsBTimestampOffsetValidator, port_timestamp_to_utc
+from transit_snapshot import TransitSnapshotManager, runtime_git_commit
 
 # Ustawienia GUI / GUI settings
 try:
@@ -144,6 +145,8 @@ daily_environment_recorder = None
 adsb_timestamp_validator = None
 session_recorder = None
 session_recording_requested = False
+transit_snapshot_manager = None
+transit_warning_git_commit = runtime_git_commit(Path(__file__).resolve().parent)
 stop_event = threading.Event()
 active_sockets = {}
 active_sockets_lock = threading.Lock()
@@ -161,6 +164,9 @@ MOTION_FRESH_PARAMETER_SECONDS = 5.0
 MOTION_FRESH_DELTA_SECONDS = 3.0
 MOTION_STALE_SECONDS = 10.0
 MOTION_STALE_DELTA_SECONDS = 10.0
+TRANSIT_SNAPSHOT_SEP_THRESHOLD_DEG = 0.5
+TRANSIT_SNAPSHOT_ARM_SECONDS = 15.0
+TRANSIT_SNAPSHOT_FINALIZE_GRACE_SECONDS = 2.0
 
 # Deklaracja globalnych zmiennych / Declaration of global variables
 global metar_t
@@ -1045,6 +1051,8 @@ def update_aircraft_intent(intent, received_at_utc):
         if intent.nav_qnh_hpa is not None:
             state.nav_qnh = IntentParameter(
                 intent.nav_qnh_hpa, received_at_utc, "ADS-B TC29")
+        capture_transit_observation(
+            intent.icao, received_at_utc, "BEAST", "DF17,TC29")
 
 
 def clamp_vertical_prediction_to_selected_altitude(
@@ -1170,6 +1178,108 @@ def get_vertical_transit_diagnostic(icao, celestial_body):
         return vertical_transit_diagnostics.get((icao, celestial_body))
 
 
+def _capture_transit_prediction(icao, callsign, celestial_body,
+                                transit_result, now_utc, track, groundspeed):
+    """Pass an already solved prediction to the optional validation layer."""
+    if transit_snapshot_manager is None or not transit_result:
+        return
+    diagnostic = vertical_transit_diagnostics.get((icao, celestial_body))
+    vertical = None
+    if diagnostic is not None:
+        prediction = diagnostic.prediction
+        vertical = {
+            "mode": prediction.mode.value,
+            "reason": prediction.reason,
+            "vertical_rate_fpm": prediction.last_vertical_rate_fpm,
+            "vertical_rate_age_seconds": prediction.vertical_rate_age_seconds,
+            "applied_seconds": prediction.applied_seconds,
+            "predicted_altitude_m": prediction.predicted_altitude_m,
+            "intent_reason": diagnostic.intent_reason,
+            "intent_clamped": diagnostic.intent_clamped,
+            "selected_altitude_ft": diagnostic.selected_altitude_ft,
+            "nav_qnh_hpa": diagnostic.nav_qnh_hpa,
+            "target_altitude_m": diagnostic.target_altitude_m,
+        }
+    predicted_utc = _prediction_timestamps(celestial_body)[1].get(icao)
+    if predicted_utc is None:
+        return
+    transit_snapshot_manager.consider_prediction({
+        "recorded_at_utc": now_utc,
+        "predicted_transit_utc": predicted_utc,
+        "icao": icao,
+        "callsign": callsign or None,
+        "body": celestial_body.upper(),
+        "observer": {
+            "lat": my_lat, "lon": my_lon,
+            "elevation_m": my_elevation_const,
+        },
+        "time2x_seconds": float(transit_result[6]),
+        "separation_deg": vertical_transit_separation(
+            transit_result[3], transit_result[9]),
+        "predicted_aircraft_elevation_deg": float(transit_result[3]),
+        "body_altitude_deg": float(transit_result[9]),
+        "body_azimuth_deg": float(transit_result[8]),
+        "h2x_km": float(transit_result[4]),
+        "p2x_km": float(transit_result[5]),
+        "groundspeed": float(groundspeed),
+        "track": float(track),
+        "vertical_prediction": vertical,
+    })
+
+
+def capture_transit_prediction(icao, callsign, celestial_body,
+                               transit_result, now_utc, track, groundspeed):
+    """Keep every TC29G failure outside the aircraft input path."""
+    try:
+        _capture_transit_prediction(
+            icao, callsign, celestial_body, transit_result, now_utc,
+            track, groundspeed)
+    except Exception:
+        pass
+
+
+def initialize_transit_snapshots():
+    """Initialize the optional validation layer without affecting startup."""
+    global transit_snapshot_manager
+    try:
+        transit_snapshot_manager = TransitSnapshotManager(
+            sep_threshold_deg=TRANSIT_SNAPSHOT_SEP_THRESHOLD_DEG,
+            arm_seconds=TRANSIT_SNAPSHOT_ARM_SECONDS,
+            finalize_grace_seconds=(
+                TRANSIT_SNAPSHOT_FINALIZE_GRACE_SECONDS),
+            git_commit=transit_warning_git_commit)
+    except Exception:
+        transit_snapshot_manager = None
+    return transit_snapshot_manager
+
+
+def finalize_transit_snapshots(now_utc):
+    if transit_snapshot_manager is None:
+        return []
+    try:
+        return transit_snapshot_manager.finalize_due(now_utc)
+    except Exception:
+        return []
+
+
+def close_transit_snapshots(now_utc):
+    if transit_snapshot_manager is None:
+        return []
+    try:
+        return transit_snapshot_manager.close(now_utc)
+    except Exception:
+        return []
+
+
+def drop_transit_snapshot_buffer(icao):
+    if transit_snapshot_manager is None:
+        return False
+    try:
+        return transit_snapshot_manager.drop_aircraft_buffer(icao)
+    except Exception:
+        return False
+
+
 def terminal_transit_values(entry):
     """Return display blocks in header order: Sun first, then Moon."""
     return (
@@ -1244,6 +1354,7 @@ def clean_dict():
         transit_solver_diagnostics.pop((icao, "moon"), None)
         vertical_transit_diagnostics.pop((icao, "sun"), None)
         vertical_transit_diagnostics.pop((icao, "moon"), None)
+        drop_transit_snapshot_buffer(icao)
 
 # Funkcja do obliczania odległości między punktami (haversine) / Function to calculate distance between points (haversine)
 def haversine(origin, destination):
@@ -1383,6 +1494,77 @@ def _moving_body_solution(body_name, prediction_base_utc, initial_time,
             final_separation=_moving_body_result_separation(result),
         ),
     )
+
+
+def _snapshot_parameter(state, name):
+    parameter = getattr(state, name, None) if state is not None else None
+    return (
+        parameter.value if parameter is not None else None,
+        parameter.source if parameter is not None else None,
+        parameter.updated_at_utc if parameter is not None else None,
+    )
+
+
+def _capture_transit_observation(icao, timestamp_utc, message_source,
+                                 message_type):
+    """Copy the earliest accepted per-message state into the small ring buffer."""
+    if transit_snapshot_manager is None:
+        return
+    state = aircraft_motion_states.get(icao)
+    position = state.position if state is not None else None
+    altitude, altitude_source, altitude_time = _snapshot_parameter(state, "altitude")
+    groundspeed, groundspeed_source, groundspeed_time = _snapshot_parameter(state, "groundspeed")
+    track, track_source, track_time = _snapshot_parameter(state, "track")
+    vertical_rate, vertical_rate_source, vertical_rate_time = _snapshot_parameter(
+        state, "vertical_rate")
+    intent = aircraft_intent_states.get(icao)
+    selected = intent.selected_altitude if intent is not None else None
+    source_timestamps = {
+        "position": position.updated_at_utc if position is not None else None,
+        "altitude": altitude_time,
+        "groundspeed": groundspeed_time,
+        "track": track_time,
+        "vertical_rate": vertical_rate_time,
+        "selected_altitude": selected.updated_at_utc if selected is not None else None,
+    }
+    parameter_ages = {
+        name: ((timestamp_utc - updated_at).total_seconds()
+               if updated_at is not None else None)
+        for name, updated_at in source_timestamps.items()
+    }
+    transit_snapshot_manager.record_observation({
+        "timestamp_utc": timestamp_utc,
+        "icao": icao,
+        "message_source": message_source,
+        "message_type": message_type,
+        "lat": position.latitude if position is not None else None,
+        "lon": position.longitude if position is not None else None,
+        "altitude_m": altitude,
+        "groundspeed": groundspeed,
+        "track": track,
+        "vertical_rate_fpm": vertical_rate,
+        "selected_altitude_ft": selected.value if selected is not None else None,
+        "parameter_sources": {
+            "position": position.source if position is not None else None,
+            "altitude": altitude_source,
+            "groundspeed": groundspeed_source,
+            "track": track_source,
+            "vertical_rate": vertical_rate_source,
+            "selected_altitude": selected.source if selected is not None else None,
+        },
+        "source_timestamps_utc": source_timestamps,
+        "parameter_ages_seconds": parameter_ages,
+    })
+
+
+def capture_transit_observation(icao, timestamp_utc, message_source,
+                                message_type):
+    """Keep every TC29G failure outside ADS-B, MLAT and Beast paths."""
+    try:
+        _capture_transit_observation(
+            icao, timestamp_utc, message_source, message_type)
+    except Exception:
+        pass
 
 
 def moving_body_transit_pred(body_name, obs2body, plane_pos, track,
@@ -1844,6 +2026,7 @@ def clean_transit_dict():
         transit_solver_diagnostics.pop((icao, "moon"), None)
         vertical_transit_diagnostics.pop((icao, "sun"), None)
         vertical_transit_diagnostics.pop((icao, "moon"), None)
+        drop_transit_snapshot_buffer(icao)
 
 # Function to manage sockets blocked in readline() during controlled shutdown.
 def _register_active_socket(port, sock):
@@ -1888,6 +2071,7 @@ def shutdown_runtime(threads, recorder):
             thread.join(timeout=2.0)
         except Exception:
             pass
+    close_transit_snapshots(clock.now_utc())
     if recorder is not None:
         try:
             recorder.close(clock.now_utc())
@@ -2198,6 +2382,11 @@ def process_line(line, port):
                         plane_dict[icao][15].append(poz_az)
                         plane_dict[icao][16].append(poz_alt)
 
+    if icao:
+        capture_transit_observation(
+            icao, date_time_utc, a_m_type,
+            "{},{}".format(a_m_type, mtype))
+
     motion_freshness = None
     if mtype in ["3", "4"]:
         motion_freshness = assess_motion_freshness(
@@ -2280,6 +2469,9 @@ def process_line(line, port):
                 plane_dict[icao][29] = clock.now_utc()
                 update_transit_prediction_timestamp(
                     icao, "moon", prediction_now, final_time2x)
+                capture_transit_prediction(
+                    icao, flight, "moon", tst_int1, prediction_now,
+                    track, velocity)
             else:
                 clear_transit_prediction_state(
                     icao, plane_dict[icao], "moon", 23)
@@ -2312,6 +2504,9 @@ def process_line(line, port):
                 plane_dict[icao][30] = clock.now_utc()
                 update_transit_prediction_timestamp(
                     icao, "sun", prediction_now, final_time2x)
+                capture_transit_prediction(
+                    icao, flight, "sun", tst_int2, prediction_now,
+                    track, velocity)
             else:
                 clear_transit_prediction_state(
                     icao, plane_dict[icao], "sun", 18)
@@ -2329,6 +2524,7 @@ def process_line(line, port):
 
 def main():
     global daily_environment_recorder, session_recorder, session_recording_requested
+    global transit_snapshot_manager
     global shutdown_complete
     try:
         configuration = load_installation_config()
@@ -2345,8 +2541,10 @@ def main():
         configure_environment_replay(runtime_args.environment_replay)
         if isinstance(clock, ReplayClock):
             daily_environment_recorder = None
+            transit_snapshot_manager = None
             configure_environment_recording(None)
         else:
+            initialize_transit_snapshots()
             initialize_daily_environment()
             configure_environment_recording(runtime_args.environment_record)
             get_metar_press()
@@ -2388,6 +2586,7 @@ def main():
                 daily_environment_recorder.rotate_if_needed(clock.now_utc())
             if session_recorder is not None:
                 session_recorder.flush_if_due()
+            finalize_transit_snapshots(clock.now_utc())
             if replay_time_initialized:
                 sun_alt, sun_az, moon_alt, moon_az = tabela()
                 clean_dict()
