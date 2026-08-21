@@ -13,6 +13,7 @@ from transit_snapshot import (
     BUFFER_MAXLEN,
     PREDICTION_UPDATE_MAXLEN,
     RECENT_EVENT_TTL_SECONDS,
+    SCHEMA_VERSION,
     TransitSnapshotManager,
     runtime_git_commit,
 )
@@ -48,6 +49,20 @@ def prediction(separation=0.4, icao="ABC123", body="SUN",
     if time2x is None:
         time2x = (predicted - (
             BASE + datetime.timedelta(seconds=recorded_offset))).total_seconds()
+    solver_input = {
+        "aircraft_lat": 51.1, "aircraft_lon": 21.1,
+        "aircraft_altitude_m": 10000.0,
+        "aircraft_distance_km": 20.0,
+        "aircraft_azimuth_deg": 119.0,
+        "aircraft_altitude_angle_deg": 25.0,
+        "groundspeed": 450.0, "track": 180.0,
+        "vertical_rate": 640.0, "selected_altitude": 33000.0,
+        "position_source": "adsb", "altitude_source": "adsb",
+        "position_timestamp_utc": "2026-08-21T18:43:20Z",
+        "altitude_timestamp_utc": "2026-08-21T18:43:20Z",
+        "track_timestamp_utc": "2026-08-21T18:43:20Z",
+        "groundspeed_timestamp_utc": "2026-08-21T18:43:20Z",
+    }
     return {
         "recorded_at_utc": BASE + datetime.timedelta(seconds=recorded_offset),
         "predicted_transit_utc": predicted,
@@ -65,6 +80,16 @@ def prediction(separation=0.4, icao="ABC123", body="SUN",
         "groundspeed": 450.0,
         "track": 180.0,
         "vertical_prediction": {"mode": "DYNAMIC_VALID"},
+        "solver_input": solver_input,
+        "intersection": {
+            "lat": 51.2, "lon": 21.2,
+            "azimuth_from_observer_deg": 120.0,
+            "aircraft_altitude_deg": 30.0 - separation,
+            "body_azimuth_deg": 120.0,
+            "body_altitude_deg": 30.0,
+            "signed_vertical_offset_deg": -separation,
+        },
+        "body_angular_diameter_arcsec": 1900.0,
     }
 
 
@@ -113,6 +138,9 @@ class TransitSnapshotManagerTests(unittest.TestCase):
                              "2026-08-21T18:43:22Z")
             self.assertEqual(document["final_reference_transit_utc"],
                              "2026-08-21T18:43:24Z")
+            self.assertEqual(document["schema_version"], SCHEMA_VERSION)
+            self.assertIn("solver_input", document["trigger_prediction"])
+            self.assertIn("intersection", document["trigger_prediction"])
             self.assertEqual(
                 [item["timestamp_utc"] for item in document["observations"]],
                 ["2026-08-21T18:43:20Z", "2026-08-21T18:43:25Z",
@@ -204,6 +232,20 @@ class TransitSnapshotManagerTests(unittest.TestCase):
                              PREDICTION_UPDATE_MAXLEN)
             self.assertEqual(event["trigger_prediction"]["separation_deg"],
                              0.4)
+            self.assertIn("solver_input", event["prediction_updates"][-1])
+            self.assertIn("intersection", event["prediction_updates"][-1])
+
+    def test_legacy_prediction_without_geometry_remains_writable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = self.manager(directory)
+            legacy = prediction(time2x=2)
+            legacy.pop("solver_input")
+            legacy.pop("intersection")
+            legacy.pop("body_angular_diameter_arcsec")
+            self.assertTrue(manager.consider_prediction(legacy))
+            manager.finalize_due(BASE + datetime.timedelta(seconds=7))
+            _, document = self.load_only_json(directory)
+            self.assertNotIn("solver_input", document["trigger_prediction"])
 
     def test_recent_event_blocks_duplicate_then_expires(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -321,7 +363,43 @@ class TransitSnapshotIntegrationFailOpenTests(unittest.TestCase):
         with patch.object(transit, "_capture_transit_prediction",
                           side_effect=RuntimeError("prediction")):
             transit.capture_transit_prediction(
-                "ABC123", "TEST", "sun", (), BASE, 180, 450)
+                "ABC123", "TEST", "sun", (), BASE, {})
+
+    def test_prediction_capture_uses_exact_solver_result_and_input(self):
+        manager = Mock()
+        transit.transit_snapshot_manager = manager
+        solver_input = prediction()["solver_input"]
+        result = (
+            51.234567, 21.765432, 123.45, 29.25,
+            17.9, 2.1, 5.0, 0, 123.4, 30.0, BASE)
+        transit.sun_predicted_transit_utc["ABC123"] = (
+            BASE + datetime.timedelta(seconds=5))
+        transit.transit_solver_diagnostics[("ABC123", "sun")] = (
+            transit.MovingBodyTransitDiagnostic(
+                body="sun", prediction_base_utc=BASE,
+                initial_time2x=5.1, final_time2x=5.0,
+                correction_count=1, convergence_residual=0.1,
+                outcome=transit.TransitSolverOutcome.CONVERGED,
+                final_separation=0.75,
+                body_angular_diameter_arcsec=1895.5))
+        try:
+            transit.capture_transit_prediction(
+                "ABC123", "TEST", "sun", result, BASE, solver_input)
+            captured = manager.consider_prediction.call_args.args[0]
+        finally:
+            transit.sun_predicted_transit_utc.pop("ABC123", None)
+            transit.transit_solver_diagnostics.pop(("ABC123", "sun"), None)
+        self.assertEqual(captured["solver_input"], solver_input)
+        self.assertEqual(captured["intersection"], {
+            "lat": 51.234567, "lon": 21.765432,
+            "azimuth_from_observer_deg": 123.45,
+            "aircraft_altitude_deg": 29.25,
+            "body_azimuth_deg": 123.4,
+            "body_altitude_deg": 30.0,
+            "signed_vertical_offset_deg": -0.75,
+        })
+        self.assertEqual(captured["separation_deg"], 0.75)
+        self.assertEqual(captured["body_angular_diameter_arcsec"], 1895.5)
 
     def test_tc29_capture_failure_does_not_escape(self):
         manager = Mock()

@@ -380,6 +380,18 @@ class MovingBodyTransitDiagnostic:
     convergence_residual: float | None
     outcome: TransitSolverOutcome
     final_separation: float | None
+    body_angular_diameter_arcsec: float | None = None
+
+
+@dataclass(frozen=True)
+class BodyPosition:
+    altitude_deg: float
+    azimuth_deg: float
+    angular_diameter_arcsec: float
+
+    def __iter__(self):
+        yield self.altitude_deg
+        yield self.azimuth_deg
 
 
 @dataclass(frozen=True)
@@ -1179,7 +1191,7 @@ def get_vertical_transit_diagnostic(icao, celestial_body):
 
 
 def _capture_transit_prediction(icao, callsign, celestial_body,
-                                transit_result, now_utc, track, groundspeed):
+                                transit_result, now_utc, solver_input):
     """Pass an already solved prediction to the optional validation layer."""
     if transit_snapshot_manager is None or not transit_result:
         return
@@ -1200,6 +1212,11 @@ def _capture_transit_prediction(icao, callsign, celestial_body,
             "nav_qnh_hpa": diagnostic.nav_qnh_hpa,
             "target_altitude_m": diagnostic.target_altitude_m,
         }
+    solver_diagnostic = transit_solver_diagnostics.get(
+        (icao, celestial_body))
+    body_size = (
+        solver_diagnostic.body_angular_diameter_arcsec
+        if solver_diagnostic is not None else None)
     predicted_utc = _prediction_timestamps(celestial_body)[1].get(icao)
     if predicted_utc is None:
         return
@@ -1221,19 +1238,31 @@ def _capture_transit_prediction(icao, callsign, celestial_body,
         "body_azimuth_deg": float(transit_result[8]),
         "h2x_km": float(transit_result[4]),
         "p2x_km": float(transit_result[5]),
-        "groundspeed": float(groundspeed),
-        "track": float(track),
+        "groundspeed": solver_input["groundspeed"],
+        "track": solver_input["track"],
         "vertical_prediction": vertical,
+        "solver_input": dict(solver_input),
+        "intersection": {
+            "lat": float(transit_result[0]),
+            "lon": float(transit_result[1]),
+            "azimuth_from_observer_deg": float(transit_result[2]),
+            "aircraft_altitude_deg": float(transit_result[3]),
+            "body_azimuth_deg": float(transit_result[8]),
+            "body_altitude_deg": float(transit_result[9]),
+            "signed_vertical_offset_deg": (
+                float(transit_result[3]) - float(transit_result[9])),
+        },
+        "body_angular_diameter_arcsec": body_size,
     })
 
 
 def capture_transit_prediction(icao, callsign, celestial_body,
-                               transit_result, now_utc, track, groundspeed):
+                               transit_result, now_utc, solver_input):
     """Keep every TC29G failure outside the aircraft input path."""
     try:
         _capture_transit_prediction(
             icao, callsign, celestial_body, transit_result, now_utc,
-            track, groundspeed)
+            solver_input)
     except Exception:
         pass
 
@@ -1444,7 +1473,7 @@ def transit_pred(obs2moon, plane_pos, track, velocity, elevation, moon_alt, moon
 
 
 def body_position_at_utc(body_name, when_utc):
-    """Return precise altitude/azimuth for one body at an explicit UTC time."""
+    """Return one shared PyEphem body state at an explicit UTC time."""
     if (when_utc.tzinfo is None
             or when_utc.utcoffset() != datetime.timedelta(0)):
         raise ValueError("body ephemeris requires timezone-aware UTC")
@@ -1460,7 +1489,11 @@ def body_position_at_utc(body_name, when_utc):
     else:
         raise ValueError("unsupported celestial body: {}".format(body_name))
     body.compute(observer)
-    return math.degrees(body.alt), math.degrees(body.az)
+    return BodyPosition(
+        altitude_deg=math.degrees(body.alt),
+        azimuth_deg=math.degrees(body.az),
+        angular_diameter_arcsec=float(body.size),
+    )
 
 
 def _moving_body_result_time(result):
@@ -1480,7 +1513,8 @@ def _moving_body_result_separation(result):
 
 
 def _moving_body_solution(body_name, prediction_base_utc, initial_time,
-                          result, correction_count, residual, outcome):
+                          result, correction_count, residual, outcome,
+                          body_angular_diameter_arcsec=None):
     return MovingBodyTransitSolution(
         result=result,
         diagnostic=MovingBodyTransitDiagnostic(
@@ -1492,8 +1526,13 @@ def _moving_body_solution(body_name, prediction_base_utc, initial_time,
             convergence_residual=residual,
             outcome=outcome,
             final_separation=_moving_body_result_separation(result),
+            body_angular_diameter_arcsec=body_angular_diameter_arcsec,
         ),
     )
+
+
+def _body_angular_diameter(body_position):
+    return getattr(body_position, "angular_diameter_arcsec", None)
 
 
 def _snapshot_parameter(state, name):
@@ -1503,6 +1542,53 @@ def _snapshot_parameter(state, name):
         parameter.source if parameter is not None else None,
         parameter.updated_at_utc if parameter is not None else None,
     )
+
+
+def _snapshot_utc_text(value):
+    if value is None:
+        return None
+    return value.astimezone(pytz.utc).isoformat().replace("+00:00", "Z")
+
+
+def build_snapshot_solver_input(icao, plane_lat, plane_lon, elevation,
+                                distance, azimuth, altitude_angle,
+                                groundspeed, track):
+    """Copy the exact horizontal inputs and corresponding motion metadata."""
+    state = aircraft_motion_states.get(icao)
+    position = state.position if state is not None else None
+    altitude = state.altitude if state is not None else None
+    track_parameter = state.track if state is not None else None
+    groundspeed_parameter = state.groundspeed if state is not None else None
+    vertical_rate = state.vertical_rate if state is not None else None
+    intent = aircraft_intent_states.get(icao)
+    selected_altitude = intent.selected_altitude if intent is not None else None
+    return {
+        "aircraft_lat": float(plane_lat),
+        "aircraft_lon": float(plane_lon),
+        "aircraft_altitude_m": float(elevation),
+        "aircraft_distance_km": float(distance),
+        "aircraft_azimuth_deg": float(azimuth),
+        "aircraft_altitude_angle_deg": (
+            float(altitude_angle) if is_float_try(altitude_angle) else None),
+        "groundspeed": float(groundspeed),
+        "track": float(track),
+        "vertical_rate": (
+            vertical_rate.value if vertical_rate is not None else None),
+        "selected_altitude": (
+            selected_altitude.value if selected_altitude is not None else None),
+        "position_source": position.source if position is not None else None,
+        "altitude_source": altitude.source if altitude is not None else None,
+        "position_timestamp_utc": _snapshot_utc_text(
+            position.updated_at_utc if position is not None else None),
+        "altitude_timestamp_utc": _snapshot_utc_text(
+            altitude.updated_at_utc if altitude is not None else None),
+        "track_timestamp_utc": _snapshot_utc_text(
+            track_parameter.updated_at_utc
+            if track_parameter is not None else None),
+        "groundspeed_timestamp_utc": _snapshot_utc_text(
+            groundspeed_parameter.updated_at_utc
+            if groundspeed_parameter is not None else None),
+    }
 
 
 def _capture_transit_observation(icao, timestamp_utc, message_source,
@@ -1573,8 +1659,9 @@ def moving_body_transit_pred(body_name, obs2body, plane_pos, track,
     """Iteratively solve the existing geometry against a moving Sun/Moon."""
     geometry_args = (obs2body, plane_pos, track, velocity, elevation)
     try:
-        body_alt, body_az = body_position_at_utc(
-            body_name, prediction_base_utc)
+        body_position = body_position_at_utc(body_name, prediction_base_utc)
+        body_alt, body_az = body_position
+        body_size = _body_angular_diameter(body_position)
     except Exception:
         fallback_result = None
         if fallback_body_position is not None:
@@ -1601,18 +1688,21 @@ def moving_body_transit_pred(body_name, obs2body, plane_pos, track,
             body_name, prediction_base_utc, initial_time, None, 0, None,
             TransitSolverOutcome.OUT_OF_RANGE)
 
-    results = [initial_result]
+    results = [(initial_result, body_size)]
     current_time = initial_time
     for correction_count in range(1, MOVING_BODY_MAX_CORRECTIONS + 1):
         body_time = prediction_base_utc + datetime.timedelta(
             seconds=current_time)
         try:
-            body_alt, body_az = body_position_at_utc(body_name, body_time)
+            body_position = body_position_at_utc(body_name, body_time)
+            body_alt, body_az = body_position
+            body_size = _body_angular_diameter(body_position)
         except Exception:
             return _moving_body_solution(
                 body_name, prediction_base_utc, initial_time,
                 initial_result, correction_count - 1, None,
-                TransitSolverOutcome.TECHNICAL_FALLBACK)
+                TransitSolverOutcome.TECHNICAL_FALLBACK,
+                results[0][1])
 
         next_result = transit_pred(*geometry_args, body_alt, body_az)
         if not next_result:
@@ -1631,32 +1721,33 @@ def moving_body_transit_pred(body_name, obs2body, plane_pos, track,
         if residual < MOVING_BODY_CONVERGENCE_SECONDS:
             return _moving_body_solution(
                 body_name, prediction_base_utc, initial_time, next_result,
-                correction_count, residual, TransitSolverOutcome.CONVERGED)
+                correction_count, residual, TransitSolverOutcome.CONVERGED,
+                body_size)
 
         if (len(results) >= 2
-                and abs(next_time - _moving_body_result_time(results[-2]))
+                and abs(next_time - _moving_body_result_time(results[-2][0]))
                 <= MOVING_BODY_CYCLE_TOLERANCE_SECONDS):
-            cycle_results = (results[-1], next_result)
-            final_result = max(
+            cycle_results = (results[-1], (next_result, body_size))
+            final_result, final_body_size = max(
                 cycle_results,
-                key=lambda result: _moving_body_result_separation(result))
+                key=lambda pair: _moving_body_result_separation(pair[0]))
             return _moving_body_solution(
                 body_name, prediction_base_utc, initial_time, final_result,
                 correction_count, residual,
-                TransitSolverOutcome.TWO_POINT_CYCLE)
+                TransitSolverOutcome.TWO_POINT_CYCLE, final_body_size)
 
-        results.append(next_result)
+        results.append((next_result, body_size))
         current_time = next_time
 
-    final_result = max(
+    final_result, final_body_size = max(
         results[-2:],
-        key=lambda result: _moving_body_result_separation(result))
+        key=lambda pair: _moving_body_result_separation(pair[0]))
     return _moving_body_solution(
         body_name, prediction_base_utc, initial_time, final_result,
         MOVING_BODY_MAX_CORRECTIONS,
-        abs(_moving_body_result_time(results[-1])
-            - _moving_body_result_time(results[-2])),
-        TransitSolverOutcome.MAX_ITERATIONS)
+        abs(_moving_body_result_time(results[-1][0])
+            - _moving_body_result_time(results[-2][0])),
+        TransitSolverOutcome.MAX_ITERATIONS, final_body_size)
 
 # Funkcje kolorowania odległości, wysokości, azymutu / Functions for coloring distance, altitude, azimuth
 def dist_col(distance):
@@ -2429,6 +2520,14 @@ def process_line(line, port):
             clean_dict()
             clean_transit_dict()
             return
+        snapshot_solver_input = None
+        if transit_snapshot_manager is not None:
+            try:
+                snapshot_solver_input = build_snapshot_solver_input(
+                    icao, plane_lat, plane_lon, elevation, distance, azimuth,
+                    altitude, velocity, track)
+            except Exception:
+                pass
         prediction_base_utc = clock.now_utc()
         moon_solution = moving_body_transit_pred(
             "moon", (my_lat, my_lon), (plane_lat, plane_lon), track,
@@ -2471,7 +2570,7 @@ def process_line(line, port):
                     icao, "moon", prediction_now, final_time2x)
                 capture_transit_prediction(
                     icao, flight, "moon", tst_int1, prediction_now,
-                    track, velocity)
+                    snapshot_solver_input)
             else:
                 clear_transit_prediction_state(
                     icao, plane_dict[icao], "moon", 23)
@@ -2506,7 +2605,7 @@ def process_line(line, port):
                     icao, "sun", prediction_now, final_time2x)
                 capture_transit_prediction(
                     icao, flight, "sun", tst_int2, prediction_now,
-                    track, velocity)
+                    snapshot_solver_input)
             else:
                 clear_transit_prediction_state(
                     icao, plane_dict[icao], "sun", 18)

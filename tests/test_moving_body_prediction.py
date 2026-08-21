@@ -182,6 +182,22 @@ class MovingBodyTransitSolverTests(unittest.TestCase):
         moon = transit.body_position_at_utc("moon", UTC_BASE)
         self.assertEqual(first, second)
         self.assertNotEqual(first, moon)
+        self.assertGreater(first.angular_diameter_arcsec, 1000)
+        self.assertGreater(moon.angular_diameter_arcsec, 1000)
+
+    def test_final_diagnostic_keeps_size_from_selected_ephemeris_state(self):
+        positions = [
+            transit.BodyPosition(20.0, 120.0, 1900.0),
+            transit.BodyPosition(20.1, 120.1, 1899.5),
+        ]
+        with patch.object(
+                transit, "body_position_at_utc", side_effect=positions), \
+                patch.object(
+                    transit, "transit_pred",
+                    side_effect=[prediction(100.0), prediction(100.4)]):
+            solution = solve("sun")
+        self.assertEqual(
+            solution.diagnostic.body_angular_diameter_arcsec, 1899.5)
 
 
 class MovingBodyTransitIntegrationTests(unittest.TestCase):
