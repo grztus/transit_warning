@@ -198,6 +198,9 @@ class MovingBodyTransitSolverTests(unittest.TestCase):
             solution = solve("sun")
         self.assertEqual(
             solution.diagnostic.body_angular_diameter_arcsec, 1899.5)
+        self.assertEqual(
+            solution.diagnostic.body_ephemeris_evaluated_at_utc,
+            UTC_BASE + datetime.timedelta(seconds=100.0))
 
 
 class MovingBodyTransitIntegrationTests(unittest.TestCase):

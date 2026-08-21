@@ -157,6 +157,60 @@ class HorizontalExtractionEquivalenceTests(unittest.TestCase):
             observer, plane, 190, 800.9, 10000, 25.9, 150.5)
         self.assertEqual(result[:7], expected)
 
+    def test_forward_bearing_at_t0_continues_same_oriented_great_circle(self):
+        observer = (51.1, 21.1)
+        plane = (50.3, 22.2)
+        transit.my_lat, transit.my_lon = observer
+        intersection = transit.solve_great_circle_intersection(
+            observer, plane, 190, 800, 10000, 150.5,
+            transit.my_elevation_const)
+        bearing = transit.great_circle_forward_bearing_at_point(
+            plane, 190, (intersection.latitude_deg,
+                         intersection.longitude_deg))
+
+        def vector(position):
+            lat, lon = map(math.radians, position)
+            return (math.cos(lat) * math.cos(lon),
+                    math.cos(lat) * math.sin(lon), math.sin(lat))
+
+        def cross(left, right):
+            return (left[1] * right[2] - left[2] * right[1],
+                    left[2] * right[0] - left[0] * right[2],
+                    left[0] * right[1] - left[1] * right[0])
+
+        origin = vector(plane)
+        lat, lon = map(math.radians, plane)
+        north = (-math.sin(lat) * math.cos(lon),
+                 -math.sin(lat) * math.sin(lon), math.cos(lat))
+        east = (-math.sin(lon), math.cos(lon), 0.0)
+        track = math.radians(190)
+        initial_tangent = tuple(
+            math.cos(track) * n + math.sin(track) * e
+            for n, e in zip(north, east))
+        normal = cross(origin, initial_tangent)
+
+        point_lat = math.radians(intersection.latitude_deg)
+        point_lon = math.radians(intersection.longitude_deg)
+        point = vector((intersection.latitude_deg,
+                        intersection.longitude_deg))
+        point_north = (-math.sin(point_lat) * math.cos(point_lon),
+                       -math.sin(point_lat) * math.sin(point_lon),
+                       math.cos(point_lat))
+        point_east = (-math.sin(point_lon), math.cos(point_lon), 0.0)
+        bearing_rad = math.radians(bearing)
+        tangent = tuple(
+            math.cos(bearing_rad) * n + math.sin(bearing_rad) * e
+            for n, e in zip(point_north, point_east))
+        epsilon = 1e-6
+        next_point = tuple(
+            math.cos(epsilon) * p + math.sin(epsilon) * tangent_component
+            for p, tangent_component in zip(point, tangent))
+        self.assertAlmostEqual(
+            sum(a * b for a, b in zip(normal, next_point)), 0.0,
+            delta=1e-12)
+        self.assertGreater(
+            sum(a * b for a, b in zip(tangent, next_point)), 0.0)
+
 
 def motion_state(values, age=0.0, altitude_age=0.0):
     samples = []

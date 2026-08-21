@@ -13,7 +13,7 @@ import uuid
 
 
 UTC = datetime.timezone.utc
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 HISTORY_SECONDS = 5.0
 AFTER_SECONDS = 5.0
 DEFAULT_ARM_SECONDS = 15.0

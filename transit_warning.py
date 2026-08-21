@@ -218,6 +218,7 @@ VERTICAL_PREDICTION_MAX_SECONDS = 120.0
 VERTICAL_ALTITUDE_MAX_AGE_SECONDS = 10.0
 INTENT_FRESHNESS_SECONDS = 10.0
 INTENT_HISTORY_MAXLEN = 10
+QNH_CORRECTION_FT_PER_HPA = 26.0
 
 
 @dataclass(frozen=True)
@@ -328,6 +329,20 @@ class VerticalPredictionResult:
 
 
 @dataclass(frozen=True)
+class VerticalPredictionPolicy:
+    level_threshold_fpm: float
+    valid_vr_age_seconds: float
+    ignore_vr_age_seconds: float
+    altitude_max_age_seconds: float
+    stability_sample_count: int
+    max_spread_fpm: float
+    prediction_limit_seconds: float
+    selected_altitude_freshness_seconds: float
+    nav_qnh_freshness_seconds: float
+    qnh_correction_ft_per_hpa: float
+
+
+@dataclass(frozen=True)
 class VerticalTransitDiagnostic:
     body: str
     prediction: VerticalPredictionResult
@@ -381,17 +396,22 @@ class MovingBodyTransitDiagnostic:
     outcome: TransitSolverOutcome
     final_separation: float | None
     body_angular_diameter_arcsec: float | None = None
+    body_ephemeris_evaluated_at_utc: datetime.datetime | None = None
 
 
 @dataclass(frozen=True)
 class BodyPosition:
     altitude_deg: float
     azimuth_deg: float
-    angular_diameter_arcsec: float
+    angular_diameter_arcsec: float | None
+    evaluated_at_utc: datetime.datetime | None = None
 
     def __iter__(self):
         yield self.altitude_deg
         yield self.azimuth_deg
+
+    def __getitem__(self, index):
+        return (self.altitude_deg, self.azimuth_deg)[index]
 
 
 @dataclass(frozen=True)
@@ -484,6 +504,10 @@ near_airport_elevation = 100  # Wysokość najbliższego lotniska / Nearest airp
 
 # Ustawienia efemeryd / Ephemeris settings
 gatech = None
+sun_body_angular_diameter_arcsec = None
+moon_body_angular_diameter_arcsec = None
+sun_body_evaluated_at_utc = None
+moon_body_evaluated_at_utc = None
 
 adsb_host = None
 adsb_port = None
@@ -523,7 +547,24 @@ def apply_installation_config(configuration: InstallationConfig):
 
 def correct_pressure_altitude(pressure_altitude_ft, qnh_hpa):
     """Apply the existing linear QNH approximation to pressure altitude."""
-    return pressure_altitude_ft + (qnh_hpa - 1013.25) * 26
+    return (pressure_altitude_ft
+            + (qnh_hpa - 1013.25) * QNH_CORRECTION_FT_PER_HPA)
+
+
+def current_vertical_prediction_policy():
+    """Return the exact production 2E/2F policy active for one prediction."""
+    return VerticalPredictionPolicy(
+        level_threshold_fpm=VERTICAL_RATE_LEVEL_THRESHOLD_FPM,
+        valid_vr_age_seconds=VERTICAL_RATE_VALID_AGE_SECONDS,
+        ignore_vr_age_seconds=VERTICAL_RATE_IGNORE_AGE_SECONDS,
+        altitude_max_age_seconds=VERTICAL_ALTITUDE_MAX_AGE_SECONDS,
+        stability_sample_count=VERTICAL_RATE_STABILITY_SAMPLES,
+        max_spread_fpm=VERTICAL_RATE_MAX_SPREAD_FPM,
+        prediction_limit_seconds=VERTICAL_PREDICTION_MAX_SECONDS,
+        selected_altitude_freshness_seconds=INTENT_FRESHNESS_SECONDS,
+        nav_qnh_freshness_seconds=INTENT_FRESHNESS_SECONDS,
+        qnh_correction_ft_per_hpa=QNH_CORRECTION_FT_PER_HPA,
+    )
 
 
 def _record_altitude_measurement(
@@ -990,15 +1031,16 @@ def vertical_transit_separation(predicted_alt, body_alt):
 
 
 def predict_transit_altitude(current_altitude_m, motion_state, now_utc,
-                             final_time2x_seconds):
+                             final_time2x_seconds, policy=None):
     """Conservatively project altitude after a confirmed vertical trend."""
+    policy = current_vertical_prediction_policy() if policy is None else policy
     current_altitude_m = float(current_altitude_m)
     altitude = motion_state.altitude if motion_state is not None else None
     vertical_rate = (
         motion_state.vertical_rate if motion_state is not None else None)
     history = tuple(
         list(motion_state.vertical_rate_history)[
-            -VERTICAL_RATE_STABILITY_SAMPLES:]
+            -policy.stability_sample_count:]
         if motion_state is not None else ())
     altitude_age = (
         max(0.0, (now_utc - altitude.updated_at_utc).total_seconds())
@@ -1011,7 +1053,7 @@ def predict_transit_altitude(current_altitude_m, motion_state, now_utc,
     spread = (
         max(sample.value for sample in history)
         - min(sample.value for sample in history)
-        if len(history) == VERTICAL_RATE_STABILITY_SAMPLES else None)
+        if len(history) == policy.stability_sample_count else None)
 
     def result(mode, reason, predicted=current_altitude_m,
                applied_seconds=0.0):
@@ -1033,24 +1075,24 @@ def predict_transit_altitude(current_altitude_m, motion_state, now_utc,
     if altitude is None:
         return result(VerticalPredictionMode.VR_IGNORE, "altitude_missing")
     if (altitude_age is None
-            or altitude_age > VERTICAL_ALTITUDE_MAX_AGE_SECONDS):
+            or altitude_age > policy.altitude_max_age_seconds):
         return result(VerticalPredictionMode.VR_IGNORE, "altitude_stale")
     if vertical_rate is None:
         return result(VerticalPredictionMode.VR_IGNORE,
                       "vertical_rate_missing")
-    if vertical_rate_age > VERTICAL_RATE_IGNORE_AGE_SECONDS:
+    if vertical_rate_age > policy.ignore_vr_age_seconds:
         return result(VerticalPredictionMode.VR_IGNORE,
                       "vertical_rate_stale")
-    if abs(last_vr) < VERTICAL_RATE_LEVEL_THRESHOLD_FPM:
+    if abs(last_vr) < policy.level_threshold_fpm:
         return result(VerticalPredictionMode.LEVEL,
                       "below_dynamic_threshold")
-    if vertical_rate_age > VERTICAL_RATE_VALID_AGE_SECONDS:
+    if vertical_rate_age > policy.valid_vr_age_seconds:
         return result(VerticalPredictionMode.VR_DEGRADED,
                       "vertical_rate_degraded_age")
-    if len(history) < VERTICAL_RATE_STABILITY_SAMPLES:
+    if len(history) < policy.stability_sample_count:
         return result(VerticalPredictionMode.VR_DEGRADED,
                       "insufficient_history")
-    if any(abs(sample.value) < VERTICAL_RATE_LEVEL_THRESHOLD_FPM
+    if any(abs(sample.value) < policy.level_threshold_fpm
            for sample in history):
         return result(VerticalPredictionMode.VR_DEGRADED,
                       "history_below_dynamic_threshold")
@@ -1058,13 +1100,13 @@ def predict_transit_altitude(current_altitude_m, motion_state, now_utc,
     if len(signs) != 1:
         return result(VerticalPredictionMode.VR_DEGRADED,
                       "recent_sign_reversal")
-    if spread > VERTICAL_RATE_MAX_SPREAD_FPM:
+    if spread > policy.max_spread_fpm:
         return result(VerticalPredictionMode.VR_DEGRADED,
                       "vertical_rate_spread")
 
     applied_seconds = min(
         max(float(final_time2x_seconds), 0.0),
-        VERTICAL_PREDICTION_MAX_SECONDS)
+        policy.prediction_limit_seconds)
     altitude_delta_m = (
         last_vr * applied_seconds / 60.0 * 0.3048)
     return result(
@@ -1102,8 +1144,9 @@ def update_aircraft_intent(intent, received_at_utc):
 
 
 def clamp_vertical_prediction_to_intent_state(
-        prediction, intent_state, now_utc, qnh_hpa):
+        prediction, intent_state, now_utc, qnh_hpa, policy=None):
     """Apply the existing TC29 clamp to one frozen intent state."""
+    policy = current_vertical_prediction_policy() if policy is None else policy
     details = {
         "selected_altitude_ft": None, "selected_altitude_source": None,
         "selected_altitude_age_seconds": None, "nav_qnh_hpa": None,
@@ -1136,13 +1179,15 @@ def clamp_vertical_prediction_to_intent_state(
     if selected.source != "MCP/FCU":
         details["intent_reason"] = "TC29_SOURCE_UNSUPPORTED"
         return prediction, details
-    if selected_age > INTENT_FRESHNESS_SECONDS:
+    if selected_age > policy.selected_altitude_freshness_seconds:
         details["intent_reason"] = "TC29_STALE"
         return prediction, details
-    if qnh_age > INTENT_FRESHNESS_SECONDS:
+    if qnh_age > policy.nav_qnh_freshness_seconds:
         details["intent_reason"] = "TC29_QNH_STALE"
         return prediction, details
-    target_ft = selected.value + (float(qnh_hpa) - nav_qnh.value) * 26.0
+    target_ft = (selected.value
+                 + (float(qnh_hpa) - nav_qnh.value)
+                 * policy.qnh_correction_ft_per_hpa)
     target_m = target_ft * 0.3048
     details["target_altitude_m"] = target_m
     vr = prediction.last_vertical_rate_fpm
@@ -1184,12 +1229,13 @@ def clamp_vertical_prediction_to_selected_altitude(
 
 def predict_vertical_state_at_time(
         current_altitude_m, motion_state, intent_state, now_utc,
-        dt_seconds, qnh_hpa):
+        dt_seconds, qnh_hpa, policy=None):
     """Compose the unchanged 2E and 2F policies from frozen inputs."""
+    policy = current_vertical_prediction_policy() if policy is None else policy
     prediction_before_clamp = predict_transit_altitude(
-        current_altitude_m, motion_state, now_utc, dt_seconds)
+        current_altitude_m, motion_state, now_utc, dt_seconds, policy)
     prediction, intent_details = clamp_vertical_prediction_to_intent_state(
-        prediction_before_clamp, intent_state, now_utc, qnh_hpa)
+        prediction_before_clamp, intent_state, now_utc, qnh_hpa, policy)
     return VerticalStateAtTime(
         prediction_before_clamp=prediction_before_clamp,
         prediction=prediction,
@@ -1291,8 +1337,15 @@ def _capture_transit_prediction(icao, callsign, celestial_body,
     predicted_utc = _prediction_timestamps(celestial_body)[1].get(icao)
     if predicted_utc is None:
         return
+    aircraft_altitude_m = (
+        diagnostic.prediction.predicted_altitude_m
+        if diagnostic is not None else solver_input["aircraft_altitude_m"])
+    frozen_prediction_state = build_frozen_prediction_state(
+        icao, celestial_body, transit_result, now_utc, solver_input,
+        diagnostic, solver_diagnostic, pressure)
     transit_snapshot_manager.consider_prediction({
         "recorded_at_utc": now_utc,
+        "prediction_base_utc": _snapshot_utc_text(now_utc),
         "predicted_transit_utc": predicted_utc,
         "icao": icao,
         "callsign": callsign or None,
@@ -1302,6 +1355,7 @@ def _capture_transit_prediction(icao, callsign, celestial_body,
             "elevation_m": my_elevation_const,
         },
         "time2x_seconds": float(transit_result[6]),
+        "aircraft_altitude_m": aircraft_altitude_m,
         "separation_deg": vertical_transit_separation(
             transit_result[3], transit_result[9]),
         "predicted_aircraft_elevation_deg": float(transit_result[3]),
@@ -1324,6 +1378,7 @@ def _capture_transit_prediction(icao, callsign, celestial_body,
                 float(transit_result[3]) - float(transit_result[9])),
         },
         "body_angular_diameter_arcsec": body_size,
+        "frozen_prediction_state": frozen_prediction_state,
     })
 
 
@@ -1563,6 +1618,59 @@ def solve_great_circle_intersection(
     )
 
 
+def great_circle_forward_bearing_at_point(
+        origin_position, initial_track_deg, point_position):
+    """Return the local forward bearing of the same oriented great-circle."""
+    def unit_position(position):
+        latitude, longitude = map(radians, position)
+        return (
+            cos(latitude) * cos(longitude),
+            cos(latitude) * sin(longitude),
+            sin(latitude),
+        )
+
+    def cross(left, right):
+        return (
+            left[1] * right[2] - left[2] * right[1],
+            left[2] * right[0] - left[0] * right[2],
+            left[0] * right[1] - left[1] * right[0],
+        )
+
+    def dot(left, right):
+        return sum(a * b for a, b in zip(left, right))
+
+    origin_lat, origin_lon = map(radians, origin_position)
+    origin = unit_position(origin_position)
+    origin_north = (
+        -sin(origin_lat) * cos(origin_lon),
+        -sin(origin_lat) * sin(origin_lon),
+        cos(origin_lat),
+    )
+    origin_east = (-sin(origin_lon), cos(origin_lon), 0.0)
+    track = radians(float(initial_track_deg))
+    initial_tangent = tuple(
+        cos(track) * north + sin(track) * east
+        for north, east in zip(origin_north, origin_east))
+    great_circle_normal = cross(origin, initial_tangent)
+
+    point_lat, point_lon = map(radians, point_position)
+    point = unit_position(point_position)
+    forward_tangent = cross(great_circle_normal, point)
+    magnitude = sqrt(dot(forward_tangent, forward_tangent))
+    if magnitude == 0:
+        raise ValueError("great-circle forward direction is undefined")
+    forward_tangent = tuple(value / magnitude for value in forward_tangent)
+    point_north = (
+        -sin(point_lat) * cos(point_lon),
+        -sin(point_lat) * sin(point_lon),
+        cos(point_lat),
+    )
+    point_east = (-sin(point_lon), cos(point_lon), 0.0)
+    return ((degrees(atan2(
+        dot(forward_tangent, point_east),
+        dot(forward_tangent, point_north))) + 360) % 360)
+
+
 # Funkcja do obliczania odchylenia bocznego / Function to calculate cross-track deviation
 def crosstrack(distance, azimuth, track):
     radius = 6371 if metric_units else 3959
@@ -1629,6 +1737,7 @@ def body_position_at_utc(body_name, when_utc):
         altitude_deg=math.degrees(body.alt),
         azimuth_deg=math.degrees(body.az),
         angular_diameter_arcsec=float(body.size),
+        evaluated_at_utc=when_utc,
     )
 
 
@@ -1650,7 +1759,8 @@ def _moving_body_result_separation(result):
 
 def _moving_body_solution(body_name, prediction_base_utc, initial_time,
                           result, correction_count, residual, outcome,
-                          body_angular_diameter_arcsec=None):
+                          body_angular_diameter_arcsec=None,
+                          body_ephemeris_evaluated_at_utc=None):
     return MovingBodyTransitSolution(
         result=result,
         diagnostic=MovingBodyTransitDiagnostic(
@@ -1663,12 +1773,26 @@ def _moving_body_solution(body_name, prediction_base_utc, initial_time,
             outcome=outcome,
             final_separation=_moving_body_result_separation(result),
             body_angular_diameter_arcsec=body_angular_diameter_arcsec,
+            body_ephemeris_evaluated_at_utc=(
+                body_ephemeris_evaluated_at_utc),
         ),
     )
 
 
 def _body_angular_diameter(body_position):
     return getattr(body_position, "angular_diameter_arcsec", None)
+
+
+def _ephem_angular_diameter(body):
+    try:
+        value = float(body.size)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) and value > 0 else None
+
+
+def _body_evaluated_at_utc(body_position, fallback=None):
+    return getattr(body_position, "evaluated_at_utc", None) or fallback
 
 
 def _snapshot_parameter(state, name):
@@ -1684,6 +1808,136 @@ def _snapshot_utc_text(value):
     if value is None:
         return None
     return value.astimezone(pytz.utc).isoformat().replace("+00:00", "Z")
+
+
+def _frozen_parameter(parameter, value_key):
+    if parameter is None:
+        return {value_key: None, "timestamp_utc": None, "source": None}
+    return {
+        value_key: parameter.value,
+        "timestamp_utc": _snapshot_utc_text(parameter.updated_at_utc),
+        "source": parameter.source,
+    }
+
+
+def _frozen_vertical_policy(policy):
+    return {
+        "level_threshold_fpm": policy.level_threshold_fpm,
+        "valid_vr_age_seconds": policy.valid_vr_age_seconds,
+        "ignore_vr_age_seconds": policy.ignore_vr_age_seconds,
+        "altitude_max_age_seconds": policy.altitude_max_age_seconds,
+        "stability_sample_count": policy.stability_sample_count,
+        "max_spread_fpm": policy.max_spread_fpm,
+        "prediction_limit_seconds": policy.prediction_limit_seconds,
+        "selected_altitude_freshness_seconds": (
+            policy.selected_altitude_freshness_seconds),
+        "nav_qnh_freshness_seconds": policy.nav_qnh_freshness_seconds,
+        "qnh_correction_ft_per_hpa": policy.qnh_correction_ft_per_hpa,
+    }
+
+
+def _ephem_provider_version():
+    return str(getattr(ephem, "__version__", getattr(ephem, "version", "unknown")))
+
+
+def build_frozen_prediction_state(
+        icao, celestial_body, transit_result, prediction_base_utc,
+        solver_input, vertical_diagnostic, solver_diagnostic,
+        application_qnh_hpa):
+    """Serialize the exact model inputs used by one completed prediction."""
+    motion_state = aircraft_motion_states.get(icao)
+    intent_state = aircraft_intent_states.get(icao)
+    policy = current_vertical_prediction_policy()
+    history = tuple(
+        list(motion_state.vertical_rate_history)[
+            -policy.stability_sample_count:]
+        if motion_state is not None else ())
+    altitude_parameter = (
+        motion_state.altitude if motion_state is not None else None)
+    vertical_rate_parameter = (
+        motion_state.vertical_rate if motion_state is not None else None)
+    selected_altitude = (
+        intent_state.selected_altitude if intent_state is not None else None)
+    nav_qnh = intent_state.nav_qnh if intent_state is not None else None
+    prediction = (
+        vertical_diagnostic.prediction
+        if vertical_diagnostic is not None else None)
+    forward_bearing = great_circle_forward_bearing_at_point(
+        (solver_input["aircraft_lat"], solver_input["aircraft_lon"]),
+        solver_input["track"],
+        (transit_result[0], transit_result[1]))
+    return {
+        "horizontal": {
+            "origin_lat": solver_input["aircraft_lat"],
+            "origin_lon": solver_input["aircraft_lon"],
+            "initial_track_deg": solver_input["track"],
+            "groundspeed_kmh": solver_input["groundspeed"],
+            "effective_groundspeed_kmh": int(solver_input["groundspeed"]),
+            "earth_model": "sphere",
+            "earth_radius_km": float(earth_R),
+            "distance_rounding_km": 0.1,
+            "forward_bearing_at_t0_deg": forward_bearing,
+        },
+        "vertical": {
+            "evaluated_at_utc": _snapshot_utc_text(prediction_base_utc),
+            "current_altitude": {
+                "value_m": solver_input["aircraft_altitude_m"],
+                "timestamp_utc": _snapshot_utc_text(
+                    altitude_parameter.updated_at_utc
+                    if altitude_parameter is not None else None),
+                "source": (
+                    altitude_parameter.source
+                    if altitude_parameter is not None else None),
+            },
+            "latest_vertical_rate": _frozen_parameter(
+                vertical_rate_parameter, "value_fpm"),
+            "vertical_rate_history": [
+                _frozen_parameter(sample, "value_fpm") for sample in history
+            ],
+            "selected_altitude": _frozen_parameter(
+                selected_altitude, "value_ft"),
+            "nav_qnh": _frozen_parameter(nav_qnh, "value_hpa"),
+            "application_qnh_hpa": float(application_qnh_hpa),
+            "decision": {
+                "mode": prediction.mode.value if prediction is not None else None,
+                "reason": prediction.reason if prediction is not None else None,
+                "spread_fpm": (
+                    prediction.spread_fpm if prediction is not None else None),
+                "applied_seconds_at_t0": (
+                    prediction.applied_seconds
+                    if prediction is not None else None),
+                "predicted_altitude_before_clamp_m": (
+                    vertical_diagnostic.predicted_altitude_before_clamp_m
+                    if vertical_diagnostic is not None else None),
+                "predicted_altitude_m": (
+                    prediction.predicted_altitude_m
+                    if prediction is not None else None),
+                "target_altitude_m": (
+                    vertical_diagnostic.target_altitude_m
+                    if vertical_diagnostic is not None else None),
+                "intent_clamped": (
+                    vertical_diagnostic.intent_clamped
+                    if vertical_diagnostic is not None else False),
+                "intent_reason": (
+                    vertical_diagnostic.intent_reason
+                    if vertical_diagnostic is not None else None),
+            },
+            "policy": _frozen_vertical_policy(policy),
+        },
+        "astronomy": {
+            "body": celestial_body.upper(),
+            "provider": "PyEphem",
+            "provider_version": _ephem_provider_version(),
+            "ephemeris_evaluated_at_utc": _snapshot_utc_text(
+                solver_diagnostic.body_ephemeris_evaluated_at_utc
+                if solver_diagnostic is not None else None),
+            "altitude_deg": float(transit_result[9]),
+            "azimuth_deg": float(transit_result[8]),
+            "angular_diameter_arcsec": (
+                solver_diagnostic.body_angular_diameter_arcsec
+                if solver_diagnostic is not None else None),
+        },
+    }
 
 
 def build_snapshot_solver_input(icao, plane_lat, plane_lon, elevation,
@@ -1811,7 +2065,9 @@ def moving_body_transit_pred(body_name, obs2body, plane_pos, track,
         return _moving_body_solution(
             body_name, prediction_base_utc,
             _moving_body_result_time(fallback_result), fallback_result,
-            0, None, TransitSolverOutcome.TECHNICAL_FALLBACK)
+            0, None, TransitSolverOutcome.TECHNICAL_FALLBACK,
+            _body_angular_diameter(fallback_body_position),
+            _body_evaluated_at_utc(fallback_body_position))
 
     initial_result = transit_pred(*geometry_args, body_alt, body_az)
     if not initial_result:
@@ -1824,7 +2080,11 @@ def moving_body_transit_pred(body_name, obs2body, plane_pos, track,
             body_name, prediction_base_utc, initial_time, None, 0, None,
             TransitSolverOutcome.OUT_OF_RANGE)
 
-    results = [(initial_result, body_size)]
+    results = [(
+        initial_result,
+        body_size,
+        _body_evaluated_at_utc(body_position, prediction_base_utc),
+    )]
     current_time = initial_time
     for correction_count in range(1, MOVING_BODY_MAX_CORRECTIONS + 1):
         body_time = prediction_base_utc + datetime.timedelta(
@@ -1838,7 +2098,7 @@ def moving_body_transit_pred(body_name, obs2body, plane_pos, track,
                 body_name, prediction_base_utc, initial_time,
                 initial_result, correction_count - 1, None,
                 TransitSolverOutcome.TECHNICAL_FALLBACK,
-                results[0][1])
+                results[0][1], results[0][2])
 
         next_result = transit_pred(*geometry_args, body_alt, body_az)
         if not next_result:
@@ -1858,24 +2118,34 @@ def moving_body_transit_pred(body_name, obs2body, plane_pos, track,
             return _moving_body_solution(
                 body_name, prediction_base_utc, initial_time, next_result,
                 correction_count, residual, TransitSolverOutcome.CONVERGED,
-                body_size)
+                body_size, _body_evaluated_at_utc(body_position, body_time))
 
         if (len(results) >= 2
                 and abs(next_time - _moving_body_result_time(results[-2][0]))
                 <= MOVING_BODY_CYCLE_TOLERANCE_SECONDS):
-            cycle_results = (results[-1], (next_result, body_size))
-            final_result, final_body_size = max(
+            cycle_results = (
+                results[-1], (
+                    next_result,
+                    body_size,
+                    _body_evaluated_at_utc(body_position, body_time),
+                ))
+            final_result, final_body_size, final_body_time = max(
                 cycle_results,
                 key=lambda pair: _moving_body_result_separation(pair[0]))
             return _moving_body_solution(
                 body_name, prediction_base_utc, initial_time, final_result,
                 correction_count, residual,
-                TransitSolverOutcome.TWO_POINT_CYCLE, final_body_size)
+                TransitSolverOutcome.TWO_POINT_CYCLE, final_body_size,
+                final_body_time)
 
-        results.append((next_result, body_size))
+        results.append((
+            next_result,
+            body_size,
+            _body_evaluated_at_utc(body_position, body_time),
+        ))
         current_time = next_time
 
-    final_result, final_body_size = max(
+    final_result, final_body_size, final_body_time = max(
         results[-2:],
         key=lambda pair: _moving_body_result_separation(pair[0]))
     return _moving_body_solution(
@@ -1883,7 +2153,8 @@ def moving_body_transit_pred(body_name, obs2body, plane_pos, track,
         MOVING_BODY_MAX_CORRECTIONS,
         abs(_moving_body_result_time(results[-1][0])
             - _moving_body_result_time(results[-2][0])),
-        TransitSolverOutcome.MAX_ITERATIONS, final_body_size)
+        TransitSolverOutcome.MAX_ITERATIONS, final_body_size,
+        final_body_time)
 
 # Funkcje kolorowania odległości, wysokości, azymutu / Functions for coloring distance, altitude, azimuth
 def dist_col(distance):
@@ -2032,13 +2303,24 @@ def get_metar_press():
 # Funkcja do generowania tabeli wyjściowej / Function to generate output table
 @synchronized_plane_dict
 def tabela(output=None, full=False, force=False):
-    global last_t
+    global last_t, sun_body_angular_diameter_arcsec
+    global moon_body_angular_diameter_arcsec
+    global sun_body_evaluated_at_utc, moon_body_evaluated_at_utc
     output = sys.stdout if output is None else output
     emit = lambda *args: print(*args, file=output)
     gatech.date = clock.ephem_now()  # Aktualizuj datę w ephemeris / Update date in ephemeris
     vm, vs = ephem.Moon(gatech), ephem.Sun(gatech)  # Pobierz dane o Księżycu i Słońcu / Get data about the Moon and the Sun
     vm.compute(gatech)  # Oblicz pozycję Księżyca / Compute Moon position
     vs.compute(gatech)  # Oblicz pozycję Słońca / Compute Sun position
+    try:
+        body_evaluated_at_utc = ephem.Date(gatech.date).datetime().replace(
+            tzinfo=pytz.utc)
+    except (TypeError, ValueError):
+        body_evaluated_at_utc = clock.now_utc()
+    moon_body_evaluated_at_utc = body_evaluated_at_utc
+    sun_body_evaluated_at_utc = body_evaluated_at_utc
+    moon_body_angular_diameter_arcsec = _ephem_angular_diameter(vm)
+    sun_body_angular_diameter_arcsec = _ephem_angular_diameter(vs)
     moon_alt, moon_az = round(math.degrees(vm.alt), 1), round(math.degrees(vm.az), 1)  # Wysokość i azymut Księżyca / Moon altitude and azimuth
     sun_alt, sun_az = round(math.degrees(vs.alt), 1), round(math.degrees(vs.az), 1)  # Wysokość i azymut Słońca / Sun altitude and azimuth
     aktual_t = clock.now_utc()  # Aktualny czas w UTC / Current time in UTC
@@ -2413,6 +2695,8 @@ def read_beast_intent(host, port):
 @synchronized_plane_dict
 def process_line(line, port):
     global last_update_time, moon_alt, moon_az, sun_alt, sun_az, gatech
+    global moon_body_angular_diameter_arcsec, sun_body_angular_diameter_arcsec
+    global moon_body_evaluated_at_utc, sun_body_evaluated_at_utc
 
     if not line:
         return
@@ -2676,11 +2960,15 @@ def process_line(line, port):
         moon_solution = moving_body_transit_pred(
             "moon", (my_lat, my_lon), (plane_lat, plane_lon), track,
             velocity, elevation, prediction_base_utc,
-            fallback_body_position=(moon_alt, moon_az))
+            fallback_body_position=BodyPosition(
+                moon_alt, moon_az, moon_body_angular_diameter_arcsec,
+                moon_body_evaluated_at_utc))
         sun_solution = moving_body_transit_pred(
             "sun", (my_lat, my_lon), (plane_lat, plane_lon), track,
             velocity, elevation, prediction_base_utc,
-            fallback_body_position=(sun_alt, sun_az))
+            fallback_body_position=BodyPosition(
+                sun_alt, sun_az, sun_body_angular_diameter_arcsec,
+                sun_body_evaluated_at_utc))
         tst_int1 = _store_transit_solver_solution(
             icao, "moon", moon_solution)
         tst_int2 = _store_transit_solver_solution(

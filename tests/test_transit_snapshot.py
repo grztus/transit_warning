@@ -1,4 +1,5 @@
 import datetime
+from collections import deque
 import io
 import json
 from pathlib import Path
@@ -235,6 +236,26 @@ class TransitSnapshotManagerTests(unittest.TestCase):
             self.assertIn("solver_input", event["prediction_updates"][-1])
             self.assertIn("intersection", event["prediction_updates"][-1])
 
+    def test_each_prediction_update_keeps_its_own_frozen_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = self.manager(directory)
+            trigger = prediction(time2x=2, recorded_offset=0)
+            trigger["frozen_prediction_state"] = {
+                "horizontal": {"origin_lat": 51.0}}
+            update = prediction(
+                time2x=1.5, recorded_offset=1, separation=0.3)
+            update["frozen_prediction_state"] = {
+                "horizontal": {"origin_lat": 51.25}}
+            self.assertTrue(manager.consider_prediction(trigger))
+            self.assertFalse(manager.consider_prediction(update))
+            event = manager.active_events[("ABC123", "SUN")]
+            self.assertEqual(
+                event["trigger_prediction"]["frozen_prediction_state"]
+                ["horizontal"]["origin_lat"], 51.0)
+            self.assertEqual(
+                event["prediction_updates"][-1]["frozen_prediction_state"]
+                ["horizontal"]["origin_lat"], 51.25)
+
     def test_legacy_prediction_without_geometry_remains_writable(self):
         with tempfile.TemporaryDirectory() as directory:
             manager = self.manager(directory)
@@ -428,6 +449,180 @@ class TransitSnapshotIntegrationFailOpenTests(unittest.TestCase):
                           side_effect=RuntimeError("init")):
             self.assertIsNone(transit.initialize_transit_snapshots())
         self.assertIsNone(transit.transit_snapshot_manager)
+
+
+class TransitSnapshotSelfContainmentTests(unittest.TestCase):
+    @staticmethod
+    def parse_utc(value):
+        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+    def test_snapshot_reconstructs_t0_and_vertical_decision_from_json_only(self):
+        names = (
+            "aircraft_motion_states", "aircraft_intent_states",
+            "vertical_transit_diagnostics", "transit_solver_diagnostics",
+            "sun_predicted_transit_utc", "transit_snapshot_manager",
+            "pressure", "my_lat", "my_lon", "my_elevation_const")
+        original = {name: getattr(transit, name) for name in names}
+        samples = [transit.MotionParameter(
+            value, BASE - datetime.timedelta(seconds=2 - index), "adsb")
+            for index, value in enumerate((512.0, 576.0, 640.0))]
+        motion = transit.AircraftMotionState(
+            altitude=transit.MotionParameter(10000.0, BASE, "adsb"),
+            vertical_rate=samples[-1],
+            vertical_rate_history=deque(
+                samples, maxlen=transit.VERTICAL_RATE_HISTORY_MAXLEN))
+        intent = transit.AircraftIntentState(
+            selected_altitude=transit.IntentParameter(
+                32880.0, BASE, "MCP/FCU"),
+            nav_qnh=transit.IntentParameter(
+                1010.0, BASE, "ADS-B TC29"))
+        solver_input = prediction()["solver_input"]
+        solver_input.update({
+            "aircraft_altitude_m": 10000.0,
+            "groundspeed": 800.0,
+            "track": 180.0,
+            "vertical_rate": 640.0,
+            "selected_altitude": 32880.0,
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                transit.aircraft_motion_states = {"ABC123": motion}
+                transit.aircraft_intent_states = {"ABC123": intent}
+                transit.vertical_transit_diagnostics = {}
+                transit.transit_solver_diagnostics = {}
+                transit.sun_predicted_transit_utc = {
+                    "ABC123": BASE + datetime.timedelta(seconds=5)}
+                transit.pressure = 1009.0
+                transit.my_lat, transit.my_lon = 51.0, 21.0
+                transit.my_elevation_const = 200.0
+                vertical = transit.predict_vertical_state_at_time(
+                    10000.0, motion, intent, BASE, 5.0, 1009.0)
+                final_angle = transit.degrees(transit.atan(
+                    (vertical.prediction.predicted_altitude_m - 200.0)
+                    / 20000.0))
+                raw_result = (
+                    50.9, 21.1, 180.0, 25.0, 20.0, 1.0, 5.0, 0,
+                    180.0, final_angle + 0.4, BASE)
+                final_result = transit.apply_vertical_prediction_to_transit_result(
+                    "ABC123", "sun", raw_result, 10000.0, BASE)
+                transit.transit_solver_diagnostics[("ABC123", "sun")] = (
+                    transit.MovingBodyTransitDiagnostic(
+                        body="sun", prediction_base_utc=BASE,
+                        initial_time2x=5.2, final_time2x=5.0,
+                        correction_count=2, convergence_residual=0.2,
+                        outcome=transit.TransitSolverOutcome.CONVERGED,
+                        final_separation=0.4,
+                        body_angular_diameter_arcsec=1895.5,
+                        body_ephemeris_evaluated_at_utc=(
+                            BASE + datetime.timedelta(seconds=4.8))))
+                transit.transit_snapshot_manager = TransitSnapshotManager(
+                    base_dir=directory, git_commit="test")
+                transit.capture_transit_prediction(
+                    "ABC123", "TEST", "sun", final_result, BASE,
+                    solver_input)
+                transit.transit_snapshot_manager.finalize_due(
+                    BASE + datetime.timedelta(seconds=12))
+                path = next(Path(directory).rglob("*.json"))
+                document = json.loads(path.read_text(encoding="utf-8"))
+            finally:
+                for name, value in original.items():
+                    setattr(transit, name, value)
+
+        saved = document["trigger_prediction"]
+        frozen = saved["frozen_prediction_state"]
+        self.assertEqual(document["schema_version"], 3)
+        self.assertEqual(saved["intersection"]["lat"], 50.9)
+        self.assertEqual(saved["intersection"]["lon"], 21.1)
+        self.assertEqual(
+            saved["intersection"]["azimuth_from_observer_deg"], 180.0)
+        self.assertEqual(
+            saved["aircraft_altitude_m"],
+            frozen["vertical"]["decision"]["predicted_altitude_m"])
+        self.assertEqual(
+            saved["intersection"]["aircraft_altitude_deg"], final_angle)
+        self.assertEqual(
+            frozen["astronomy"]["altitude_deg"],
+            saved["intersection"]["body_altitude_deg"])
+        self.assertEqual(
+            frozen["astronomy"]["azimuth_deg"],
+            saved["intersection"]["body_azimuth_deg"])
+        self.assertEqual(
+            frozen["astronomy"]["ephemeris_evaluated_at_utc"],
+            "2026-08-21T18:43:26.800000Z")
+        self.assertEqual(
+            frozen["astronomy"]["provider_version"],
+            transit._ephem_provider_version())
+        self.assertAlmostEqual(
+            abs(saved["intersection"]["aircraft_altitude_deg"]
+                - frozen["astronomy"]["altitude_deg"]),
+            saved["separation_deg"], delta=1e-12)
+        prediction_base = self.parse_utc(saved["prediction_base_utc"])
+        predicted = self.parse_utc(saved["predicted_transit_utc"])
+        self.assertEqual(
+            prediction_base + datetime.timedelta(
+                seconds=saved["time2x_seconds"]), predicted)
+
+        vertical_json = frozen["vertical"]
+        self.assertEqual(
+            [item["value_fpm"]
+             for item in vertical_json["vertical_rate_history"]],
+            [512.0, 576.0, 640.0])
+        self.assertEqual(vertical_json["application_qnh_hpa"], 1009.0)
+        self.assertEqual(
+            vertical_json["policy"]["level_threshold_fpm"], 300.0)
+        self.assertEqual(
+            vertical_json["policy"]["prediction_limit_seconds"], 120.0)
+        policy = transit.VerticalPredictionPolicy(**vertical_json["policy"])
+
+        def parameter(data, value_key):
+            if data[value_key] is None:
+                return None
+            return transit.MotionParameter(
+                data[value_key], self.parse_utc(data["timestamp_utc"]),
+                data["source"])
+
+        current_altitude = parameter(
+            vertical_json["current_altitude"], "value_m")
+        latest_vr = parameter(
+            vertical_json["latest_vertical_rate"], "value_fpm")
+        history = [parameter(item, "value_fpm")
+                   for item in vertical_json["vertical_rate_history"]]
+        reconstructed_motion = transit.AircraftMotionState(
+            altitude=current_altitude, vertical_rate=latest_vr,
+            vertical_rate_history=deque(
+                history, maxlen=transit.VERTICAL_RATE_HISTORY_MAXLEN))
+        selected = vertical_json["selected_altitude"]
+        nav_qnh = vertical_json["nav_qnh"]
+        reconstructed_intent = transit.AircraftIntentState(
+            selected_altitude=(transit.IntentParameter(
+                selected["value_ft"],
+                self.parse_utc(selected["timestamp_utc"]), selected["source"])
+                if selected["value_ft"] is not None else None),
+            nav_qnh=(transit.IntentParameter(
+                nav_qnh["value_hpa"],
+                self.parse_utc(nav_qnh["timestamp_utc"]), nav_qnh["source"])
+                if nav_qnh["value_hpa"] is not None else None))
+        reconstructed = transit.predict_vertical_state_at_time(
+            current_altitude.value, reconstructed_motion,
+            reconstructed_intent,
+            self.parse_utc(vertical_json["evaluated_at_utc"]),
+            saved["time2x_seconds"],
+            vertical_json["application_qnh_hpa"], policy)
+        decision = vertical_json["decision"]
+        self.assertEqual(reconstructed.prediction.mode.value, decision["mode"])
+        self.assertEqual(reconstructed.prediction.reason, decision["reason"])
+        self.assertEqual(
+            reconstructed.prediction.predicted_altitude_m,
+            decision["predicted_altitude_m"])
+        self.assertEqual(
+            reconstructed.prediction.applied_seconds,
+            decision["applied_seconds_at_t0"])
+        self.assertEqual(
+            reconstructed.intent_details["target_altitude_m"],
+            decision["target_altitude_m"])
+        self.assertEqual(
+            reconstructed.intent_details["intent_clamped"],
+            decision["intent_clamped"])
 
 
 if __name__ == "__main__":
