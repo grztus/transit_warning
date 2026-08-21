@@ -395,6 +395,40 @@ class BodyPosition:
 
 
 @dataclass(frozen=True)
+class AngularPosition:
+    distance_km: float
+    azimuth_deg: float
+    altitude_angle_deg: float
+
+
+@dataclass(frozen=True)
+class GreatCircleIntersection:
+    latitude_deg: float
+    longitude_deg: float
+    azimuth_from_observer_deg: float
+    aircraft_altitude_angle_deg: float
+    observer_distance_km: float
+    aircraft_distance_km: float
+    time_seconds: float
+
+
+@dataclass(frozen=True)
+class VerticalStateAtTime:
+    prediction_before_clamp: VerticalPredictionResult
+    prediction: VerticalPredictionResult
+    intent_details: dict
+
+
+@dataclass(frozen=True)
+class ProductionAircraftState:
+    latitude_deg: float
+    longitude_deg: float
+    altitude_m: float
+    azimuth_from_observer_deg: float
+    altitude_angle_deg: float
+
+
+@dataclass(frozen=True)
 class MovingBodyTransitSolution:
     result: tuple | None
     diagnostic: MovingBodyTransitDiagnostic
@@ -1067,9 +1101,9 @@ def update_aircraft_intent(intent, received_at_utc):
             intent.icao, received_at_utc, "BEAST", "DF17,TC29")
 
 
-def clamp_vertical_prediction_to_selected_altitude(
-        icao, prediction, now_utc, qnh_hpa):
-    """Conservatively stop a valid 2E projection at fresh MCP/FCU intent."""
+def clamp_vertical_prediction_to_intent_state(
+        prediction, intent_state, now_utc, qnh_hpa):
+    """Apply the existing TC29 clamp to one frozen intent state."""
     details = {
         "selected_altitude_ft": None, "selected_altitude_source": None,
         "selected_altitude_age_seconds": None, "nav_qnh_hpa": None,
@@ -1082,7 +1116,7 @@ def clamp_vertical_prediction_to_selected_altitude(
     }
     if prediction.mode != VerticalPredictionMode.DYNAMIC_VALID:
         return prediction, details
-    state = aircraft_intent_states.get(icao)
+    state = intent_state
     if state is None or state.selected_altitude is None:
         details["intent_reason"] = "TC29_NO_DATA"
         return prediction, details
@@ -1141,19 +1175,44 @@ def clamp_vertical_prediction_to_selected_altitude(
     ), details
 
 
+def clamp_vertical_prediction_to_selected_altitude(
+        icao, prediction, now_utc, qnh_hpa):
+    """Compatibility wrapper using the current stored TC29 intent."""
+    return clamp_vertical_prediction_to_intent_state(
+        prediction, aircraft_intent_states.get(icao), now_utc, qnh_hpa)
+
+
+def predict_vertical_state_at_time(
+        current_altitude_m, motion_state, intent_state, now_utc,
+        dt_seconds, qnh_hpa):
+    """Compose the unchanged 2E and 2F policies from frozen inputs."""
+    prediction_before_clamp = predict_transit_altitude(
+        current_altitude_m, motion_state, now_utc, dt_seconds)
+    prediction, intent_details = clamp_vertical_prediction_to_intent_state(
+        prediction_before_clamp, intent_state, now_utc, qnh_hpa)
+    return VerticalStateAtTime(
+        prediction_before_clamp=prediction_before_clamp,
+        prediction=prediction,
+        intent_details=intent_details,
+    )
+
+
 def apply_vertical_prediction_to_transit_result(
         icao, celestial_body, transit_result, current_altitude_m, now_utc):
     """Update only the final vertical angle of a solved 2D transit."""
     if not transit_result:
         return transit_result
-    prediction_2e = predict_transit_altitude(
+    vertical_state = predict_vertical_state_at_time(
         current_altitude_m,
         aircraft_motion_states.get(icao),
+        aircraft_intent_states.get(icao),
         now_utc,
         transit_result[6],
+        pressure,
     )
-    prediction, intent_details = clamp_vertical_prediction_to_selected_altitude(
-        icao, prediction_2e, now_utc, pressure)
+    prediction_2e = vertical_state.prediction_before_clamp
+    prediction = vertical_state.prediction
+    intent_details = vertical_state.intent_details
     before = vertical_transit_separation(
         transit_result[3], transit_result[9])
     updated = list(transit_result)
@@ -1182,6 +1241,18 @@ def apply_vertical_prediction_to_transit_result(
             **intent_details,
         ))
     return tuple(updated)
+
+
+def production_aircraft_state_at_transit(
+        transit_result, predicted_altitude_m):
+    """Represent production T0 without re-propagating rounded time2X."""
+    return ProductionAircraftState(
+        latitude_deg=transit_result[0],
+        longitude_deg=transit_result[1],
+        altitude_m=predicted_altitude_m,
+        azimuth_from_observer_deg=transit_result[2],
+        altitude_angle_deg=transit_result[3],
+    )
 
 
 def get_vertical_transit_diagnostic(icao, celestial_body):
@@ -1396,6 +1467,102 @@ def haversine(origin, destination):
     c = 2 * atan2(sqrt(a), sqrt(1 - a))
     return radius * c
 
+def angular_position_from_observer(
+        observer_position, observer_elevation_m, target_position,
+        target_altitude_m, distance_km=None):
+    """Return the existing observer geometry without changing rounding."""
+    observer_lat, observer_lon = observer_position
+    target_lat, target_lon = target_position
+    if distance_km is None:
+        distance_km = round(haversine(observer_position, target_position), 1)
+    altitude_angle = degrees(atan(
+        (target_altitude_m - observer_elevation_m)
+        / (distance_km * 1000)))
+    azimuth = atan2(
+        sin(radians(target_lon - observer_lon)) * cos(radians(target_lat)),
+        cos(radians(observer_lat)) * sin(radians(target_lat))
+        - sin(radians(observer_lat)) * cos(radians(target_lat))
+        * cos(radians(target_lon - observer_lon)))
+    return AngularPosition(
+        distance_km=distance_km,
+        azimuth_deg=round(((degrees(azimuth) + 360) % 360), 1),
+        altitude_angle_deg=altitude_angle,
+    )
+
+
+def solve_great_circle_intersection(
+        observer_position, plane_position, track, velocity, elevation,
+        body_azimuth, observer_elevation_m):
+    """Extract the original spherical intersection calculation unchanged."""
+    lat1, lon1 = observer_position
+    lat2, lon2 = plane_position
+    lat1, lat2, lon1, lon2 = map(radians, [lat1, lat2, lon1, lon2])
+    body_azimuth = float(body_azimuth)
+    track = float(track)
+    theta_13, theta_23 = radians(body_azimuth), radians(track)
+    delta_12 = 2 * asin(sqrt(
+        sin((lat1 - lat2) / 2) ** 2
+        + cos(lat1) * cos(lat2) * sin((lon1 - lon2) / 2) ** 2))
+    if delta_12 == 0:
+        return None
+    x = ((sin(lat2) - sin(lat1) * cos(delta_12))
+         / (sin(delta_12) * cos(lat1)))
+    x = min(1, max(-1, x))
+    theta_a = acos(x)
+    y = ((sin(lat1) - sin(lat2) * cos(delta_12))
+         / (sin(delta_12) * cos(lat2)))
+    y = min(1, max(-1, y))
+    theta_b = acos(y)
+    theta_12 = (
+        theta_a if sin(lon2 - lon1) > 0 else 2 * math.pi - theta_a)
+    theta_21 = (
+        2 * math.pi - theta_b
+        if sin(lon2 - lon1) > 0 else theta_b)
+    alfa_1, alfa_2 = theta_13 - theta_12, theta_21 - theta_23
+    if sin(alfa_1) == 0 and sin(alfa_2) == 0:
+        return None
+    if (sin(alfa_1) * sin(alfa_2)) < 0:
+        return None
+    alfa_3 = acos(
+        -cos(alfa_1) * cos(alfa_2)
+        + sin(alfa_1) * sin(alfa_2) * cos(delta_12))
+    delta_13 = atan2(
+        sin(delta_12) * sin(alfa_1) * sin(alfa_2),
+        cos(alfa_2) + cos(alfa_1) * cos(alfa_3))
+    lat3 = asin(
+        sin(lat1) * cos(delta_13)
+        + cos(lat1) * sin(delta_13) * cos(theta_13))
+    dlon_13 = atan2(
+        sin(theta_13) * sin(delta_13) * cos(lat1),
+        cos(delta_13) - sin(lat1) * sin(lat3))
+    lon3 = lon1 + dlon_13
+    lat3, lon3 = degrees(lat3), (degrees(lon3) + 540) % 360 - 180
+    dst_h2x = round(haversine(observer_position, (lat3, lon3)), 1)
+    if dst_h2x > 500:
+        return None
+    if dst_h2x == 0:
+        dst_h2x = 0.001
+    if not is_int_try(elevation):
+        return None
+    angular_position = angular_position_from_observer(
+        observer_position, observer_elevation_m, (lat3, lon3), elevation,
+        distance_km=dst_h2x)
+    dst_p2x = round(haversine(plane_position, (lat3, lon3)), 1)
+    velocity = int(velocity)
+    if velocity <= 0:
+        return None
+    delta_time = (dst_p2x / velocity) * 3600
+    return GreatCircleIntersection(
+        latitude_deg=lat3,
+        longitude_deg=lon3,
+        azimuth_from_observer_deg=angular_position.azimuth_deg,
+        aircraft_altitude_angle_deg=angular_position.altitude_angle_deg,
+        observer_distance_km=dst_h2x,
+        aircraft_distance_km=dst_p2x,
+        time_seconds=delta_time,
+    )
+
+
 # Funkcja do obliczania odchylenia bocznego / Function to calculate cross-track deviation
 def crosstrack(distance, azimuth, track):
     radius = 6371 if metric_units else 3959
@@ -1420,56 +1587,25 @@ def log_transits(icao, flight, transit_info, celestial_body):
 def transit_pred(obs2moon, plane_pos, track, velocity, elevation, moon_alt, moon_az):
     if moon_alt < 0.1:
         return 0
-    lat1, lon1 = obs2moon
-    lat2, lon2 = plane_pos
-    lat1, lat2, lon1, lon2 = map(radians, [lat1, lat2, lon1, lon2])
     moon_az = float(moon_az)
-    track = float(track)
-    theta_13, theta_23 = radians(moon_az), radians(track)
-    delta_12 = 2 * asin(sqrt(sin((lat1 - lat2) / 2) ** 2 + cos(lat1) * cos(lat2) * sin((lon1 - lon2) / 2) ** 2))
-    if delta_12 == 0:
+    intersection = solve_great_circle_intersection(
+        obs2moon, plane_pos, track, velocity, elevation, moon_az,
+        my_elevation_const)
+    if intersection is None:
         return 0
-    x = (sin(lat2) - sin(lat1) * cos(delta_12)) / (sin(delta_12) * cos(lat1))
-    x = min(1, max(-1, x))
-    theta_a = acos(x)
-    y = (sin(lat1) - sin(lat2) * cos(delta_12)) / (sin(delta_12) * cos(lat2))
-    y = min(1, max(-1, y))
-    theta_b = acos(y)
-    theta_12 = theta_a if sin(lon2 - lon1) > 0 else 2 * math.pi - theta_a
-    theta_21 = 2 * math.pi - theta_b if sin(lon2 - lon1) > 0 else theta_b
-    alfa_1, alfa_2 = theta_13 - theta_12, theta_21 - theta_23
-    if sin(alfa_1) == 0 and sin(alfa_2) == 0:
-        return 0
-    if (sin(alfa_1) * sin(alfa_2)) < 0:
-        return 0
-    alfa_3 = acos(-cos(alfa_1) * cos(alfa_2) + sin(alfa_1) * sin(alfa_2) * cos(delta_12))
-    delta_13 = atan2(sin(delta_12) * sin(alfa_1) * sin(alfa_2), cos(alfa_2) + cos(alfa_1) * cos(alfa_3))
-    lat3 = asin(sin(lat1) * cos(delta_13) + cos(lat1) * sin(delta_13) * cos(theta_13))
-    Dlon_13 = atan2(sin(theta_13) * sin(delta_13) * cos(lat1), cos(delta_13) - sin(lat1) * sin(lat3))
-    lon3 = lon1 + Dlon_13
-    lat3, lon3 = degrees(lat3), (degrees(lon3) + 540) % 360 - 180
-    dst_h2x = round(haversine((my_lat, my_lon), (lat3, lon3)), 1)
-    if dst_h2x > 500:
-        return 0
-    if dst_h2x == 0:
-        dst_h2x = 0.001
-    if not is_int_try(elevation):
-        return 0
-    altitude1 = degrees(atan((elevation - my_elevation_const) / (dst_h2x * 1000)))
-    azimuth1 = atan2(sin(radians(lon3 - my_lon)) * cos(radians(lat3)), cos(radians(my_lat)) * sin(radians(lat3)) - sin(radians(my_lat)) * cos(radians(lat3)) * cos(radians(lon3 - my_lon)))
-    azimuth1 = round(((degrees(azimuth1) + 360) % 360), 1)
-    dst_p2x = round(haversine((plane_pos[0], plane_pos[1]), (lat3, lon3)), 1)
-    velocity = int(velocity)
-    if velocity <= 0:
-        return 0
-    delta_time = (dst_p2x / velocity) * 3600
     moon_alt_B = 90.00 - moon_alt
     ideal_dist = (sin(radians(moon_alt_B)) * elevation) / sin(radians(moon_alt)) / 1000
     ideal_lat = asin(sin(radians(my_lat)) * cos(ideal_dist / earth_R) + cos(radians(my_lat)) * sin(ideal_dist / earth_R) * cos(radians(moon_az)))
     ideal_lon = radians(my_lon) + atan2(sin(radians(moon_az)) * sin(ideal_dist / earth_R) * cos(radians(my_lat)), cos(ideal_dist / earth_R) - sin(radians(my_lat)) * sin(ideal_lat))
     ideal_lat, ideal_lon = degrees(ideal_lat), degrees(ideal_lon)
     ideal_lon = (ideal_lon + 540) % 360 - 180
-    return lat3, lon3, azimuth1, altitude1, dst_h2x, dst_p2x, delta_time, 0, moon_az, moon_alt, clock.now_utc()
+    return (intersection.latitude_deg, intersection.longitude_deg,
+            intersection.azimuth_from_observer_deg,
+            intersection.aircraft_altitude_angle_deg,
+            intersection.observer_distance_km,
+            intersection.aircraft_distance_km,
+            intersection.time_seconds, 0, moon_az, moon_alt,
+            clock.now_utc())
 
 
 def body_position_at_utc(body_name, when_utc):
@@ -2418,15 +2554,23 @@ def process_line(line, port):
             _update_motion_position(
                 icao, plane_lat, plane_lon, date_time_utc, port)
             distance = round(haversine((my_lat, my_lon), (plane_lat, plane_lon)), 1)
-            azimuth = atan2(sin(radians(plane_lon - my_lon)) * cos(radians(plane_lat)), cos(radians(my_lat)) * sin(radians(plane_lat)) - sin(radians(my_lat)) * cos(radians(plane_lat)) * cos(radians(plane_lon - my_lon)))
-            azimuth = round(((degrees(azimuth) + 360) % 360), 1)
             if distance == 0:
                 distance = 0.01
-            altitude = (
-                round(degrees(atan(
-                    (elevation - my_elevation_const) / (distance * 1000))), 1)
-                if elevation is not None else ""
-            )
+            angular_position = (
+                angular_position_from_observer(
+                    (my_lat, my_lon), my_elevation_const,
+                    (plane_lat, plane_lon), elevation,
+                    distance_km=distance)
+                if elevation is not None else None)
+            if angular_position is None:
+                azimuth = angular_position_from_observer(
+                    (my_lat, my_lon), my_elevation_const,
+                    (plane_lat, plane_lon), my_elevation_const,
+                    distance_km=distance).azimuth_deg
+                altitude = ""
+            else:
+                azimuth = angular_position.azimuth_deg
+                altitude = round(angular_position.altitude_angle_deg, 1)
             if icao not in plane_dict:
                 plane_dict[icao] = [date_time_utc, "", plane_lat, plane_lon, elevation if elevation is not None else "", distance, azimuth, altitude, "", "", distance, track, "", "", "", [], [], "", "", "", "", "", "", "", "", "", "", "", "", "", None, False]
                 plane_dict[icao][15] = []
