@@ -94,6 +94,13 @@ from recording import RecordingStatus, SessionRecorder, archive_session
 from transit_clock import ReplayClock, clock_from_args
 from transit_time import AdsBTimestampOffsetValidator, port_timestamp_to_utc
 from transit_snapshot import TransitSnapshotManager, runtime_git_commit
+from transit_prediction_model import (
+    AngularPosition,
+    GreatCircleIntersection,
+    angular_position_from_observer,
+    great_circle_forward_bearing_at_point,
+    solve_great_circle_intersection,
+)
 
 # Ustawienia GUI / GUI settings
 try:
@@ -412,24 +419,6 @@ class BodyPosition:
 
     def __getitem__(self, index):
         return (self.altitude_deg, self.azimuth_deg)[index]
-
-
-@dataclass(frozen=True)
-class AngularPosition:
-    distance_km: float
-    azimuth_deg: float
-    altitude_angle_deg: float
-
-
-@dataclass(frozen=True)
-class GreatCircleIntersection:
-    latitude_deg: float
-    longitude_deg: float
-    azimuth_from_observer_deg: float
-    aircraft_altitude_angle_deg: float
-    observer_distance_km: float
-    aircraft_distance_km: float
-    time_seconds: float
 
 
 @dataclass(frozen=True)
@@ -1521,155 +1510,6 @@ def haversine(origin, destination):
     a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
     c = 2 * atan2(sqrt(a), sqrt(1 - a))
     return radius * c
-
-def angular_position_from_observer(
-        observer_position, observer_elevation_m, target_position,
-        target_altitude_m, distance_km=None):
-    """Return the existing observer geometry without changing rounding."""
-    observer_lat, observer_lon = observer_position
-    target_lat, target_lon = target_position
-    if distance_km is None:
-        distance_km = round(haversine(observer_position, target_position), 1)
-    altitude_angle = degrees(atan(
-        (target_altitude_m - observer_elevation_m)
-        / (distance_km * 1000)))
-    azimuth = atan2(
-        sin(radians(target_lon - observer_lon)) * cos(radians(target_lat)),
-        cos(radians(observer_lat)) * sin(radians(target_lat))
-        - sin(radians(observer_lat)) * cos(radians(target_lat))
-        * cos(radians(target_lon - observer_lon)))
-    return AngularPosition(
-        distance_km=distance_km,
-        azimuth_deg=round(((degrees(azimuth) + 360) % 360), 1),
-        altitude_angle_deg=altitude_angle,
-    )
-
-
-def solve_great_circle_intersection(
-        observer_position, plane_position, track, velocity, elevation,
-        body_azimuth, observer_elevation_m):
-    """Extract the original spherical intersection calculation unchanged."""
-    lat1, lon1 = observer_position
-    lat2, lon2 = plane_position
-    lat1, lat2, lon1, lon2 = map(radians, [lat1, lat2, lon1, lon2])
-    body_azimuth = float(body_azimuth)
-    track = float(track)
-    theta_13, theta_23 = radians(body_azimuth), radians(track)
-    delta_12 = 2 * asin(sqrt(
-        sin((lat1 - lat2) / 2) ** 2
-        + cos(lat1) * cos(lat2) * sin((lon1 - lon2) / 2) ** 2))
-    if delta_12 == 0:
-        return None
-    x = ((sin(lat2) - sin(lat1) * cos(delta_12))
-         / (sin(delta_12) * cos(lat1)))
-    x = min(1, max(-1, x))
-    theta_a = acos(x)
-    y = ((sin(lat1) - sin(lat2) * cos(delta_12))
-         / (sin(delta_12) * cos(lat2)))
-    y = min(1, max(-1, y))
-    theta_b = acos(y)
-    theta_12 = (
-        theta_a if sin(lon2 - lon1) > 0 else 2 * math.pi - theta_a)
-    theta_21 = (
-        2 * math.pi - theta_b
-        if sin(lon2 - lon1) > 0 else theta_b)
-    alfa_1, alfa_2 = theta_13 - theta_12, theta_21 - theta_23
-    if sin(alfa_1) == 0 and sin(alfa_2) == 0:
-        return None
-    if (sin(alfa_1) * sin(alfa_2)) < 0:
-        return None
-    alfa_3 = acos(
-        -cos(alfa_1) * cos(alfa_2)
-        + sin(alfa_1) * sin(alfa_2) * cos(delta_12))
-    delta_13 = atan2(
-        sin(delta_12) * sin(alfa_1) * sin(alfa_2),
-        cos(alfa_2) + cos(alfa_1) * cos(alfa_3))
-    lat3 = asin(
-        sin(lat1) * cos(delta_13)
-        + cos(lat1) * sin(delta_13) * cos(theta_13))
-    dlon_13 = atan2(
-        sin(theta_13) * sin(delta_13) * cos(lat1),
-        cos(delta_13) - sin(lat1) * sin(lat3))
-    lon3 = lon1 + dlon_13
-    lat3, lon3 = degrees(lat3), (degrees(lon3) + 540) % 360 - 180
-    dst_h2x = round(haversine(observer_position, (lat3, lon3)), 1)
-    if dst_h2x > 500:
-        return None
-    if dst_h2x == 0:
-        dst_h2x = 0.001
-    if not is_int_try(elevation):
-        return None
-    angular_position = angular_position_from_observer(
-        observer_position, observer_elevation_m, (lat3, lon3), elevation,
-        distance_km=dst_h2x)
-    dst_p2x = round(haversine(plane_position, (lat3, lon3)), 1)
-    velocity = int(velocity)
-    if velocity <= 0:
-        return None
-    delta_time = (dst_p2x / velocity) * 3600
-    return GreatCircleIntersection(
-        latitude_deg=lat3,
-        longitude_deg=lon3,
-        azimuth_from_observer_deg=angular_position.azimuth_deg,
-        aircraft_altitude_angle_deg=angular_position.altitude_angle_deg,
-        observer_distance_km=dst_h2x,
-        aircraft_distance_km=dst_p2x,
-        time_seconds=delta_time,
-    )
-
-
-def great_circle_forward_bearing_at_point(
-        origin_position, initial_track_deg, point_position):
-    """Return the local forward bearing of the same oriented great-circle."""
-    def unit_position(position):
-        latitude, longitude = map(radians, position)
-        return (
-            cos(latitude) * cos(longitude),
-            cos(latitude) * sin(longitude),
-            sin(latitude),
-        )
-
-    def cross(left, right):
-        return (
-            left[1] * right[2] - left[2] * right[1],
-            left[2] * right[0] - left[0] * right[2],
-            left[0] * right[1] - left[1] * right[0],
-        )
-
-    def dot(left, right):
-        return sum(a * b for a, b in zip(left, right))
-
-    origin_lat, origin_lon = map(radians, origin_position)
-    origin = unit_position(origin_position)
-    origin_north = (
-        -sin(origin_lat) * cos(origin_lon),
-        -sin(origin_lat) * sin(origin_lon),
-        cos(origin_lat),
-    )
-    origin_east = (-sin(origin_lon), cos(origin_lon), 0.0)
-    track = radians(float(initial_track_deg))
-    initial_tangent = tuple(
-        cos(track) * north + sin(track) * east
-        for north, east in zip(origin_north, origin_east))
-    great_circle_normal = cross(origin, initial_tangent)
-
-    point_lat, point_lon = map(radians, point_position)
-    point = unit_position(point_position)
-    forward_tangent = cross(great_circle_normal, point)
-    magnitude = sqrt(dot(forward_tangent, forward_tangent))
-    if magnitude == 0:
-        raise ValueError("great-circle forward direction is undefined")
-    forward_tangent = tuple(value / magnitude for value in forward_tangent)
-    point_north = (
-        -sin(point_lat) * cos(point_lon),
-        -sin(point_lat) * sin(point_lon),
-        cos(point_lat),
-    )
-    point_east = (-sin(point_lon), cos(point_lon), 0.0)
-    return ((degrees(atan2(
-        dot(forward_tangent, point_east),
-        dot(forward_tangent, point_north))) + 360) % 360)
-
 
 # Funkcja do obliczania odchylenia bocznego / Function to calculate cross-track deviation
 def crosstrack(distance, azimuth, track):
