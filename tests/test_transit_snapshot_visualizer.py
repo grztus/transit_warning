@@ -221,6 +221,54 @@ class SnapshotVisualizerTests(unittest.TestCase):
             self.assertGreater(full_path.stat().st_size, 1000)
             self.assertGreater(zoom_path.stat().st_size, 1000)
 
+    def test_high_precision_geometry_is_not_production_quantized(self):
+        position = visualizer.high_precision_angular_position(
+            (51.39309, 21.18876), 194.0, (51.34883553, 21.32984102),
+            6858.89999)
+        self.assertNotEqual(round(position.distance_km, 1),
+                            position.distance_km)
+        self.assertNotEqual(round(position.azimuth_deg, 1),
+                            position.azimuth_deg)
+
+    def test_overlay_does_not_change_production_results_and_works_with_zoom(self):
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot_path = Path(directory) / "snapshot.json"
+            plain_path = Path(directory) / "plain.png"
+            overlay_path = Path(directory) / "overlay.png"
+            snapshot_path.write_text(json.dumps(snapshot_fixture()), encoding="utf-8")
+            plain = visualizer.visualize(
+                snapshot_path, plain_path, "final", 2, 2, 0.2, zoom=3)
+            overlay = visualizer.visualize(
+                snapshot_path, overlay_path, "final", 2, 2, 0.2, zoom=3,
+                high_precision_overlay=True)
+            self.assertEqual(plain.minimum_separation_deg,
+                             overlay.minimum_separation_deg)
+            self.assertEqual(plain.minimum_ratio, overlay.minimum_ratio)
+            self.assertEqual(plain.closest_offset_seconds,
+                             overlay.closest_offset_seconds)
+            self.assertEqual(plain.disk_crossing, overlay.disk_crossing)
+            self.assertIsNone(plain.high_precision_minimum_separation_deg)
+            self.assertIsNotNone(
+                overlay.high_precision_minimum_separation_deg)
+            self.assertGreater(overlay_path.stat().st_size, 1000)
+
+    def test_high_precision_classification_delta_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot_path = Path(directory) / "snapshot.json"
+            output_path = Path(directory) / "overlay.png"
+            snapshot_path.write_text(json.dumps(snapshot_fixture()), encoding="utf-8")
+            result = visualizer.visualize(
+                snapshot_path, output_path, "final", 1, 1, 0.1,
+                high_precision_overlay=True)
+            self.assertAlmostEqual(
+                result.high_precision_minimum_separation_deg
+                - result.minimum_separation_deg,
+                result.high_precision_delta_deg)
+            self.assertAlmostEqual(
+                result.high_precision_minimum_ratio - result.minimum_ratio,
+                result.high_precision_delta_body_radii)
+            self.assertIsInstance(result.high_precision_disk_crossing, bool)
+
     def test_invalid_cli_arguments_exit_cleanly(self):
         with tempfile.TemporaryDirectory() as directory:
             snapshot_path = Path(directory) / "snapshot.json"

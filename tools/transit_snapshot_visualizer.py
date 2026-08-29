@@ -47,6 +47,13 @@ class BodyPosition:
 
 
 @dataclass(frozen=True)
+class DiagnosticAngularPosition:
+    distance_km: float
+    azimuth_deg: float
+    altitude_angle_deg: float
+
+
+@dataclass(frozen=True)
 class TrajectorySample:
     offset_seconds: float
     timestamp_utc: datetime.datetime
@@ -74,6 +81,13 @@ class VisualizationResult:
     closest_utc: datetime.datetime
     disk_crossing: bool
     sample_count: int
+    high_precision_minimum_separation_deg: float | None = None
+    high_precision_minimum_ratio: float | None = None
+    high_precision_closest_offset_seconds: float | None = None
+    high_precision_closest_utc: datetime.datetime | None = None
+    high_precision_disk_crossing: bool | None = None
+    high_precision_delta_deg: float | None = None
+    high_precision_delta_body_radii: float | None = None
 
 
 def parse_utc(value):
@@ -159,6 +173,34 @@ def tangent_plane_offset(aircraft_azimuth_deg, aircraft_altitude_deg,
     x = scale * sum(a * b for a, b in zip(target, right))
     y = scale * sum(a * b for a, b in zip(target, up))
     return math.degrees(x), math.degrees(y)
+
+
+def high_precision_angular_position(observer_position, observer_elevation_m,
+                                    target_position, target_altitude_m):
+    """Diagnostic observer geometry without production display rounding."""
+    observer_lat, observer_lon = map(math.radians, observer_position)
+    target_lat, target_lon = map(math.radians, target_position)
+    delta_latitude = target_lat - observer_lat
+    delta_longitude = target_lon - observer_lon
+    haversine = (
+        math.sin(delta_latitude / 2.0) ** 2
+        + math.cos(observer_lat) * math.cos(target_lat)
+        * math.sin(delta_longitude / 2.0) ** 2)
+    distance_km = 2.0 * 6371.0 * math.atan2(
+        math.sqrt(haversine), math.sqrt(1.0 - haversine))
+    azimuth = math.atan2(
+        math.sin(delta_longitude) * math.cos(target_lat),
+        math.cos(observer_lat) * math.sin(target_lat)
+        - math.sin(observer_lat) * math.cos(target_lat)
+        * math.cos(delta_longitude))
+    altitude_angle = math.degrees(math.atan(
+        (float(target_altitude_m) - float(observer_elevation_m))
+        / (distance_km * 1000.0)))
+    return DiagnosticAngularPosition(
+        distance_km=distance_km,
+        azimuth_deg=(math.degrees(azimuth) + 360.0) % 360.0,
+        altitude_angle_deg=altitude_angle,
+    )
 
 
 def body_position_at_utc(body_name, when_utc, observer):
@@ -263,6 +305,28 @@ def reconstruct_samples(document, prediction, before=15.0, after=15.0,
     return tuple(samples)
 
 
+def reconstruct_high_precision_samples(document, production_samples):
+    """Reproject identical sampled 3D states without production rounding."""
+    observer = document["observer"]
+    observer_position = (float(observer["lat"]), float(observer["lon"]))
+    observer_elevation = float(observer["elevation_m"])
+    samples = []
+    for sample in production_samples:
+        angular = high_precision_angular_position(
+            observer_position, observer_elevation,
+            (sample.latitude_deg, sample.longitude_deg), sample.altitude_m)
+        x, y = tangent_plane_offset(
+            angular.azimuth_deg, angular.altitude_angle_deg,
+            sample.body_azimuth_deg, sample.body_altitude_deg)
+        samples.append(TrajectorySample(
+            sample.offset_seconds, sample.timestamp_utc,
+            sample.latitude_deg, sample.longitude_deg, sample.altitude_m,
+            angular.azimuth_deg, angular.altitude_angle_deg,
+            sample.body_azimuth_deg, sample.body_altitude_deg,
+            x, y, math.hypot(x, y)))
+    return tuple(samples)
+
+
 def validate_t0(document, prediction, samples):
     t0_sample = next(sample for sample in samples if sample.offset_seconds == 0.0)
     intersection = prediction["intersection"]
@@ -326,7 +390,7 @@ def zoom_plot_limits(radius_deg, zoom):
 
 
 def render_png(document, prediction, prediction_label, samples, output_path,
-               zoom=None):
+               zoom=None, high_precision_samples=None):
     import matplotlib
     matplotlib.use("Agg", force=True)
     from matplotlib import pyplot as plt
@@ -336,13 +400,22 @@ def render_png(document, prediction, prediction_label, samples, output_path,
     radius = body_radius_deg(prediction)
     zoom_limits = zoom_plot_limits(radius, zoom)
     closest, ratio, crossing = trajectory_summary(samples, radius)
+    high_precision_summary = (
+        trajectory_summary(high_precision_samples, radius)
+        if high_precision_samples is not None else None)
     t0_sample = next(sample for sample in samples if sample.offset_seconds == 0.0)
     figure, axis = plt.subplots(figsize=(8, 8))
     axis.add_patch(plt.Circle((0, 0), radius, color="#f5c542", alpha=0.35,
                               ec="#d89200", lw=2, label=prediction["body"]))
     axis.scatter([0], [0], marker="+", color="black", s=80, zorder=4)
     xs, ys = [sample.x_deg for sample in samples], [sample.y_deg for sample in samples]
-    axis.plot(xs, ys, color="#1769aa", lw=1.8, label="predicted aircraft path")
+    axis.plot(xs, ys, color="#1769aa", lw=1.8,
+              label="production-exact path")
+    if high_precision_samples is not None:
+        high_xs = [sample.x_deg for sample in high_precision_samples]
+        high_ys = [sample.y_deg for sample in high_precision_samples]
+        axis.plot(high_xs, high_ys, color="#d1495b", lw=1.5, ls="--",
+                  label="high-precision diagnostic path")
     axis.scatter([t0_sample.x_deg], [t0_sample.y_deg], color="red", s=45,
                  zorder=5, label="T0")
     marker_stride = max(1, len(samples) // 10)
@@ -360,18 +433,31 @@ def render_png(document, prediction, prediction_label, samples, output_path,
     zoom_metadata = (
         "\nZoom: ±{:.1f} body radii".format(float(zoom))
         if zoom is not None else "")
+    if high_precision_summary is None:
+        precision_metadata = ""
+    else:
+        high_closest, high_ratio, high_crossing = high_precision_summary
+        precision_metadata = (
+            "\nHigh precision min: {:.4f}° ({:.3f} radius), "
+            "closest {:+.2f}s, inside: {}\n"
+            "High precision - production: {:+.4f}° ({:+.3f} radius)"
+        ).format(
+            high_closest.center_separation_deg, high_ratio,
+            high_closest.offset_seconds, "YES" if high_crossing else "NO",
+            high_closest.center_separation_deg - closest.center_separation_deg,
+            high_ratio - ratio)
     metadata = (
         "{} / {} | {} | {}\n"
         "Body alt: {:.3f}° | Production SEP (vertical): {:.4f}°\n"
         "Sampled minimum center separation: {:.4f}° ({:.3f} radius)\n"
-        "Body radius: {:.4f}° | closest: {:+.2f}s | inside disk: {}{}"
+        "Body radius: {:.4f}° | closest: {:+.2f}s | inside disk: {}{}{}"
     ).format(aircraft.get("callsign") or "NOCALL", aircraft.get("icao") or "?",
              prediction["body"], prediction_label,
              float(prediction["body_altitude_deg"]),
              float(prediction["separation_deg"]),
              closest.center_separation_deg, ratio, radius,
              closest.offset_seconds, "YES" if crossing else "NO",
-             zoom_metadata)
+             zoom_metadata, precision_metadata)
     axis.set_title(metadata, fontsize=10)
     axis.set_xlabel("X: increasing azimuth / visual right (degrees)")
     axis.set_ylabel("Y: increasing altitude / visual up (degrees)")
@@ -386,21 +472,42 @@ def render_png(document, prediction, prediction_label, samples, output_path,
     figure.tight_layout()
     figure.savefig(output_path, dpi=150)
     plt.close(figure)
-    return VisualizationResult(
+    result_arguments = [
         output_path, prediction_label, float(prediction["separation_deg"]),
         radius, closest.center_separation_deg, ratio,
-        closest.offset_seconds, closest.timestamp_utc, crossing, len(samples))
+        closest.offset_seconds, closest.timestamp_utc, crossing, len(samples)]
+    if high_precision_summary is None:
+        return VisualizationResult(*result_arguments)
+    high_closest, high_ratio, high_crossing = high_precision_summary
+    return VisualizationResult(
+        *result_arguments,
+        high_precision_minimum_separation_deg=(
+            high_closest.center_separation_deg),
+        high_precision_minimum_ratio=high_ratio,
+        high_precision_closest_offset_seconds=high_closest.offset_seconds,
+        high_precision_closest_utc=high_closest.timestamp_utc,
+        high_precision_disk_crossing=high_crossing,
+        high_precision_delta_deg=(
+            high_closest.center_separation_deg
+            - closest.center_separation_deg),
+        high_precision_delta_body_radii=high_ratio - ratio,
+    )
 
 
 def visualize(snapshot_path, output_path, prediction_selector="final",
-              before=15.0, after=15.0, step=0.1, zoom=None):
+              before=15.0, after=15.0, step=0.1, zoom=None,
+              high_precision_overlay=False):
     document = load_snapshot(snapshot_path)
     prediction, label = select_prediction(document, prediction_selector)
     check_provider_version(prediction)
     samples = reconstruct_samples(document, prediction, before, after, step)
     validate_t0(document, prediction, samples)
+    high_precision_samples = (
+        reconstruct_high_precision_samples(document, samples)
+        if high_precision_overlay else None)
     return render_png(
-        document, prediction, label, samples, output_path, zoom=zoom)
+        document, prediction, label, samples, output_path, zoom=zoom,
+        high_precision_samples=high_precision_samples)
 
 
 def build_parser():
@@ -412,6 +519,7 @@ def build_parser():
     parser.add_argument("--after", type=float, default=15.0)
     parser.add_argument("--step", type=float, default=0.1)
     parser.add_argument("--zoom", type=float)
+    parser.add_argument("--high-precision-overlay", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     return parser
 
@@ -421,7 +529,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         result = visualize(args.snapshot, args.output, args.prediction,
-                           args.before, args.after, args.step, args.zoom)
+                           args.before, args.after, args.step, args.zoom,
+                           args.high_precision_overlay)
     except VisualizerError as error:
         parser.error(str(error))
     print("PNG: {}".format(result.output_path))
@@ -430,6 +539,16 @@ def main(argv=None):
         result.minimum_separation_deg, result.minimum_ratio,
         result.closest_offset_seconds))
     print("Disk crossing: {}".format("YES" if result.disk_crossing else "NO"))
+    if result.high_precision_minimum_separation_deg is not None:
+        print("High-precision minimum: {:.6f} deg ({:.3f} radius) at {:+.3f} s".format(
+            result.high_precision_minimum_separation_deg,
+            result.high_precision_minimum_ratio,
+            result.high_precision_closest_offset_seconds))
+        print("High-precision disk crossing: {}".format(
+            "YES" if result.high_precision_disk_crossing else "NO"))
+        print("High-precision delta: {:+.6f} deg ({:+.3f} radius)".format(
+            result.high_precision_delta_deg,
+            result.high_precision_delta_body_radii))
     return 0
 
 
