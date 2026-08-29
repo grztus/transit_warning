@@ -314,7 +314,19 @@ def trajectory_summary(samples, radius_deg):
         sample.center_separation_deg <= radius_deg for sample in samples)
 
 
-def render_png(document, prediction, prediction_label, samples, output_path):
+def zoom_plot_limits(radius_deg, zoom):
+    """Return symmetric body-centered limits for a plotting-only zoom."""
+    if zoom is None:
+        return None
+    zoom = float(zoom)
+    if not math.isfinite(zoom) or zoom < 1.0:
+        raise VisualizerError("zoom must be a finite number greater than or equal to 1.0")
+    extent = zoom * float(radius_deg)
+    return (-extent, extent), (-extent, extent)
+
+
+def render_png(document, prediction, prediction_label, samples, output_path,
+               zoom=None):
     import matplotlib
     matplotlib.use("Agg", force=True)
     from matplotlib import pyplot as plt
@@ -322,6 +334,7 @@ def render_png(document, prediction, prediction_label, samples, output_path):
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     radius = body_radius_deg(prediction)
+    zoom_limits = zoom_plot_limits(radius, zoom)
     closest, ratio, crossing = trajectory_summary(samples, radius)
     t0_sample = next(sample for sample in samples if sample.offset_seconds == 0.0)
     figure, axis = plt.subplots(figsize=(8, 8))
@@ -344,21 +357,30 @@ def render_png(document, prediction, prediction_label, samples, output_path):
                       xytext=(tail.x_deg, tail.y_deg),
                       arrowprops={"arrowstyle": "->", "color": "#1769aa"})
     aircraft = document.get("aircraft", {})
+    zoom_metadata = (
+        "\nZoom: ±{:.1f} body radii".format(float(zoom))
+        if zoom is not None else "")
     metadata = (
         "{} / {} | {} | {}\n"
         "Body alt: {:.3f}° | Production SEP (vertical): {:.4f}°\n"
         "Sampled minimum center separation: {:.4f}° ({:.3f} radius)\n"
-        "Body radius: {:.4f}° | closest: {:+.2f}s | inside disk: {}"
+        "Body radius: {:.4f}° | closest: {:+.2f}s | inside disk: {}{}"
     ).format(aircraft.get("callsign") or "NOCALL", aircraft.get("icao") or "?",
              prediction["body"], prediction_label,
              float(prediction["body_altitude_deg"]),
              float(prediction["separation_deg"]),
              closest.center_separation_deg, ratio, radius,
-             closest.offset_seconds, "YES" if crossing else "NO")
+             closest.offset_seconds, "YES" if crossing else "NO",
+             zoom_metadata)
     axis.set_title(metadata, fontsize=10)
     axis.set_xlabel("X: increasing azimuth / visual right (degrees)")
     axis.set_ylabel("Y: increasing altitude / visual up (degrees)")
-    axis.set_aspect("equal", adjustable="datalim")
+    if zoom_limits is None:
+        axis.set_aspect("equal", adjustable="datalim")
+    else:
+        axis.set_xlim(*zoom_limits[0])
+        axis.set_ylim(*zoom_limits[1])
+        axis.set_aspect("equal", adjustable="box")
     axis.grid(True, alpha=0.35)
     axis.legend(loc="best", fontsize=8)
     figure.tight_layout()
@@ -371,13 +393,14 @@ def render_png(document, prediction, prediction_label, samples, output_path):
 
 
 def visualize(snapshot_path, output_path, prediction_selector="final",
-              before=15.0, after=15.0, step=0.1):
+              before=15.0, after=15.0, step=0.1, zoom=None):
     document = load_snapshot(snapshot_path)
     prediction, label = select_prediction(document, prediction_selector)
     check_provider_version(prediction)
     samples = reconstruct_samples(document, prediction, before, after, step)
     validate_t0(document, prediction, samples)
-    return render_png(document, prediction, label, samples, output_path)
+    return render_png(
+        document, prediction, label, samples, output_path, zoom=zoom)
 
 
 def build_parser():
@@ -388,6 +411,7 @@ def build_parser():
     parser.add_argument("--before", type=float, default=15.0)
     parser.add_argument("--after", type=float, default=15.0)
     parser.add_argument("--step", type=float, default=0.1)
+    parser.add_argument("--zoom", type=float)
     parser.add_argument("--output", type=Path, required=True)
     return parser
 
@@ -397,7 +421,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         result = visualize(args.snapshot, args.output, args.prediction,
-                           args.before, args.after, args.step)
+                           args.before, args.after, args.step, args.zoom)
     except VisualizerError as error:
         parser.error(str(error))
     print("PNG: {}".format(result.output_path))

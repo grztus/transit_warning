@@ -96,7 +96,6 @@ def snapshot_fixture():
     }
     trigger = copy.deepcopy(prediction)
     update = copy.deepcopy(prediction)
-    update["separation_deg"] += 0.01
     return {
         "schema_version": 3,
         "aircraft": {"icao": "ABC123", "callsign": "TEST1"},
@@ -164,6 +163,18 @@ class SnapshotVisualizerTests(unittest.TestCase):
         self.assertAlmostEqual(math.sqrt(0.02) / 0.25, ratio)
         self.assertTrue(crossing)
 
+    def test_zoom_limits_are_derived_from_body_radius(self):
+        self.assertEqual(
+            ((-0.75, 0.75), (-0.75, 0.75)),
+            visualizer.zoom_plot_limits(0.25, 3.0))
+        self.assertIsNone(visualizer.zoom_plot_limits(0.25, None))
+
+    def test_invalid_zoom_is_rejected(self):
+        for zoom in (0.0, 0.999, float("inf"), float("nan")):
+            with self.subTest(zoom=zoom), self.assertRaisesRegex(
+                    visualizer.VisualizerError, "zoom must"):
+                visualizer.zoom_plot_limits(0.25, zoom)
+
     def test_shared_horizontal_and_vertical_reconstruction_and_t0_validation(self):
         document = snapshot_fixture()
         prediction = document["trigger_prediction"]
@@ -188,6 +199,27 @@ class SnapshotVisualizerTests(unittest.TestCase):
             self.assertTrue(output_path.exists())
             self.assertGreater(output_path.stat().st_size, 1000)
             self.assertEqual(output_path, result.output_path)
+
+    def test_zoom_changes_only_plot_limits_not_computed_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot_path = Path(directory) / "snapshot.json"
+            full_path = Path(directory) / "full.png"
+            zoom_path = Path(directory) / "zoom.png"
+            snapshot_path.write_text(json.dumps(snapshot_fixture()), encoding="utf-8")
+            full = visualizer.visualize(
+                snapshot_path, full_path, "final", 2.3, 4.7, 0.6)
+            zoomed = visualizer.visualize(
+                snapshot_path, zoom_path, "final", 2.3, 4.7, 0.6, zoom=3)
+            self.assertEqual(full.sample_count, zoomed.sample_count)
+            self.assertEqual(full.minimum_separation_deg,
+                             zoomed.minimum_separation_deg)
+            self.assertEqual(full.minimum_ratio, zoomed.minimum_ratio)
+            self.assertEqual(full.closest_offset_seconds,
+                             zoomed.closest_offset_seconds)
+            self.assertEqual(full.closest_utc, zoomed.closest_utc)
+            self.assertEqual(full.disk_crossing, zoomed.disk_crossing)
+            self.assertGreater(full_path.stat().st_size, 1000)
+            self.assertGreater(zoom_path.stat().st_size, 1000)
 
     def test_invalid_cli_arguments_exit_cleanly(self):
         with tempfile.TemporaryDirectory() as directory:
