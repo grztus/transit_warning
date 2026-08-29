@@ -1,10 +1,111 @@
-"""Pure spherical geometry shared by Transit Warning and offline tools."""
+"""Pure prediction mathematics shared by Transit Warning and offline tools."""
 
+import datetime
 import math
 from dataclasses import dataclass
+from enum import Enum
 
 
 EARTH_RADIUS_KM = 6371.0
+VERTICAL_RATE_LEVEL_THRESHOLD_FPM = 300.0
+VERTICAL_RATE_VALID_AGE_SECONDS = 2.0
+VERTICAL_RATE_IGNORE_AGE_SECONDS = 5.0
+VERTICAL_RATE_STABILITY_SAMPLES = 3
+VERTICAL_RATE_MAX_SPREAD_FPM = 256.0
+VERTICAL_PREDICTION_MAX_SECONDS = 120.0
+VERTICAL_ALTITUDE_MAX_AGE_SECONDS = 10.0
+INTENT_FRESHNESS_SECONDS = 10.0
+QNH_CORRECTION_FT_PER_HPA = 26.0
+
+
+@dataclass(frozen=True)
+class MotionParameter:
+    value: float
+    updated_at_utc: datetime.datetime
+    source: str
+
+
+@dataclass(frozen=True)
+class IntentParameter:
+    value: float
+    updated_at_utc: datetime.datetime
+    source: str
+
+
+@dataclass(frozen=True)
+class VerticalMotionState:
+    altitude: MotionParameter | None = None
+    vertical_rate: MotionParameter | None = None
+    vertical_rate_history: tuple[MotionParameter, ...] = ()
+
+
+@dataclass(frozen=True)
+class VerticalIntentState:
+    selected_altitude: IntentParameter | None = None
+    nav_qnh: IntentParameter | None = None
+
+
+class VerticalPredictionMode(str, Enum):
+    LEVEL = "LEVEL"
+    DYNAMIC_VALID = "DYNAMIC_VALID"
+    VR_DEGRADED = "VR_DEGRADED"
+    VR_IGNORE = "VR_IGNORE"
+
+
+@dataclass(frozen=True)
+class VerticalPredictionResult:
+    predicted_altitude_m: float
+    mode: VerticalPredictionMode
+    reason: str
+    last_vertical_rate_fpm: float | None
+    vertical_rate_age_seconds: float | None
+    stability_samples: tuple[MotionParameter, ...]
+    spread_fpm: float | None
+    source: str | None
+    applied_seconds: float
+    current_altitude_m: float
+    altitude_delta_m: float
+    altitude_age_seconds: float | None
+
+
+@dataclass(frozen=True)
+class VerticalPredictionPolicy:
+    level_threshold_fpm: float
+    valid_vr_age_seconds: float
+    ignore_vr_age_seconds: float
+    altitude_max_age_seconds: float
+    stability_sample_count: int
+    max_spread_fpm: float
+    prediction_limit_seconds: float
+    selected_altitude_freshness_seconds: float
+    nav_qnh_freshness_seconds: float
+    qnh_correction_ft_per_hpa: float
+
+
+@dataclass(frozen=True)
+class VerticalStateAtTime:
+    prediction_before_clamp: VerticalPredictionResult
+    prediction: VerticalPredictionResult
+    intent_details: dict
+
+
+DEFAULT_VERTICAL_PREDICTION_POLICY = VerticalPredictionPolicy(
+    level_threshold_fpm=VERTICAL_RATE_LEVEL_THRESHOLD_FPM,
+    valid_vr_age_seconds=VERTICAL_RATE_VALID_AGE_SECONDS,
+    ignore_vr_age_seconds=VERTICAL_RATE_IGNORE_AGE_SECONDS,
+    altitude_max_age_seconds=VERTICAL_ALTITUDE_MAX_AGE_SECONDS,
+    stability_sample_count=VERTICAL_RATE_STABILITY_SAMPLES,
+    max_spread_fpm=VERTICAL_RATE_MAX_SPREAD_FPM,
+    prediction_limit_seconds=VERTICAL_PREDICTION_MAX_SECONDS,
+    selected_altitude_freshness_seconds=INTENT_FRESHNESS_SECONDS,
+    nav_qnh_freshness_seconds=INTENT_FRESHNESS_SECONDS,
+    qnh_correction_ft_per_hpa=QNH_CORRECTION_FT_PER_HPA,
+)
+
+
+def current_vertical_prediction_policy():
+    """Return the single immutable production 2E/2F policy."""
+    return DEFAULT_VERTICAL_PREDICTION_POLICY
 
 
 @dataclass(frozen=True)
@@ -216,3 +317,191 @@ def horizontal_position_from_t0(
     return propagate_great_circle_position(
         t0_latitude_deg, t0_longitude_deg,
         forward_bearing_at_t0_deg, distance_km, earth_radius_km)
+
+
+def predict_transit_altitude(current_altitude_m, motion_state,
+                             prediction_base_utc, dt_seconds, policy=None):
+    """Apply the production 2E policy to one explicit frozen motion state."""
+    policy = current_vertical_prediction_policy() if policy is None else policy
+    current_altitude_m = float(current_altitude_m)
+    altitude = motion_state.altitude if motion_state is not None else None
+    vertical_rate = (
+        motion_state.vertical_rate if motion_state is not None else None)
+    history = tuple(
+        list(motion_state.vertical_rate_history)[
+            -policy.stability_sample_count:]
+        if motion_state is not None else ())
+    altitude_age = (
+        max(0.0, (prediction_base_utc
+                  - altitude.updated_at_utc).total_seconds())
+        if altitude is not None else None)
+    vertical_rate_age = (
+        max(0.0, (prediction_base_utc
+                  - vertical_rate.updated_at_utc).total_seconds())
+        if vertical_rate is not None else None)
+    last_vr = vertical_rate.value if vertical_rate is not None else None
+    source = vertical_rate.source if vertical_rate is not None else None
+    spread = (
+        max(sample.value for sample in history)
+        - min(sample.value for sample in history)
+        if len(history) == policy.stability_sample_count else None)
+
+    def result(mode, reason, predicted=current_altitude_m,
+               applied_seconds=0.0):
+        return VerticalPredictionResult(
+            predicted_altitude_m=predicted,
+            mode=mode,
+            reason=reason,
+            last_vertical_rate_fpm=last_vr,
+            vertical_rate_age_seconds=vertical_rate_age,
+            stability_samples=history,
+            spread_fpm=spread,
+            source=source,
+            applied_seconds=applied_seconds,
+            current_altitude_m=current_altitude_m,
+            altitude_delta_m=predicted - current_altitude_m,
+            altitude_age_seconds=altitude_age,
+        )
+
+    if altitude is None:
+        return result(VerticalPredictionMode.VR_IGNORE, "altitude_missing")
+    if (altitude_age is None
+            or altitude_age > policy.altitude_max_age_seconds):
+        return result(VerticalPredictionMode.VR_IGNORE, "altitude_stale")
+    if vertical_rate is None:
+        return result(
+            VerticalPredictionMode.VR_IGNORE, "vertical_rate_missing")
+    if vertical_rate_age > policy.ignore_vr_age_seconds:
+        return result(VerticalPredictionMode.VR_IGNORE,
+                      "vertical_rate_stale")
+    if abs(last_vr) < policy.level_threshold_fpm:
+        return result(VerticalPredictionMode.LEVEL,
+                      "below_dynamic_threshold")
+    if vertical_rate_age > policy.valid_vr_age_seconds:
+        return result(VerticalPredictionMode.VR_DEGRADED,
+                      "vertical_rate_degraded_age")
+    if len(history) < policy.stability_sample_count:
+        return result(VerticalPredictionMode.VR_DEGRADED,
+                      "insufficient_history")
+    if any(abs(sample.value) < policy.level_threshold_fpm
+           for sample in history):
+        return result(VerticalPredictionMode.VR_DEGRADED,
+                      "history_below_dynamic_threshold")
+    signs = {sample.value > 0 for sample in history}
+    if len(signs) != 1:
+        return result(VerticalPredictionMode.VR_DEGRADED,
+                      "recent_sign_reversal")
+    if spread > policy.max_spread_fpm:
+        return result(VerticalPredictionMode.VR_DEGRADED,
+                      "vertical_rate_spread")
+
+    applied_seconds = min(
+        max(float(dt_seconds), 0.0), policy.prediction_limit_seconds)
+    altitude_delta_m = last_vr * applied_seconds / 60.0 * 0.3048
+    return result(
+        VerticalPredictionMode.DYNAMIC_VALID,
+        "confirmed_vertical_trend",
+        current_altitude_m + altitude_delta_m,
+        applied_seconds,
+    )
+
+
+def clamp_vertical_prediction_to_intent_state(
+        prediction, intent_state, prediction_base_utc,
+        application_qnh_hpa, policy=None):
+    """Apply the production 2F TC29 clamp to explicit frozen intent."""
+    policy = current_vertical_prediction_policy() if policy is None else policy
+    details = {
+        "selected_altitude_ft": None, "selected_altitude_source": None,
+        "selected_altitude_age_seconds": None, "nav_qnh_hpa": None,
+        "nav_qnh_age_seconds": None, "target_altitude_m": None,
+        "target_direction_valid": None, "intent_clamped": False,
+        "intent_reason": "TC29_2E_NOT_DYNAMIC",
+        "predicted_altitude_before_clamp_m": prediction.predicted_altitude_m,
+        "predicted_altitude_after_clamp_m": prediction.predicted_altitude_m,
+        "separation_before_clamp": None,
+    }
+    if prediction.mode != VerticalPredictionMode.DYNAMIC_VALID:
+        return prediction, details
+    if intent_state is None or intent_state.selected_altitude is None:
+        details["intent_reason"] = "TC29_NO_DATA"
+        return prediction, details
+    selected = intent_state.selected_altitude
+    selected_age = max(
+        0.0, (prediction_base_utc
+              - selected.updated_at_utc).total_seconds())
+    details.update(
+        selected_altitude_ft=selected.value,
+        selected_altitude_source=selected.source,
+        selected_altitude_age_seconds=selected_age)
+    if intent_state.nav_qnh is None:
+        details["intent_reason"] = "TC29_NO_QNH"
+        return prediction, details
+    nav_qnh = intent_state.nav_qnh
+    qnh_age = max(
+        0.0, (prediction_base_utc
+              - nav_qnh.updated_at_utc).total_seconds())
+    details.update(nav_qnh_hpa=nav_qnh.value,
+                   nav_qnh_age_seconds=qnh_age)
+    if selected.source != "MCP/FCU":
+        details["intent_reason"] = "TC29_SOURCE_UNSUPPORTED"
+        return prediction, details
+    if selected_age > policy.selected_altitude_freshness_seconds:
+        details["intent_reason"] = "TC29_STALE"
+        return prediction, details
+    if qnh_age > policy.nav_qnh_freshness_seconds:
+        details["intent_reason"] = "TC29_QNH_STALE"
+        return prediction, details
+    target_ft = (selected.value
+                 + (float(application_qnh_hpa) - nav_qnh.value)
+                 * policy.qnh_correction_ft_per_hpa)
+    target_m = target_ft * 0.3048
+    details["target_altitude_m"] = target_m
+    vr = prediction.last_vertical_rate_fpm
+    current = prediction.current_altitude_m
+    if (vr is None
+            or (vr > 0 and target_m <= current)
+            or (vr < 0 and target_m >= current)):
+        details.update(target_direction_valid=False,
+                       intent_reason="TC29_DIRECTION_MISMATCH")
+        return prediction, details
+    details["target_direction_valid"] = True
+    predicted = (min(prediction.predicted_altitude_m, target_m)
+                 if vr > 0 else max(prediction.predicted_altitude_m, target_m))
+    if predicted == prediction.predicted_altitude_m:
+        details["intent_reason"] = "TC29_NOT_NEEDED"
+        return prediction, details
+    details.update(intent_clamped=True, intent_reason="TC29_CLAMP_APPLIED",
+                   predicted_altitude_after_clamp_m=predicted)
+    return VerticalPredictionResult(
+        predicted_altitude_m=predicted,
+        mode=prediction.mode,
+        reason=prediction.reason,
+        last_vertical_rate_fpm=prediction.last_vertical_rate_fpm,
+        vertical_rate_age_seconds=prediction.vertical_rate_age_seconds,
+        stability_samples=prediction.stability_samples,
+        spread_fpm=prediction.spread_fpm,
+        source=prediction.source,
+        applied_seconds=prediction.applied_seconds,
+        current_altitude_m=prediction.current_altitude_m,
+        altitude_delta_m=predicted - prediction.current_altitude_m,
+        altitude_age_seconds=prediction.altitude_age_seconds,
+    ), details
+
+
+def predict_vertical_state_at_time(
+        current_altitude_m, motion_state, intent_state,
+        prediction_base_utc, dt_seconds, application_qnh_hpa, policy=None):
+    """Compose unchanged 2E/2F policy at an explicit prediction base UTC."""
+    policy = current_vertical_prediction_policy() if policy is None else policy
+    before = predict_transit_altitude(
+        current_altitude_m, motion_state, prediction_base_utc,
+        dt_seconds, policy)
+    prediction, details = clamp_vertical_prediction_to_intent_state(
+        before, intent_state, prediction_base_utc,
+        application_qnh_hpa, policy)
+    return VerticalStateAtTime(
+        prediction_before_clamp=before,
+        prediction=prediction,
+        intent_details=details,
+    )
