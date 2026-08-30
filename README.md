@@ -51,6 +51,9 @@ Configure these fields:
 - `ADSB_PORT` — ADS-B TCP port; normally `30003`
 - `ADSB_TIMESTAMP_TIMEZONE` — IANA timezone of the SBS/dump1090-fa source,
   for example `Europe/Warsaw`
+- `RAW_ADSB_HOST` — optional RAW Mode-S/ADS-B source hostname; normally the
+  same receiver as `ADSB_HOST`
+- `RAW_ADSB_PORT` — optional RAW source port; normally `30002`
 - `BEAST_HOST` — Beast/Mode-S source IP address or hostname (default `192.168.56.1`)
 - `BEAST_PORT` — Beast TCP port used for TC29 intent; normally `30005`
 - `MLAT_HOST` — MLAT source IP address or hostname
@@ -62,6 +65,14 @@ Configure these fields:
 naive SBS timestamps. It is not the timezone of the computer running Transit
 Warning. Conversion uses the date of each record and the applicable IANA
 daylight-saving rules.
+
+The RAW source is optional and fail-open. Fresh DF17 TC19 ground-velocity
+messages provide a fractional track for the matching aircraft only. After a
+RAW update becomes stale, its fractional track may be held while fresh SBS or
+MLAT updates continue to report exactly the same coarse track; any coarse-track
+change invalidates the hold until another RAW update arrives. The terminal
+shows one decimal place while fresh or coarse-confirmed RAW precision is
+active; prediction retains the full decoded precision.
 
 System environment variables override `.env`. The private `.env` file and the
 `recordings/` directory are ignored by Git.

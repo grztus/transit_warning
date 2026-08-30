@@ -33,6 +33,8 @@ class InstallationConfig:
     metar_station: str
     beast_host: str = "192.168.56.1"
     beast_port: int = 30005
+    raw_adsb_host: str = "127.0.0.1"
+    raw_adsb_port: int = 30002
 
 
 def _required(values, name, errors):
@@ -149,6 +151,8 @@ def load_installation_config(
     metar_station = _metar_station(values, errors)
     beast_host = _host(values, "BEAST_HOST", "192.168.56.1", errors)
     beast_port = _port(values, "BEAST_PORT", 30005, errors)
+    raw_adsb_host = _host(values, "RAW_ADSB_HOST", "127.0.0.1", errors)
+    raw_adsb_port = _port(values, "RAW_ADSB_PORT", 30002, errors)
 
     if (adsb_host is not None and adsb_port is not None
             and mlat_host is not None and mlat_port is not None
@@ -171,4 +175,6 @@ def load_installation_config(
         metar_station=metar_station,
         beast_host=beast_host,
         beast_port=beast_port,
+        raw_adsb_host=raw_adsb_host,
+        raw_adsb_port=raw_adsb_port,
     )

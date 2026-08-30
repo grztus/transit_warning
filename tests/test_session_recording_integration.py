@@ -215,7 +215,8 @@ class MainSessionRecordingTests(unittest.TestCase):
                 patch.object(transit.threading, "Thread", side_effect=create_thread), patches[5]:
             transit.main()
 
-        self.assertEqual(order, ["session", "thread", "thread", "thread"])
+        self.assertEqual(
+            order, ["session", "thread", "thread", "thread", "thread"])
         factory.assert_called_once()
         args = factory.call_args.args
         self.assertEqual(args[1:], (
@@ -238,7 +239,7 @@ class MainSessionRecordingTests(unittest.TestCase):
         recorder.manifest_data.return_value = {"recording_status": "complete"}
         ended_at = datetime.datetime(
             2026, 8, 18, 20, 0, tzinfo=datetime.timezone.utc)
-        threads = [Mock(), Mock(), Mock()]
+        threads = [Mock(), Mock(), Mock(), Mock()]
         patches = self.main_patches(True)
         with patches[0], patches[1], patches[2], patches[3], \
                 patch.object(transit, "SessionRecorder", return_value=recorder), \
@@ -271,7 +272,7 @@ class MainSessionRecordingTests(unittest.TestCase):
                 patch.object(transit, "SessionRecorder", side_effect=OSError("denied")), \
                 patches[4] as thread, patches[5]:
             transit.main()
-        self.assertEqual(thread.call_count, 3)
+        self.assertEqual(thread.call_count, 4)
         self.assertEqual(transit.session_recorder_statuses(), ("FAILED", "FAILED"))
 
     def test_without_record_keeps_both_statuses_off(self):

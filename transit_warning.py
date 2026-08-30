@@ -91,6 +91,7 @@ from environment import (
 )
 from metar import fetch_awc_metar
 from recording import RecordingStatus, SessionRecorder, archive_session
+from raw_adsb_track import decode_raw_tc19_track
 from transit_clock import ReplayClock, clock_from_args
 from transit_time import AdsBTimestampOffsetValidator, port_timestamp_to_utc
 from transit_snapshot import TransitSnapshotManager, runtime_git_commit
@@ -225,6 +226,7 @@ earth_R = 6371  # Promień Ziemi w km / Radius of the earth in km
 plane_dict = {}
 altitude_sources = {}
 aircraft_motion_states = {}
+raw_adsb_tracks = {}
 aircraft_intent_states = {}
 aircraft_motion_freshness_status = {}
 sun_prediction_last_valid = {}
@@ -277,6 +279,14 @@ class AircraftMotionState:
     vertical_rate: MotionParameter | None = None
     vertical_rate_history: deque = field(default_factory=lambda: deque(
         maxlen=VERTICAL_RATE_HISTORY_MAXLEN))
+
+
+@dataclass
+class RawAdsbTrackState:
+    precise_value_deg: float
+    raw_updated_at_utc: datetime.datetime
+    coarse_anchor_deg: float | None
+    hold_valid: bool = True
 
 
 @dataclass(frozen=True)
@@ -342,6 +352,19 @@ class BeastIntentDiagnostics:
 
 
 beast_intent_diagnostics = BeastIntentDiagnostics()
+
+
+@dataclass
+class RawAdsbTrackDiagnostics:
+    frames_received: int = 0
+    valid_track_updates: int = 0
+    rejected_frames: int = 0
+    reconnects: int = 0
+    last_error: str | None = None
+    last_error_utc: datetime.datetime | None = None
+
+
+raw_adsb_track_diagnostics = RawAdsbTrackDiagnostics()
 
 
 class TransitSolverOutcome(str, Enum):
@@ -459,13 +482,16 @@ mlat_host = None
 mlat_port = None
 beast_host = None
 beast_port = None
+raw_adsb_host = None
+raw_adsb_port = None
 
 
 def apply_installation_config(configuration: InstallationConfig):
     global my_lat, my_lon, my_elevation_const, transition_altitude_ft
     global metar_station, gatech
     global adsb_host, adsb_port, adsb_timestamp_timezone, adsb_timestamp_validator
-    global mlat_host, mlat_port, beast_host, beast_port, port_status
+    global mlat_host, mlat_port, beast_host, beast_port
+    global raw_adsb_host, raw_adsb_port, port_status
     my_lat = configuration.observer_lat
     my_lon = configuration.observer_lon
     my_elevation_const = configuration.observer_elevation_m
@@ -482,6 +508,8 @@ def apply_installation_config(configuration: InstallationConfig):
     mlat_port = configuration.mlat_port
     beast_host = configuration.beast_host
     beast_port = configuration.beast_port
+    raw_adsb_host = configuration.raw_adsb_host
+    raw_adsb_port = configuration.raw_adsb_port
     gatech = ephem.Observer()
     gatech.lat, gatech.lon = str(my_lat), str(my_lon)
     gatech.elevation = my_elevation_const
@@ -569,6 +597,84 @@ def _update_motion_position(
         return
     _motion_state_for_update(icao).position = PositionParameter(
         float(latitude), float(longitude), updated_at_utc, source)
+
+
+def update_raw_adsb_track(decoded, updated_at_utc):
+    """Store a separate high-precision RAW track without replacing SBS/MLAT."""
+    with plane_dict_lock:
+        coarse = aircraft_motion_states.get(decoded.icao)
+        coarse = coarse.track if coarse is not None else None
+        coarse_age = (
+            max(0.0, (updated_at_utc - coarse.updated_at_utc).total_seconds())
+            if coarse is not None else None)
+        anchor = (
+            coarse.value
+            if coarse_age is not None
+            and coarse_age <= MOTION_FRESH_PARAMETER_SECONDS else None)
+        raw_adsb_tracks[decoded.icao] = RawAdsbTrackState(
+            precise_value_deg=decoded.track_deg,
+            raw_updated_at_utc=updated_at_utc,
+            coarse_anchor_deg=anchor,
+        )
+
+
+def effective_track_parameter(icao, fallback_track=None, now_utc=None):
+    """Return fresh/confirmed-held RAW track, otherwise the coarse track."""
+    now = clock.now_utc() if now_utc is None else now_utc
+    with plane_dict_lock:
+        state = aircraft_motion_states.get(icao)
+        coarse = state.track if state is not None else None
+        coarse_age = (
+            max(0.0, (now - coarse.updated_at_utc).total_seconds())
+            if coarse is not None else None)
+        coarse_fresh = (
+            coarse_age is not None
+            and coarse_age <= MOTION_FRESH_PARAMETER_SECONDS)
+        raw_track = raw_adsb_tracks.get(icao)
+        if raw_track is not None and raw_track.hold_valid:
+            anchor = raw_track.coarse_anchor_deg
+            if (anchor is not None and coarse_fresh
+                    and coarse.value != anchor):
+                raw_track.hold_valid = False
+            else:
+                raw_age = max(
+                    0.0, (now - raw_track.raw_updated_at_utc).total_seconds())
+                if raw_age <= MOTION_FRESH_PARAMETER_SECONDS:
+                    return MotionParameter(
+                        raw_track.precise_value_deg,
+                        raw_track.raw_updated_at_utc,
+                        "RAW_ADSB_TC19_FRESH")
+                if anchor is not None and coarse_fresh and coarse.value == anchor:
+                    return MotionParameter(
+                        raw_track.precise_value_deg,
+                        coarse.updated_at_utc,
+                        "RAW_ADSB_TC19_HELD")
+        if coarse is not None:
+            return coarse
+    if fallback_track is not None and is_float_try(fallback_track):
+        return MotionParameter(float(fallback_track), now, "fallback")
+    return None
+
+
+def effective_motion_state(icao, now_utc):
+    """Copy motion state with only its prediction track precedence applied."""
+    state = get_aircraft_motion_state(icao)
+    if state is None:
+        return None
+    fallback_track = state.track.value if state.track is not None else None
+    effective_track = effective_track_parameter(icao, fallback_track, now_utc)
+    state.track = effective_track
+    return state
+
+
+def format_track_for_display(icao, fallback_track, now_utc=None):
+    """Show one decimal while fresh or coarse-confirmed RAW is effective."""
+    parameter = effective_track_parameter(icao, fallback_track, now_utc)
+    if (parameter is not None
+            and parameter.source in (
+                "RAW_ADSB_TC19_FRESH", "RAW_ADSB_TC19_HELD")):
+        return "{:.1f}".format(parameter.value)
+    return fallback_track
 
 
 def get_aircraft_motion_state(icao):
@@ -1294,6 +1400,7 @@ def clean_dict():
         del plane_dict[icao]
         altitude_sources.pop(icao, None)
         aircraft_motion_states.pop(icao, None)
+        raw_adsb_tracks.pop(icao, None)
         aircraft_intent_states.pop(icao, None)
         aircraft_motion_freshness_status.pop(icao, None)
         sun_prediction_last_valid.pop(icao, None)
@@ -1593,11 +1700,13 @@ def build_snapshot_solver_input(icao, plane_lat, plane_lon, elevation,
     state = aircraft_motion_states.get(icao)
     position = state.position if state is not None else None
     altitude = state.altitude if state is not None else None
-    track_parameter = state.track if state is not None else None
+    track_parameter = effective_track_parameter(
+        icao, track, clock.now_utc())
     groundspeed_parameter = state.groundspeed if state is not None else None
     vertical_rate = state.vertical_rate if state is not None else None
     intent = aircraft_intent_states.get(icao)
     selected_altitude = intent.selected_altitude if intent is not None else None
+    raw_track = raw_adsb_tracks.get(icao)
     return {
         "aircraft_lat": float(plane_lat),
         "aircraft_lon": float(plane_lon),
@@ -1608,6 +1717,12 @@ def build_snapshot_solver_input(icao, plane_lat, plane_lon, elevation,
             float(altitude_angle) if is_float_try(altitude_angle) else None),
         "groundspeed": float(groundspeed),
         "track": float(track),
+        "track_source": (
+            track_parameter.source if track_parameter is not None else None),
+        "raw_track_timestamp_utc": _snapshot_utc_text(
+            raw_track.raw_updated_at_utc if raw_track is not None else None),
+        "track_coarse_anchor_deg": (
+            raw_track.coarse_anchor_deg if raw_track is not None else None),
         "vertical_rate": (
             vertical_rate.value if vertical_rate is not None else None),
         "selected_altitude": (
@@ -2010,7 +2125,9 @@ def tabela(output=None, full=False, force=False):
                         elev_col(elevation), elevation, RESET)
                 else:
                     wiersz += '{:>7} '.format('---')
-                wiersz += '{:>7} | '.format(plane_dict[pentry][11])
+                displayed_track = format_track_for_display(
+                    pentry, plane_dict[pentry][11], aktual_t)
+                wiersz += '{:>7} | '.format(displayed_track)
 
                 if distance is not None:
                     wiersz += '{}{:>6.1f}{} | '.format(
@@ -2171,6 +2288,7 @@ def clean_transit_dict():
         del plane_dict[icao]
         altitude_sources.pop(icao, None)
         aircraft_motion_states.pop(icao, None)
+        raw_adsb_tracks.pop(icao, None)
         aircraft_intent_states.pop(icao, None)
         aircraft_motion_freshness_status.pop(icao, None)
         sun_prediction_last_valid.pop(icao, None)
@@ -2326,6 +2444,47 @@ def read_beast_intent(host, port):
                 break
             beast_intent_diagnostics.last_error = str(error)
             beast_intent_diagnostics.last_error_utc = clock.now_utc()
+            if stop_event.wait(5):
+                break
+        finally:
+            if sock is not None:
+                _unregister_active_socket(port, sock)
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+
+def read_raw_adsb_track(host, port):
+    """Consume optional RAW port 30002 TC19 tracks; failures are fail-open."""
+    while not stop_event.is_set():
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            if not _register_active_socket(port, sock):
+                sock.close()
+                break
+            sock.connect((host, port))
+            raw_adsb_track_diagnostics.reconnects += 1
+            file = sock.makefile()
+            while not stop_event.is_set():
+                line = file.readline()
+                if not line:
+                    break
+                raw_adsb_track_diagnostics.frames_received += 1
+                decoded = decode_raw_tc19_track(line)
+                if decoded is None:
+                    raw_adsb_track_diagnostics.rejected_frames += 1
+                    continue
+                update_raw_adsb_track(decoded, clock.now_utc())
+                raw_adsb_track_diagnostics.valid_track_updates += 1
+            if not stop_event.is_set() and stop_event.wait(5):
+                break
+        except Exception as error:
+            if stop_event.is_set():
+                break
+            raw_adsb_track_diagnostics.last_error = str(error)
+            raw_adsb_track_diagnostics.last_error_utc = clock.now_utc()
             if stop_event.wait(5):
                 break
         finally:
@@ -2554,8 +2713,9 @@ def process_line(line, port):
 
     motion_freshness = None
     if mtype in ["3", "4"]:
+        motion_now = clock.now_utc()
         motion_freshness = assess_motion_freshness(
-            aircraft_motion_states.get(icao), clock.now_utc())
+            effective_motion_state(icao, motion_now), motion_now)
         aircraft_motion_freshness_status[icao] = motion_freshness
 
     if (mtype in ["3", "4"] and (
@@ -2568,7 +2728,9 @@ def process_line(line, port):
         distance = plane_dict[icao][5]
         azimuth = plane_dict[icao][6]
         altitude = plane_dict[icao][7]
-        track = float(plane_dict[icao][11]) if is_float_try(plane_dict[icao][11]) else 0.0
+        effective_track = effective_track_parameter(
+            icao, plane_dict[icao][11], clock.now_utc())
+        track = effective_track.value if effective_track is not None else 0.0
         warning = plane_dict[icao][12]
         direction = plane_dict[icao][9]
         velocity = plane_dict[icao][14]
@@ -2750,6 +2912,10 @@ def main():
         threads.append(threading.Thread(
             target=read_beast_intent,
             args=(beast_host, beast_port),
+        ))
+        threads.append(threading.Thread(
+            target=read_raw_adsb_track,
+            args=(raw_adsb_host, raw_adsb_port),
         ))
     for thread in threads:
         thread.start()

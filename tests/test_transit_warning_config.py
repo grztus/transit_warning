@@ -9,6 +9,7 @@ import pytz
 import transit_warning as transit
 from config import ConfigurationError, InstallationConfig
 from metar import AwcMetar
+from transit_clock import ReplayClock
 from transit_time import AdsBTimestampOffsetValidator
 
 
@@ -44,6 +45,8 @@ class ApplicationConfigurationTests(unittest.TestCase):
         self.assertEqual(transit.metar_station, TEST_CONFIG.metar_station)
         self.assertEqual(
             transit.adsb_timestamp_timezone, TEST_CONFIG.adsb_timestamp_timezone)
+        self.assertEqual(transit.raw_adsb_host, TEST_CONFIG.raw_adsb_host)
+        self.assertEqual(transit.raw_adsb_port, TEST_CONFIG.raw_adsb_port)
         self.assertIsInstance(
             transit.adsb_timestamp_validator, AdsBTimestampOffsetValidator)
         self.assertIsInstance(transit.gatech, ephem.Observer)
@@ -68,7 +71,7 @@ class ApplicationConfigurationTests(unittest.TestCase):
         fetch.assert_called_once_with(TEST_CONFIG.metar_station)
 
     def test_main_starts_independent_configured_sources(self):
-        threads = [Mock(), Mock(), Mock()]
+        threads = [Mock(), Mock(), Mock(), Mock()]
         thread_factory = Mock(side_effect=threads)
         with patch.object(transit, "load_installation_config", return_value=TEST_CONFIG), \
                 patch.object(transit, "initialize_daily_environment") as initialize_daily, \
@@ -91,6 +94,9 @@ class ApplicationConfigurationTests(unittest.TestCase):
                            transit.process_line, None)),
                 call(target=transit.read_beast_intent,
                      args=(TEST_CONFIG.beast_host, TEST_CONFIG.beast_port)),
+                call(target=transit.read_raw_adsb_track,
+                     args=(TEST_CONFIG.raw_adsb_host,
+                           TEST_CONFIG.raw_adsb_port)),
             ],
         )
         for thread in threads:
@@ -100,6 +106,28 @@ class ApplicationConfigurationTests(unittest.TestCase):
             transit.port_status,
             {TEST_CONFIG.adsb_port: False, TEST_CONFIG.mlat_port: False},
         )
+
+    def test_replay_does_not_start_optional_live_raw_reader(self):
+        original_clock = transit.clock
+        threads = [Mock(), Mock()]
+        thread_factory = Mock(side_effect=threads)
+        try:
+            transit.clock = ReplayClock()
+            transit.clock.advance_to(datetime.datetime(
+                2026, 8, 30, 10, 0, tzinfo=datetime.timezone.utc))
+            with patch.object(
+                    transit, "load_installation_config",
+                    return_value=TEST_CONFIG), patch.object(
+                    transit.threading, "Thread", thread_factory), patch.object(
+                    transit.time, "sleep", side_effect=KeyboardInterrupt):
+                transit.main()
+        finally:
+            transit.clock = original_clock
+
+        self.assertEqual(len(thread_factory.call_args_list), 2)
+        self.assertNotIn(
+            transit.read_raw_adsb_track,
+            [item.kwargs["target"] for item in thread_factory.call_args_list])
 
     def test_configuration_error_exits_cleanly_before_starting_threads(self):
         error = ConfigurationError("Invalid installation configuration:\n- OBSERVER_LAT is required")

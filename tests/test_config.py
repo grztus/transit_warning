@@ -59,6 +59,30 @@ class InstallationConfigTests(unittest.TestCase):
         self.assertEqual(result.mlat_port, 30106)
         self.assertEqual(result.beast_host, "192.168.56.1")
         self.assertEqual(result.beast_port, 30005)
+        self.assertEqual(result.raw_adsb_host, "127.0.0.1")
+        self.assertEqual(result.raw_adsb_port, 30002)
+
+    def test_accepts_custom_optional_raw_source(self):
+        result = self.load({
+            **REQUIRED,
+            "RAW_ADSB_HOST": "receiver.example",
+            "RAW_ADSB_PORT": "32002",
+        })
+
+        self.assertEqual(result.raw_adsb_host, "receiver.example")
+        self.assertEqual(result.raw_adsb_port, 32002)
+
+    def test_rejects_invalid_optional_raw_source(self):
+        with self.assertRaises(ConfigurationError) as caught:
+            self.load({
+                **REQUIRED,
+                "RAW_ADSB_HOST": " ",
+                "RAW_ADSB_PORT": "70000",
+            })
+
+        message = str(caught.exception)
+        self.assertIn("RAW_ADSB_HOST must not be empty", message)
+        self.assertIn("RAW_ADSB_PORT must be in the range 1..65535", message)
 
     def test_environment_overrides_dotenv_values(self):
         with tempfile.TemporaryDirectory() as directory:
