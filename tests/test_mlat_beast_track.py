@@ -155,6 +155,15 @@ class MlatBeastSelectionTests(unittest.TestCase):
             transit.mlat_coarse_tracks[self.decoded.icao] = state.track
         return state
 
+    def snapshot_input(self, now_utc, track):
+        state = transit.aircraft_motion_states[self.decoded.icao]
+        state.altitude = MotionParameter(10000.0, NOW, state.position.source)
+        state.groundspeed = MotionParameter(800.0, NOW, state.position.source)
+        with patch.object(transit.clock, "now_utc", return_value=now_utc):
+            return transit.build_snapshot_solver_input(
+                self.decoded.icao, 51, 21, 10000, 50, 180, 10,
+                800, track)
+
     def test_pending_then_30106_confirms_and_reverse_arrival_order(self):
         self.motion()
         transit.mlat_coarse_tracks.clear()
@@ -264,6 +273,93 @@ class MlatBeastSelectionTests(unittest.TestCase):
         transit._update_motion_parameter(
             self.decoded.icao, "track", 188, NOW, 30106)
         self.assertEqual({}, transit.mlat_coarse_tracks)
+
+    def test_fresh_snapshot_diagnostics_include_selection_inputs(self):
+        self.motion()
+        transit.update_mlat_beast_track(self.decoded, NOW)
+        result = self.snapshot_input(NOW, self.decoded.track_deg)
+        diagnostic = result["mlat_beast_track"]
+        self.assertEqual("MLAT_BEAST_TC19_FRESH",
+                         diagnostic["effective_track_source"])
+        self.assertAlmostEqual(self.decoded.track_deg,
+                               diagnostic["effective_track_value_deg"])
+        self.assertEqual(NOW.isoformat().replace("+00:00", "Z"),
+                         diagnostic["effective_track_timestamp_utc"])
+        self.assertEqual((188, "mlat"), (
+            diagnostic["coarse_track_value_deg"],
+            diagnostic["coarse_track_source"]))
+        self.assertEqual(self.decoded.east_west_velocity_knots,
+                         diagnostic["east_west_velocity_knots"])
+        self.assertEqual(self.decoded.north_south_velocity_knots,
+                         diagnostic["north_south_velocity_knots"])
+        self.assertEqual(self.decoded.groundspeed_knots,
+                         diagnostic["derived_groundspeed_knots"])
+        self.assertTrue(diagnostic["confirmed"])
+        self.assertTrue(diagnostic["hold_valid"])
+        self.assertEqual(("FRESH", "SELECTED"), (
+            diagnostic["freshness_classification"],
+            diagnostic["quality_reason"]))
+        self.assertTrue(diagnostic["truncation_bin_consistent"])
+
+    def test_held_snapshot_diagnostics_use_fresh_coarse_timestamp(self):
+        self.motion()
+        transit.update_mlat_beast_track(self.decoded, NOW)
+        later = NOW + datetime.timedelta(seconds=6)
+        transit._update_motion_parameter(
+            self.decoded.icao, "track", 188, later, 30106)
+        result = self.snapshot_input(later, self.decoded.track_deg)
+        diagnostic = result["mlat_beast_track"]
+        self.assertEqual("MLAT_BEAST_TC19_HELD",
+                         diagnostic["effective_track_source"])
+        self.assertEqual(("HELD", "SELECTED"), (
+            diagnostic["freshness_classification"],
+            diagnostic["quality_reason"]))
+        self.assertEqual(6.0, diagnostic["precise_age_seconds"])
+        self.assertEqual(0.0, diagnostic["coarse_age_seconds"])
+        self.assertEqual(later.isoformat().replace("+00:00", "Z"),
+                         diagnostic["effective_track_timestamp_utc"])
+
+    def test_unconfirmed_snapshot_explains_coarse_fallback(self):
+        self.motion(coarse=190)
+        transit.update_mlat_beast_track(self.decoded, NOW)
+        result = self.snapshot_input(NOW, 190)
+        diagnostic = result["mlat_beast_track"]
+        self.assertEqual("mlat", diagnostic["effective_track_source"])
+        self.assertFalse(diagnostic["confirmed"])
+        self.assertEqual(("UNAVAILABLE", "COARSE_BIN_MISMATCH"), (
+            diagnostic["freshness_classification"],
+            diagnostic["quality_reason"]))
+
+    def test_snapshot_explains_raw_priority_over_mlat_beast(self):
+        self.motion()
+        transit.update_mlat_beast_track(self.decoded, NOW)
+        transit.raw_adsb_tracks[self.decoded.icao] = transit.RawAdsbTrackState(
+            187.25, NOW, 188)
+        result = self.snapshot_input(NOW, 187.25)
+        diagnostic = result["mlat_beast_track"]
+        self.assertEqual("RAW_ADSB_TC19_FRESH",
+                         diagnostic["effective_track_source"])
+        self.assertEqual(("FRESH", "RAW_ADSB_PRIORITY"), (
+            diagnostic["freshness_classification"],
+            diagnostic["quality_reason"]))
+
+    def test_snapshot_explains_adsb_position_ineligibility(self):
+        self.motion(source="adsb")
+        transit.mlat_coarse_tracks[self.decoded.icao] = MotionParameter(
+            188, NOW, "mlat")
+        transit.update_mlat_beast_track(self.decoded, NOW)
+        result = self.snapshot_input(NOW, 188)
+        diagnostic = result["mlat_beast_track"]
+        self.assertEqual("adsb", diagnostic["effective_track_source"])
+        self.assertEqual(("UNAVAILABLE", "POSITION_SOURCE_NOT_MLAT"), (
+            diagnostic["freshness_classification"],
+            diagnostic["quality_reason"]))
+
+    def test_disabled_without_state_adds_no_snapshot_field(self):
+        self.motion()
+        transit.mlat_beast_enabled = False
+        result = self.snapshot_input(NOW, 188)
+        self.assertNotIn("mlat_beast_track", result)
 
 
 class MlatBeastReaderTests(unittest.TestCase):

@@ -1688,6 +1688,106 @@ def _snapshot_utc_text(value):
     return value.astimezone(pytz.utc).isoformat().replace("+00:00", "Z")
 
 
+def _snapshot_mlat_beast_track(
+        icao, effective_track, position, now_utc):
+    """Return additive MLAT Beast selection diagnostics without mutation."""
+    state = mlat_beast_tracks.get(icao)
+    if state is None:
+        return None
+    coarse = mlat_coarse_tracks.get(icao)
+    precise_age = max(
+        0.0, (now_utc - state.received_at_utc).total_seconds())
+    coarse_age = (
+        max(0.0, (now_utc - coarse.updated_at_utc).total_seconds())
+        if coarse is not None else None)
+    confirmation_delta = (
+        abs((state.received_at_utc
+             - coarse.updated_at_utc).total_seconds())
+        if coarse is not None else None)
+    bin_consistent = (
+        truncation_bin_consistent(state, coarse.value)
+        if coarse is not None else None)
+    selected_source = (
+        effective_track.source if effective_track is not None else None)
+
+    freshness = "UNAVAILABLE"
+    reason = "NOT_CONFIRMED"
+    if not state.confirmed:
+        if coarse is None:
+            reason = "NO_MLAT_COARSE_TRACK"
+        elif coarse.source != "mlat":
+            reason = "COARSE_SOURCE_NOT_MLAT"
+        elif coarse_age > MOTION_FRESH_PARAMETER_SECONDS:
+            reason = "COARSE_TRACK_STALE"
+        elif confirmation_delta > MOTION_FRESH_DELTA_SECONDS:
+            reason = "CONFIRMATION_TIME_DELTA"
+        elif not bin_consistent:
+            reason = "COARSE_BIN_MISMATCH"
+    elif not state.hold_valid:
+        reason = "COARSE_ANCHOR_CHANGED"
+    elif position is None or position.source != "mlat":
+        reason = "POSITION_SOURCE_NOT_MLAT"
+    elif precise_age <= MOTION_FRESH_PARAMETER_SECONDS:
+        freshness = "FRESH"
+        reason = (
+            "SELECTED" if selected_source == "MLAT_BEAST_TC19_FRESH"
+            else "RAW_ADSB_PRIORITY"
+            if selected_source in (
+                "RAW_ADSB_TC19_FRESH", "RAW_ADSB_TC19_HELD")
+            else "NOT_SELECTED")
+    elif (coarse is not None and coarse.source == "mlat"
+          and coarse_age <= MOTION_FRESH_PARAMETER_SECONDS
+          and float(coarse.value) == state.coarse_anchor_deg):
+        freshness = "HELD"
+        reason = (
+            "SELECTED" if selected_source == "MLAT_BEAST_TC19_HELD"
+            else "RAW_ADSB_PRIORITY"
+            if selected_source in (
+                "RAW_ADSB_TC19_FRESH", "RAW_ADSB_TC19_HELD")
+            else "NOT_SELECTED")
+    elif coarse is None:
+        reason = "NO_MLAT_COARSE_TRACK"
+    elif coarse.source != "mlat":
+        reason = "COARSE_SOURCE_NOT_MLAT"
+    elif coarse_age > MOTION_FRESH_PARAMETER_SECONDS:
+        reason = "COARSE_TRACK_STALE"
+    elif float(coarse.value) != state.coarse_anchor_deg:
+        reason = "COARSE_ANCHOR_CHANGED"
+    else:
+        reason = "PRECISION_TRACK_EXPIRED"
+
+    return {
+        "effective_track_value_deg": (
+            effective_track.value if effective_track is not None else None),
+        "effective_track_source": selected_source,
+        "effective_track_timestamp_utc": _snapshot_utc_text(
+            effective_track.updated_at_utc
+            if effective_track is not None else None),
+        "coarse_track_value_deg": coarse.value if coarse is not None else None,
+        "coarse_track_source": coarse.source if coarse is not None else None,
+        "coarse_track_timestamp_utc": _snapshot_utc_text(
+            coarse.updated_at_utc if coarse is not None else None),
+        "precise_track_deg": state.precise_value_deg,
+        "received_at_utc": _snapshot_utc_text(state.received_at_utc),
+        "east_west_velocity_knots": state.east_west_velocity_knots,
+        "north_south_velocity_knots": state.north_south_velocity_knots,
+        "derived_groundspeed_knots": state.derived_groundspeed_knots,
+        "angular_interval_low_deg": state.angular_interval_low_deg,
+        "angular_interval_high_deg": state.angular_interval_high_deg,
+        "coarse_anchor_deg": state.coarse_anchor_deg,
+        "coarse_anchor_timestamp_utc": _snapshot_utc_text(
+            state.coarse_anchor_timestamp_utc),
+        "confirmed": state.confirmed,
+        "hold_valid": state.hold_valid,
+        "freshness_classification": freshness,
+        "quality_reason": reason,
+        "precise_age_seconds": precise_age,
+        "coarse_age_seconds": coarse_age,
+        "confirmation_delta_seconds": confirmation_delta,
+        "truncation_bin_consistent": bin_consistent,
+    }
+
+
 def _frozen_parameter(parameter, value_key):
     if parameter is None:
         return {value_key: None, "timestamp_utc": None, "source": None}
@@ -1825,14 +1925,15 @@ def build_snapshot_solver_input(icao, plane_lat, plane_lon, elevation,
     state = aircraft_motion_states.get(icao)
     position = state.position if state is not None else None
     altitude = state.altitude if state is not None else None
+    snapshot_now_utc = clock.now_utc()
     track_parameter = effective_track_parameter(
-        icao, track, clock.now_utc())
+        icao, track, snapshot_now_utc)
     groundspeed_parameter = state.groundspeed if state is not None else None
     vertical_rate = state.vertical_rate if state is not None else None
     intent = aircraft_intent_states.get(icao)
     selected_altitude = intent.selected_altitude if intent is not None else None
     raw_track = raw_adsb_tracks.get(icao)
-    return {
+    solver_input = {
         "aircraft_lat": float(plane_lat),
         "aircraft_lon": float(plane_lon),
         "aircraft_altitude_m": float(elevation),
@@ -1865,6 +1966,11 @@ def build_snapshot_solver_input(icao, plane_lat, plane_lon, elevation,
             groundspeed_parameter.updated_at_utc
             if groundspeed_parameter is not None else None),
     }
+    mlat_beast_snapshot = _snapshot_mlat_beast_track(
+        icao, track_parameter, position, snapshot_now_utc)
+    if mlat_beast_snapshot is not None:
+        solver_input["mlat_beast_track"] = mlat_beast_snapshot
+    return solver_input
 
 
 def _capture_transit_observation(icao, timestamp_utc, message_source,

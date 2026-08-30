@@ -256,6 +256,34 @@ class TransitSnapshotManagerTests(unittest.TestCase):
                 event["prediction_updates"][-1]["frozen_prediction_state"]
                 ["horizontal"]["origin_lat"], 51.25)
 
+    def test_additive_mlat_beast_diagnostics_survive_trigger_and_update(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = self.manager(directory)
+            trigger = prediction(time2x=2, recorded_offset=0)
+            trigger["solver_input"]["mlat_beast_track"] = {
+                "effective_track_source": "MLAT_BEAST_TC19_FRESH",
+                "precise_track_deg": 188.125,
+                "freshness_classification": "FRESH",
+            }
+            update = prediction(
+                time2x=1.5, recorded_offset=1, separation=0.3)
+            update["solver_input"]["mlat_beast_track"] = {
+                "effective_track_source": "MLAT_BEAST_TC19_HELD",
+                "precise_track_deg": 188.125,
+                "freshness_classification": "HELD",
+            }
+            self.assertTrue(manager.consider_prediction(trigger))
+            self.assertFalse(manager.consider_prediction(update))
+            event = manager.active_events[("ABC123", "SUN")]
+            self.assertEqual(
+                "MLAT_BEAST_TC19_FRESH",
+                event["trigger_prediction"]["solver_input"]
+                ["mlat_beast_track"]["effective_track_source"])
+            self.assertEqual(
+                "MLAT_BEAST_TC19_HELD",
+                event["prediction_updates"][-1]["solver_input"]
+                ["mlat_beast_track"]["effective_track_source"])
+
     def test_legacy_prediction_without_geometry_remains_writable(self):
         with tempfile.TemporaryDirectory() as directory:
             manager = self.manager(directory)
