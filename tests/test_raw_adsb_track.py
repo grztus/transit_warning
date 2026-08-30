@@ -226,15 +226,34 @@ class RawTrackReaderTests(unittest.TestCase):
         socket_instance = Mock()
         socket_instance.makefile.return_value = io.StringIO(
             "malformed\n" + FRAME_NORTHEAST + "\n")
+        recorder = Mock()
         with patch.object(transit.socket, "socket", return_value=socket_instance), \
                 patch.object(transit, "_register_active_socket", return_value=True), \
                 patch.object(transit, "_unregister_active_socket"), \
                 patch.object(transit, "update_raw_adsb_track") as update, \
                 patch.object(transit.stop_event, "wait", return_value=True):
-            transit.read_raw_adsb_track("receiver", 30002)
+            transit.read_raw_adsb_track("receiver", 30002, recorder)
 
+        self.assertEqual(recorder.record_line.call_args_list, [
+            unittest.mock.call(30002, "malformed\n"),
+            unittest.mock.call(30002, FRAME_NORTHEAST + "\n"),
+        ])
         update.assert_called_once()
         self.assertEqual("461F31", update.call_args.args[0].icao)
+
+    def test_unexpected_recorder_failure_does_not_suppress_raw_decode(self):
+        socket_instance = Mock()
+        socket_instance.makefile.return_value = io.StringIO(
+            FRAME_NORTHEAST + "\n")
+        recorder = Mock()
+        recorder.record_line.side_effect = OSError("disk full")
+        with patch.object(transit.socket, "socket", return_value=socket_instance), \
+                patch.object(transit, "_register_active_socket", return_value=True), \
+                patch.object(transit, "_unregister_active_socket"), \
+                patch.object(transit, "update_raw_adsb_track") as update, \
+                patch.object(transit.stop_event, "wait", return_value=True):
+            transit.read_raw_adsb_track("receiver", 30002, recorder)
+        update.assert_called_once()
 
     def test_connection_failure_is_diagnostic_and_retries_fail_open(self):
         socket_instance = Mock()

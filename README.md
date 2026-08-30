@@ -99,7 +99,7 @@ The daily environment recorder stores QNH changes and carries the latest known
 state into a new UTC day. It operates independently of aircraft stream
 recording.
 
-### Recording an ADS-B/MLAT session
+### Recording a RAW ADS-B/SBS/MLAT session
 
 Start session recording with:
 
@@ -107,7 +107,8 @@ Start session recording with:
 python transit_warning.py --record
 ```
 
-One run creates one session directory with independent ADS-B and MLAT streams:
+One run creates one session directory with independent RAW ADS-B, SBS ADS-B,
+and MLAT streams:
 
 ```text
 recordings/
@@ -120,16 +121,26 @@ recordings/
 ```
 
 Pressing Ctrl+C performs a controlled shutdown: it stops the TCP readers,
-closes both stream writers, records final line counts and session status in the
+closes all stream writers, records final line counts and session status in the
 manifest, and then archives the session. For a `complete` session, the raw
-`adsb_<port>.log` and `mlat_<port>.log` files are removed only after
+`raw_<port>.log`, `adsb_<port>.log`, and `mlat_<port>.log` files are removed
+only after
 `streams.zip` has been created and verified. For a `partial` or `failed`
 session, raw logs are retained for diagnosis; a ZIP may also be present if
 archiving succeeded.
 
-`streams.zip` contains only the ADS-B and MLAT logs. Daily environment/QNH files
-remain under `recordings/environment/` and are never included in the session
-archive.
+`streams.zip` contains the RAW ADS-B, SBS ADS-B, and MLAT logs. The RAW stream
+is captured for diagnostics but is not yet consumed by replay. Daily
+environment/QNH files remain under `recordings/environment/` and are never
+included in the session archive.
+
+The verified ZIP members use the configured ports:
+
+```text
+raw_<RAW_ADSB_PORT>.log
+adsb_<ADSB_PORT>.log
+mlat_<MLAT_PORT>.log
+```
 
 RealClock also supports writing an additional explicit environment sidecar:
 

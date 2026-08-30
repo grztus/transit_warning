@@ -196,6 +196,54 @@ class SessionRecorderTests(unittest.TestCase):
         self.assertEqual(manifest["mlat"]["status"], "recording")
         self.assertNotIn("timestamp_timezone", manifest["mlat"])
         self.assertNotIn("environment", manifest)
+        self.assertNotIn("raw", manifest)
+
+    def test_optional_raw_writer_records_exact_text_and_extends_manifest(self):
+        recorder = SessionRecorder(
+            START, 30003, 30106, "Europe/Warsaw", self.base_dir / "raw",
+            raw_port=32002)
+        line = "@0097635C74DC8D4BAA929908E3B2F0042FBB4B20;  \r\n"
+        self.assertTrue(recorder.record_line(32002, line))
+        recorder.close(START)
+        with (recorder.session_dir / "raw_32002.log").open(
+                encoding="utf-8", newline="") as raw_file:
+            self.assertEqual(raw_file.read(), line)
+        manifest = recorder.manifest_data()
+        self.assertEqual(manifest["raw"]["file"], "raw_32002.log")
+        self.assertEqual(manifest["raw"]["port"], 32002)
+        self.assertEqual(manifest["raw"]["format"], "raw-mode-s-text")
+        self.assertEqual(
+            manifest["raw"]["timestamp_semantics"], "receiver-clock")
+        self.assertEqual(manifest["raw"]["line_count"], 1)
+        self.assertTrue(manifest["raw"]["available"])
+
+    def test_optional_raw_stream_may_be_empty_without_making_session_partial(self):
+        recorder = SessionRecorder(
+            START, 30003, 30106, "Europe/Warsaw", self.base_dir / "empty-raw",
+            raw_port=30002)
+        recorder.record_line(30003, "ADS-B\n")
+        recorder.record_line(30106, "MLAT\n")
+        recorder.close(START)
+        manifest = recorder.manifest_data()
+        self.assertEqual(manifest["recording_status"], "complete")
+        self.assertEqual(manifest["raw"]["line_count"], 0)
+        self.assertFalse(manifest["raw"]["available"])
+
+    def test_failed_raw_writer_does_not_stop_adsb_or_mlat_writers(self):
+        recorder = SessionRecorder(
+            START, 30003, 30106, "Europe/Warsaw", self.base_dir / "failed-raw",
+            raw_port=30002)
+        recorder.raw_writer._file.close()
+        recorder.raw_writer._file = FailingWriteFile()
+        self.assertFalse(recorder.record_line(30002, "RAW\n"))
+        self.assertTrue(recorder.record_line(30003, "ADS-B\n"))
+        self.assertTrue(recorder.record_line(30106, "MLAT\n"))
+        recorder.close(START)
+        manifest = recorder.manifest_data()
+        self.assertEqual(manifest["recording_status"], "partial")
+        self.assertEqual(manifest["raw"]["status"], "failed")
+        self.assertEqual(manifest["adsb"]["status"], "complete")
+        self.assertEqual(manifest["mlat"]["status"], "complete")
 
     def test_two_writers_keep_streams_separate_and_count_lines(self):
         adsb = "MSG,3,ADS-B,2026/08/17,23:26:42.689\n"
@@ -287,6 +335,27 @@ class ArchiveSessionTests(unittest.TestCase):
             self.assertEqual(archive.read(self.adsb_path.name), self.adsb_content)
             self.assertEqual(archive.read(self.mlat_path.name), self.mlat_content)
             self.assertIsNone(archive.testzip())
+
+    def test_optional_raw_log_is_included_and_verified_losslessly(self):
+        raw_path = self.session_dir / "raw_30002.log"
+        raw_content = b"@0097635C74DC8D4BAA929908E3B2F0042FBB4B20;\r\n"
+        raw_path.write_bytes(raw_content)
+        self.assertTrue(archive_session(self.session_dir))
+        with zipfile.ZipFile(self.archive_path) as archive:
+            self.assertEqual(set(archive.namelist()), {
+                self.adsb_path.name, self.mlat_path.name, raw_path.name})
+            self.assertEqual(archive.read(raw_path.name), raw_content)
+            self.assertIsNone(archive.testzip())
+
+    def test_delete_after_verified_three_stream_archive_removes_all_logs(self):
+        raw_path = self.session_dir / "raw_30002.log"
+        raw_path.write_bytes(b"RAW\n")
+        self.assertTrue(archive_session(self.session_dir, delete_raw=True))
+        self.assertFalse(self.adsb_path.exists())
+        self.assertFalse(self.mlat_path.exists())
+        self.assertFalse(raw_path.exists())
+        with zipfile.ZipFile(self.archive_path) as archive:
+            self.assertEqual(len(archive.namelist()), 3)
 
     def test_delete_raw_false_preserves_both_logs(self):
         self.assertTrue(archive_session(self.session_dir, delete_raw=False))

@@ -96,7 +96,7 @@ class ApplicationConfigurationTests(unittest.TestCase):
                      args=(TEST_CONFIG.beast_host, TEST_CONFIG.beast_port)),
                 call(target=transit.read_raw_adsb_track,
                      args=(TEST_CONFIG.raw_adsb_host,
-                           TEST_CONFIG.raw_adsb_port)),
+                           TEST_CONFIG.raw_adsb_port, None)),
             ],
         )
         for thread in threads:

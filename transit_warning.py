@@ -2455,7 +2455,7 @@ def read_beast_intent(host, port):
                     pass
 
 
-def read_raw_adsb_track(host, port):
+def read_raw_adsb_track(host, port, session_recorder=None):
     """Consume optional RAW port 30002 TC19 tracks; failures are fail-open."""
     while not stop_event.is_set():
         sock = None
@@ -2471,6 +2471,11 @@ def read_raw_adsb_track(host, port):
                 line = file.readline()
                 if not line:
                     break
+                if session_recorder is not None:
+                    try:
+                        session_recorder.record_line(port, line)
+                    except Exception:
+                        pass
                 raw_adsb_track_diagnostics.frames_received += 1
                 decoded = decode_raw_tc19_track(line)
                 if decoded is None:
@@ -2895,6 +2900,7 @@ def main():
             session_recorder = SessionRecorder(
                 clock.now_utc(), adsb_port, mlat_port, adsb_timestamp_timezone,
                 error_handler=lambda message: print(message),
+                raw_port=raw_adsb_port,
             )
         except Exception as error:
             print("Session recorder initialization failed: {}".format(error))
@@ -2915,7 +2921,7 @@ def main():
         ))
         threads.append(threading.Thread(
             target=read_raw_adsb_track,
-            args=(raw_adsb_host, raw_adsb_port),
+            args=(raw_adsb_host, raw_adsb_port, session_recorder),
         ))
     for thread in threads:
         thread.start()

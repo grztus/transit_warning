@@ -222,6 +222,8 @@ class MainSessionRecordingTests(unittest.TestCase):
         self.assertEqual(args[1:], (
             TEST_CONFIG.adsb_port, TEST_CONFIG.mlat_port,
             TEST_CONFIG.adsb_timestamp_timezone))
+        self.assertEqual(
+            factory.call_args.kwargs["raw_port"], TEST_CONFIG.raw_adsb_port)
 
     def test_main_loop_flushes_active_session(self):
         recorder = Mock()
@@ -391,6 +393,32 @@ class AutomaticSessionArchiveTests(unittest.TestCase):
             {"manifest.json", "streams.zip"})
         self.assertEqual(
             environment_path.read_text(encoding="utf-8"), '{"type":"qnh"}\n')
+
+    def test_unavailable_raw_stream_keeps_other_streams_and_archive_complete(self):
+        started = datetime.datetime(
+            2026, 8, 18, 20, 1, tzinfo=datetime.timezone.utc)
+        recorder = SessionRecorder(
+            started, 30003, 30106, "Europe/Warsaw", self.base_dir,
+            raw_port=30002)
+        recorder.record_line(30003, "ADS-B complete\n")
+        recorder.record_line(30106, "MLAT complete\n")
+
+        self.shutdown(recorder, started)
+
+        manifest = json.loads(
+            recorder.manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["recording_status"], "complete")
+        self.assertFalse(manifest["raw"]["available"])
+        self.assertEqual(manifest["raw"]["line_count"], 0)
+        with zipfile.ZipFile(recorder.session_dir / "streams.zip") as archive:
+            self.assertEqual(set(archive.namelist()), {
+                "raw_30002.log", "adsb_30003.log", "mlat_30106.log"})
+            self.assertEqual(archive.read("raw_30002.log"), b"")
+            self.assertEqual(archive.read("adsb_30003.log"), b"ADS-B complete\n")
+            self.assertEqual(archive.read("mlat_30106.log"), b"MLAT complete\n")
+        self.assertEqual(
+            {path.name for path in recorder.session_dir.iterdir()},
+            {"manifest.json", "streams.zip"})
 
     def test_partial_session_archives_without_deleting_raw(self):
         recorder, ended_at = self.make_recorder(3)

@@ -1,4 +1,4 @@
-"""Fail-open recording of raw ADS-B and MLAT session streams."""
+"""Fail-open recording of RAW ADS-B, SBS ADS-B and MLAT session streams."""
 
 from __future__ import annotations
 
@@ -32,10 +32,12 @@ def _verify_stream_archive(path, expected_files=None):
     with zipfile.ZipFile(path, "r") as archive:
         members = archive.infolist()
         names = [member.filename for member in members]
-        if len(names) != 2 or len(set(names)) != 2:
+        if len(names) not in (2, 3) or len(set(names)) != len(names):
             return False
         if (sum(name.startswith("adsb_") and name.endswith(".log") for name in names) != 1
-                or sum(name.startswith("mlat_") and name.endswith(".log") for name in names) != 1):
+                or sum(name.startswith("mlat_") and name.endswith(".log") for name in names) != 1
+                or sum(name.startswith("raw_") and name.endswith(".log") for name in names)
+                != len(names) - 2):
             return False
         if archive.testzip() is not None:
             return False
@@ -56,19 +58,23 @@ def archive_session(session_dir, delete_raw=False, error_handler=None):
     try:
         adsb_files = list(session_dir.glob("adsb_*.log"))
         mlat_files = list(session_dir.glob("mlat_*.log"))
-        raw_files = adsb_files + mlat_files
+        raw_adsb_files = list(session_dir.glob("raw_*.log"))
+        raw_files = adsb_files + mlat_files + raw_adsb_files
 
         if archive_path.exists():
             if not _verify_stream_archive(
-                    archive_path, raw_files if len(raw_files) == 2 else None):
+                    archive_path,
+                    raw_files if len(raw_files) in (2, 3) else None):
                 raise ValueError("existing streams.zip failed verification")
             if delete_raw:
                 for raw_path in raw_files:
                     raw_path.unlink()
             return True
 
-        if len(adsb_files) != 1 or len(mlat_files) != 1:
-            raise ValueError("session must contain exactly one ADS-B and one MLAT log")
+        if (len(adsb_files) != 1 or len(mlat_files) != 1
+                or len(raw_adsb_files) > 1):
+            raise ValueError(
+                "session must contain one ADS-B, one MLAT and at most one RAW log")
 
         temporary_path.unlink(missing_ok=True)
         with temporary_path.open("w+b") as output:
@@ -220,7 +226,7 @@ class StreamWriter:
 
 
 class SessionRecorder:
-    """Own the two independent writers and the version 1 session manifest."""
+    """Own independent stream writers and the version 1 session manifest."""
 
     MANIFEST_VERSION = 1
 
@@ -234,6 +240,7 @@ class SessionRecorder:
         error_handler=None,
         stream_writer_factory=StreamWriter,
         monotonic=time.monotonic,
+        raw_port=None,
     ):
         self.session_start_utc = session_start_utc
         self.session_id = session_start_utc.astimezone(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -242,6 +249,7 @@ class SessionRecorder:
         self.manifest_path = self.session_dir / "manifest.json"
         self.adsb_port = adsb_port
         self.mlat_port = mlat_port
+        self.raw_port = raw_port
         self.adsb_timestamp_timezone = adsb_timestamp_timezone
         self.error_handler = error_handler
         self.manifest_error = None
@@ -267,6 +275,10 @@ class SessionRecorder:
                 self.session_dir / "mlat_{}.log".format(mlat_port),
                 "MLAT", error_handler, monotonic=monotonic),
         }
+        if raw_port is not None:
+            self.writers[raw_port] = stream_writer_factory(
+                self.session_dir / "raw_{}.log".format(raw_port),
+                "RAW ADS-B", error_handler, monotonic=monotonic)
         self.write_manifest()
 
     @property
@@ -276,6 +288,10 @@ class SessionRecorder:
     @property
     def mlat_writer(self):
         return self.writers.get(self.mlat_port)
+
+    @property
+    def raw_writer(self):
+        return self.writers.get(self.raw_port)
 
     def _fail_session(self, operation, error):
         self._session_failed = True
@@ -295,7 +311,9 @@ class SessionRecorder:
             return "recording"
         return "partial" if RecordingStatus.FAILED in statuses else "complete"
 
-    def _stream_manifest(self, writer, port, semantics, timezone_name=None):
+    def _stream_manifest(self, writer, port, semantics, timezone_name=None,
+                         stream_format="sbs-basestation",
+                         include_availability=False):
         if writer.status == RecordingStatus.FAILED:
             status = "failed"
         elif self._closed:
@@ -305,7 +323,7 @@ class SessionRecorder:
         result = {
             "file": writer.path.name,
             "port": port,
-            "format": "sbs-basestation",
+            "format": stream_format,
             "timestamp_semantics": semantics,
             "status": status,
             "line_count": writer.lines_written,
@@ -313,6 +331,8 @@ class SessionRecorder:
         }
         if timezone_name is not None:
             result["timestamp_timezone"] = timezone_name
+        if include_availability:
+            result["available"] = writer.lines_written > 0
         return result
 
     def manifest_data(self):
@@ -330,6 +350,12 @@ class SessionRecorder:
             "mlat": self._stream_manifest(
                 mlat, self.mlat_port, "utc") if mlat else None,
         }
+        raw = self.raw_writer
+        if raw is not None:
+            result["raw"] = self._stream_manifest(
+                raw, self.raw_port, "receiver-clock",
+                stream_format="raw-mode-s-text",
+                include_availability=True)
         return result
 
     def write_manifest(self):
