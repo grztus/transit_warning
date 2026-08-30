@@ -61,6 +61,10 @@ Configure these fields:
 - `METAR_STATION` — four-letter ICAO station used to retrieve METAR data from
   Aviation Weather Center, for example `EPRA`
 
+Optional FlightAware MLAT Beast precision-track settings are
+`MLAT_BEAST_ENABLED` (disabled by default), `MLAT_BEAST_HOST` (defaults to
+`MLAT_HOST`), and `MLAT_BEAST_PORT` (normally `30105`).
+
 `ADSB_TIMESTAMP_TIMEZONE` describes the timezone used by the host producing the
 naive SBS timestamps. It is not the timezone of the computer running Transit
 Warning. Conversion uses the date of each record and the applicable IANA

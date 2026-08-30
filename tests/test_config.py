@@ -47,6 +47,9 @@ class InstallationConfigTests(unittest.TestCase):
                 mlat_host="mlat.example",
                 mlat_port=31106,
                 metar_station="EPRA",
+                mlat_beast_enabled=False,
+                mlat_beast_host="mlat.example",
+                mlat_beast_port=30105,
             ),
         )
 
@@ -61,6 +64,23 @@ class InstallationConfigTests(unittest.TestCase):
         self.assertEqual(result.beast_port, 30005)
         self.assertEqual(result.raw_adsb_host, "127.0.0.1")
         self.assertEqual(result.raw_adsb_port, 30002)
+        self.assertFalse(result.mlat_beast_enabled)
+        self.assertEqual(result.mlat_beast_host, result.mlat_host)
+        self.assertEqual(result.mlat_beast_port, 30105)
+
+    def test_accepts_and_validates_optional_mlat_beast_source(self):
+        result = self.load({
+            **REQUIRED,
+            "MLAT_BEAST_ENABLED": "yes",
+            "MLAT_BEAST_HOST": "mlat-precision.example",
+            "MLAT_BEAST_PORT": "31105",
+        })
+        self.assertTrue(result.mlat_beast_enabled)
+        self.assertEqual(result.mlat_beast_host, "mlat-precision.example")
+        self.assertEqual(result.mlat_beast_port, 31105)
+        with self.assertRaisesRegex(
+                ConfigurationError, "MLAT_BEAST_ENABLED must be true or false"):
+            self.load({**REQUIRED, "MLAT_BEAST_ENABLED": "sometimes"})
 
     def test_accepts_custom_optional_raw_source(self):
         result = self.load({

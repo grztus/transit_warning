@@ -35,6 +35,9 @@ class InstallationConfig:
     beast_port: int = 30005
     raw_adsb_host: str = "127.0.0.1"
     raw_adsb_port: int = 30002
+    mlat_beast_enabled: bool = False
+    mlat_beast_host: str = "127.0.0.1"
+    mlat_beast_port: int = 30105
 
 
 def _required(values, name, errors):
@@ -99,6 +102,16 @@ def _host(values, name, default, errors):
     return value
 
 
+def _boolean(values, name, default, errors):
+    value = str(values.get(name, "true" if default else "false")).strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    errors.append("{} must be true or false".format(name))
+    return None
+
+
 def _metar_station(values, errors):
     value = _required(values, "METAR_STATION", errors)
     if value is None:
@@ -153,6 +166,11 @@ def load_installation_config(
     beast_port = _port(values, "BEAST_PORT", 30005, errors)
     raw_adsb_host = _host(values, "RAW_ADSB_HOST", "127.0.0.1", errors)
     raw_adsb_port = _port(values, "RAW_ADSB_PORT", 30002, errors)
+    mlat_beast_enabled = _boolean(
+        values, "MLAT_BEAST_ENABLED", False, errors)
+    mlat_beast_host = _host(
+        values, "MLAT_BEAST_HOST", mlat_host or "127.0.0.1", errors)
+    mlat_beast_port = _port(values, "MLAT_BEAST_PORT", 30105, errors)
 
     if (adsb_host is not None and adsb_port is not None
             and mlat_host is not None and mlat_port is not None
@@ -177,4 +195,7 @@ def load_installation_config(
         beast_port=beast_port,
         raw_adsb_host=raw_adsb_host,
         raw_adsb_port=raw_adsb_port,
+        mlat_beast_enabled=mlat_beast_enabled,
+        mlat_beast_host=mlat_beast_host,
+        mlat_beast_port=mlat_beast_port,
     )

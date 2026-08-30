@@ -90,6 +90,7 @@ from environment import (
     iter_environment_events,
 )
 from metar import fetch_awc_metar
+from mlat_beast_track import decode_mlat_beast_tc19, truncation_bin_consistent
 from recording import RecordingStatus, SessionRecorder, archive_session
 from raw_adsb_track import decode_raw_tc19_track
 from transit_clock import ReplayClock, clock_from_args
@@ -227,6 +228,8 @@ plane_dict = {}
 altitude_sources = {}
 aircraft_motion_states = {}
 raw_adsb_tracks = {}
+mlat_beast_tracks = {}
+mlat_coarse_tracks = {}
 aircraft_intent_states = {}
 aircraft_motion_freshness_status = {}
 sun_prediction_last_valid = {}
@@ -286,6 +289,21 @@ class RawAdsbTrackState:
     precise_value_deg: float
     raw_updated_at_utc: datetime.datetime
     coarse_anchor_deg: float | None
+    hold_valid: bool = True
+
+
+@dataclass
+class MlatBeastTrackState:
+    precise_value_deg: float
+    received_at_utc: datetime.datetime
+    east_west_velocity_knots: float
+    north_south_velocity_knots: float
+    derived_groundspeed_knots: float
+    angular_interval_low_deg: float
+    angular_interval_high_deg: float
+    coarse_anchor_deg: float | None = None
+    coarse_anchor_timestamp_utc: datetime.datetime | None = None
+    confirmed: bool = False
     hold_valid: bool = True
 
 
@@ -365,6 +383,20 @@ class RawAdsbTrackDiagnostics:
 
 
 raw_adsb_track_diagnostics = RawAdsbTrackDiagnostics()
+
+
+@dataclass
+class MlatBeastTrackDiagnostics:
+    frames_received: int = 0
+    valid_track_updates: int = 0
+    rejected_frames: int = 0
+    reconnects: int = 0
+    resync_count: int = 0
+    last_error: str | None = None
+    last_error_utc: datetime.datetime | None = None
+
+
+mlat_beast_track_diagnostics = MlatBeastTrackDiagnostics()
 
 
 class TransitSolverOutcome(str, Enum):
@@ -484,6 +516,9 @@ beast_host = None
 beast_port = None
 raw_adsb_host = None
 raw_adsb_port = None
+mlat_beast_enabled = False
+mlat_beast_host = None
+mlat_beast_port = None
 
 
 def apply_installation_config(configuration: InstallationConfig):
@@ -491,7 +526,8 @@ def apply_installation_config(configuration: InstallationConfig):
     global metar_station, gatech
     global adsb_host, adsb_port, adsb_timestamp_timezone, adsb_timestamp_validator
     global mlat_host, mlat_port, beast_host, beast_port
-    global raw_adsb_host, raw_adsb_port, port_status
+    global raw_adsb_host, raw_adsb_port, mlat_beast_enabled
+    global mlat_beast_host, mlat_beast_port, port_status
     my_lat = configuration.observer_lat
     my_lon = configuration.observer_lon
     my_elevation_const = configuration.observer_elevation_m
@@ -510,6 +546,9 @@ def apply_installation_config(configuration: InstallationConfig):
     beast_port = configuration.beast_port
     raw_adsb_host = configuration.raw_adsb_host
     raw_adsb_port = configuration.raw_adsb_port
+    mlat_beast_enabled = configuration.mlat_beast_enabled
+    mlat_beast_host = configuration.mlat_beast_host
+    mlat_beast_port = configuration.mlat_beast_port
     gatech = ephem.Observer()
     gatech.lat, gatech.lon = str(my_lat), str(my_lon)
     gatech.elevation = my_elevation_const
@@ -588,6 +627,9 @@ def _update_motion_parameter(icao, name, value, updated_at_utc, port):
     setattr(state, name, parameter)
     if name == "vertical_rate":
         state.vertical_rate_history.append(parameter)
+    if mlat_beast_enabled and name == "track" and port == mlat_port:
+        mlat_coarse_tracks[icao] = parameter
+        _reconcile_mlat_beast_track(icao, parameter, updated_at_utc)
 
 
 def _update_motion_position(
@@ -618,8 +660,82 @@ def update_raw_adsb_track(decoded, updated_at_utc):
         )
 
 
+def _confirm_mlat_beast_track(state, coarse, now_utc):
+    if (coarse is None or coarse.source != "mlat"
+            or max(0.0, (now_utc - coarse.updated_at_utc).total_seconds())
+            > MOTION_FRESH_PARAMETER_SECONDS
+            or abs((state.received_at_utc
+                    - coarse.updated_at_utc).total_seconds())
+            > MOTION_FRESH_DELTA_SECONDS
+            or not truncation_bin_consistent(state, coarse.value)):
+        return False
+    state.coarse_anchor_deg = float(coarse.value)
+    state.coarse_anchor_timestamp_utc = coarse.updated_at_utc
+    state.confirmed = True
+    return True
+
+
+def _reconcile_mlat_beast_track(icao, coarse, now_utc):
+    state = mlat_beast_tracks.get(icao)
+    if state is None or not state.hold_valid:
+        return
+    if not state.confirmed:
+        _confirm_mlat_beast_track(state, coarse, now_utc)
+        return
+    anchor_time = state.coarse_anchor_timestamp_utc
+    if (anchor_time is not None and coarse.updated_at_utc > anchor_time
+            and float(coarse.value) != state.coarse_anchor_deg):
+        state.hold_valid = False
+
+
+def update_mlat_beast_track(decoded, updated_at_utc):
+    """Store a pending precision track and confirm it against fresh 30106."""
+    with plane_dict_lock:
+        state = MlatBeastTrackState(
+            precise_value_deg=decoded.track_deg,
+            received_at_utc=updated_at_utc,
+            east_west_velocity_knots=decoded.east_west_velocity_knots,
+            north_south_velocity_knots=decoded.north_south_velocity_knots,
+            derived_groundspeed_knots=decoded.groundspeed_knots,
+            angular_interval_low_deg=decoded.angular_interval_low_deg,
+            angular_interval_high_deg=decoded.angular_interval_high_deg,
+        )
+        mlat_beast_tracks[decoded.icao] = state
+        _confirm_mlat_beast_track(
+            state, mlat_coarse_tracks.get(decoded.icao), updated_at_utc)
+
+
+def _effective_mlat_beast_track_locked(icao, now_utc):
+    state = mlat_beast_tracks.get(icao)
+    if state is None or not state.confirmed or not state.hold_valid:
+        return None
+    coarse = mlat_coarse_tracks.get(icao)
+    if (coarse is not None
+            and state.coarse_anchor_timestamp_utc is not None
+            and coarse.updated_at_utc > state.coarse_anchor_timestamp_utc
+            and float(coarse.value) != state.coarse_anchor_deg):
+        state.hold_valid = False
+        return None
+    precise_age = max(
+        0.0, (now_utc - state.received_at_utc).total_seconds())
+    if precise_age <= MOTION_FRESH_PARAMETER_SECONDS:
+        return MotionParameter(
+            state.precise_value_deg, state.received_at_utc,
+            "MLAT_BEAST_TC19_FRESH")
+    coarse_age = (
+        max(0.0, (now_utc - coarse.updated_at_utc).total_seconds())
+        if coarse is not None else None)
+    if (coarse is not None and coarse.source == "mlat"
+            and coarse_age <= MOTION_FRESH_PARAMETER_SECONDS
+            and float(coarse.value) == state.coarse_anchor_deg):
+        return MotionParameter(
+            state.precise_value_deg, coarse.updated_at_utc,
+            "MLAT_BEAST_TC19_HELD")
+    return None
+
+
 def effective_track_parameter(icao, fallback_track=None, now_utc=None):
-    """Return fresh/confirmed-held RAW track, otherwise the coarse track."""
+    """Return the approved precision source, otherwise the coarse track."""
     now = clock.now_utc() if now_utc is None else now_utc
     with plane_dict_lock:
         state = aircraft_motion_states.get(icao)
@@ -649,6 +765,12 @@ def effective_track_parameter(icao, fallback_track=None, now_utc=None):
                         raw_track.precise_value_deg,
                         coarse.updated_at_utc,
                         "RAW_ADSB_TC19_HELD")
+        position = state.position if state is not None else None
+        if (mlat_beast_enabled and position is not None
+                and position.source == "mlat"):
+            mlat_precise = _effective_mlat_beast_track_locked(icao, now)
+            if mlat_precise is not None:
+                return mlat_precise
         if coarse is not None:
             return coarse
     if fallback_track is not None and is_float_try(fallback_track):
@@ -672,7 +794,8 @@ def format_track_for_display(icao, fallback_track, now_utc=None):
     parameter = effective_track_parameter(icao, fallback_track, now_utc)
     if (parameter is not None
             and parameter.source in (
-                "RAW_ADSB_TC19_FRESH", "RAW_ADSB_TC19_HELD")):
+                "RAW_ADSB_TC19_FRESH", "RAW_ADSB_TC19_HELD",
+                "MLAT_BEAST_TC19_FRESH", "MLAT_BEAST_TC19_HELD")):
         return "{:.1f}".format(parameter.value)
     return fallback_track
 
@@ -1401,6 +1524,8 @@ def clean_dict():
         altitude_sources.pop(icao, None)
         aircraft_motion_states.pop(icao, None)
         raw_adsb_tracks.pop(icao, None)
+        mlat_beast_tracks.pop(icao, None)
+        mlat_coarse_tracks.pop(icao, None)
         aircraft_intent_states.pop(icao, None)
         aircraft_motion_freshness_status.pop(icao, None)
         sun_prediction_last_valid.pop(icao, None)
@@ -2289,6 +2414,8 @@ def clean_transit_dict():
         altitude_sources.pop(icao, None)
         aircraft_motion_states.pop(icao, None)
         raw_adsb_tracks.pop(icao, None)
+        mlat_beast_tracks.pop(icao, None)
+        mlat_coarse_tracks.pop(icao, None)
         aircraft_intent_states.pop(icao, None)
         aircraft_motion_freshness_status.pop(icao, None)
         sun_prediction_last_valid.pop(icao, None)
@@ -2490,6 +2617,49 @@ def read_raw_adsb_track(host, port, session_recorder=None):
                 break
             raw_adsb_track_diagnostics.last_error = str(error)
             raw_adsb_track_diagnostics.last_error_utc = clock.now_utc()
+            if stop_event.wait(5):
+                break
+        finally:
+            if sock is not None:
+                _unregister_active_socket(port, sock)
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+
+def read_mlat_beast_track(host, port):
+    """Consume optional synthetic MLAT Beast TC19; failures are fail-open."""
+    while not stop_event.is_set():
+        sock = None
+        try:
+            parser = BeastFrameParser()
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            if not _register_active_socket(port, sock):
+                sock.close()
+                break
+            sock.connect((host, port))
+            mlat_beast_track_diagnostics.reconnects += 1
+            while not stop_event.is_set():
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                for frame in parser.feed(chunk):
+                    mlat_beast_track_diagnostics.frames_received += 1
+                    decoded = decode_mlat_beast_tc19(frame)
+                    if decoded is None:
+                        mlat_beast_track_diagnostics.rejected_frames += 1
+                        continue
+                    update_mlat_beast_track(decoded, clock.now_utc())
+                    mlat_beast_track_diagnostics.valid_track_updates += 1
+                mlat_beast_track_diagnostics.resync_count = parser.resync_count
+            if not stop_event.is_set() and stop_event.wait(5):
+                break
+        except Exception as error:
+            if stop_event.is_set():
+                break
+            mlat_beast_track_diagnostics.last_error = str(error)
+            mlat_beast_track_diagnostics.last_error_utc = clock.now_utc()
             if stop_event.wait(5):
                 break
         finally:
@@ -2923,6 +3093,11 @@ def main():
             target=read_raw_adsb_track,
             args=(raw_adsb_host, raw_adsb_port, session_recorder),
         ))
+        if mlat_beast_enabled:
+            threads.append(threading.Thread(
+                target=read_mlat_beast_track,
+                args=(mlat_beast_host, mlat_beast_port),
+            ))
     for thread in threads:
         thread.start()
 

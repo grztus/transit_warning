@@ -47,6 +47,10 @@ class ApplicationConfigurationTests(unittest.TestCase):
             transit.adsb_timestamp_timezone, TEST_CONFIG.adsb_timestamp_timezone)
         self.assertEqual(transit.raw_adsb_host, TEST_CONFIG.raw_adsb_host)
         self.assertEqual(transit.raw_adsb_port, TEST_CONFIG.raw_adsb_port)
+        self.assertEqual(
+            transit.mlat_beast_enabled, TEST_CONFIG.mlat_beast_enabled)
+        self.assertEqual(transit.mlat_beast_host, TEST_CONFIG.mlat_beast_host)
+        self.assertEqual(transit.mlat_beast_port, TEST_CONFIG.mlat_beast_port)
         self.assertIsInstance(
             transit.adsb_timestamp_validator, AdsBTimestampOffsetValidator)
         self.assertIsInstance(transit.gatech, ephem.Observer)
@@ -128,6 +132,25 @@ class ApplicationConfigurationTests(unittest.TestCase):
         self.assertNotIn(
             transit.read_raw_adsb_track,
             [item.kwargs["target"] for item in thread_factory.call_args_list])
+        self.assertNotIn(
+            transit.read_mlat_beast_track,
+            [item.kwargs["target"] for item in thread_factory.call_args_list])
+
+    def test_enabled_mlat_beast_starts_one_live_reader(self):
+        config = InstallationConfig(
+            **{**TEST_CONFIG.__dict__, "mlat_beast_enabled": True,
+               "mlat_beast_host": "mlat.example", "mlat_beast_port": 32105})
+        threads = [Mock(), Mock(), Mock(), Mock(), Mock()]
+        factory = Mock(side_effect=threads)
+        with patch.object(transit, "load_installation_config", return_value=config), \
+                patch.object(transit, "initialize_daily_environment"), \
+                patch.object(transit, "get_metar_press"), \
+                patch.object(transit.threading, "Thread", factory), \
+                patch.object(transit.time, "sleep", side_effect=KeyboardInterrupt):
+            transit.main()
+        self.assertEqual(call(target=transit.read_mlat_beast_track,
+                              args=("mlat.example", 32105)),
+                         factory.call_args_list[-1])
 
     def test_configuration_error_exits_cleanly_before_starting_threads(self):
         error = ConfigurationError("Invalid installation configuration:\n- OBSERVER_LAT is required")
