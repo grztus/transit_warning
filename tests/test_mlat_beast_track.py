@@ -1,7 +1,7 @@
 import datetime
 import math
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from beast_intent import BeastFrame, BeastFrameParser, modes_crc
 from mlat_beast_track import (
@@ -363,6 +363,54 @@ class MlatBeastSelectionTests(unittest.TestCase):
 
 
 class MlatBeastReaderTests(unittest.TestCase):
+    def test_reader_tees_exact_chunks_before_parsing_same_frame(self):
+        transit.stop_event.clear()
+        encoded = wire(frame(velocity_message(icao=0x1A0102)))
+        chunks = (encoded[:9], encoded[9:])
+        fake = Mock()
+        fake.recv.side_effect = [*chunks, b""]
+        recorder = Mock()
+        try:
+            with patch.object(transit.socket, "socket", return_value=fake), \
+                    patch.object(transit, "update_mlat_beast_track") as update, \
+                    patch.object(transit.clock, "now_utc", return_value=NOW), \
+                    patch.object(transit.stop_event, "wait", return_value=True):
+                transit.read_mlat_beast_track(
+                    "receiver", 30105, recorder)
+            self.assertEqual(
+                [call(chunk) for chunk in chunks],
+                recorder.record_mlat_beast_bytes.call_args_list)
+            recorded_frame, receipt = (
+                recorder.record_mlat_beast_event.call_args.args[:2])
+            self.assertEqual("1A0102",
+                decode_mlat_beast_tc19(recorded_frame).icao)
+            self.assertEqual(NOW, receipt)
+            self.assertTrue(
+                recorder.record_mlat_beast_event.call_args.kwargs
+                ["tc19_update"])
+            self.assertEqual("1A0102", update.call_args.args[0].icao)
+            self.assertEqual(NOW, update.call_args.args[1])
+        finally:
+            transit.stop_event.clear()
+
+    def test_optional_recorder_failure_does_not_suppress_decode(self):
+        transit.stop_event.clear()
+        fake = Mock()
+        fake.recv.side_effect = [wire(frame()), b""]
+        recorder = Mock()
+        recorder.record_mlat_beast_bytes.side_effect = OSError("full")
+        recorder.record_mlat_beast_event.side_effect = OSError("full")
+        try:
+            with patch.object(transit.socket, "socket", return_value=fake), \
+                    patch.object(transit, "update_mlat_beast_track") as update, \
+                    patch.object(transit.clock, "now_utc", return_value=NOW), \
+                    patch.object(transit.stop_event, "wait", return_value=True):
+                transit.read_mlat_beast_track(
+                    "receiver", 30105, recorder)
+            update.assert_called_once()
+        finally:
+            transit.stop_event.clear()
+
     def test_valid_frame_updates_state_with_receipt_timestamp(self):
         transit.stop_event.clear()
         old = transit.mlat_beast_track_diagnostics

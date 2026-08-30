@@ -2734,7 +2734,7 @@ def read_raw_adsb_track(host, port, session_recorder=None):
                     pass
 
 
-def read_mlat_beast_track(host, port):
+def read_mlat_beast_track(host, port, session_recorder=None):
     """Consume optional synthetic MLAT Beast TC19; failures are fail-open."""
     while not stop_event.is_set():
         sock = None
@@ -2750,13 +2750,26 @@ def read_mlat_beast_track(host, port):
                 chunk = sock.recv(65536)
                 if not chunk:
                     break
+                if session_recorder is not None:
+                    try:
+                        session_recorder.record_mlat_beast_bytes(chunk)
+                    except Exception:
+                        pass
                 for frame in parser.feed(chunk):
                     mlat_beast_track_diagnostics.frames_received += 1
+                    received_at_utc = clock.now_utc()
                     decoded = decode_mlat_beast_tc19(frame)
+                    if session_recorder is not None:
+                        try:
+                            session_recorder.record_mlat_beast_event(
+                                frame, received_at_utc,
+                                tc19_update=decoded is not None)
+                        except Exception:
+                            pass
                     if decoded is None:
                         mlat_beast_track_diagnostics.rejected_frames += 1
                         continue
-                    update_mlat_beast_track(decoded, clock.now_utc())
+                    update_mlat_beast_track(decoded, received_at_utc)
                     mlat_beast_track_diagnostics.valid_track_updates += 1
                 mlat_beast_track_diagnostics.resync_count = parser.resync_count
             if not stop_event.is_set() and stop_event.wait(5):
@@ -3177,6 +3190,8 @@ def main():
                 clock.now_utc(), adsb_port, mlat_port, adsb_timestamp_timezone,
                 error_handler=lambda message: print(message),
                 raw_port=raw_adsb_port,
+                mlat_beast_port=(
+                    mlat_beast_port if mlat_beast_enabled else None),
             )
         except Exception as error:
             print("Session recorder initialization failed: {}".format(error))
@@ -3202,7 +3217,7 @@ def main():
         if mlat_beast_enabled:
             threads.append(threading.Thread(
                 target=read_mlat_beast_track,
-                args=(mlat_beast_host, mlat_beast_port),
+                args=(mlat_beast_host, mlat_beast_port, session_recorder),
             ))
     for thread in threads:
         thread.start()

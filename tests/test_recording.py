@@ -3,6 +3,7 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -10,6 +11,7 @@ import zipfile
 
 from recording import (
     RecordingStatus,
+    MlatBeastWriter,
     SessionRecorder,
     StreamWriter,
     archive_session,
@@ -21,6 +23,11 @@ START = datetime(2026, 8, 17, 20, 44, 17, 502832, tzinfo=UTC)
 
 
 class FailingWriteFile(io.StringIO):
+    def write(self, value):
+        raise OSError("disk full")
+
+
+class FailingBytesFile(io.BytesIO):
     def write(self, value):
         raise OSError("disk full")
 
@@ -169,6 +176,51 @@ class StreamWriterTests(unittest.TestCase):
         self.assertEqual(len(messages), 1)
 
 
+class MlatBeastWriterTests(unittest.TestCase):
+    def test_preserves_binary_chunks_and_writes_ordered_receipt_events(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary_path = Path(directory) / "mlat_beast_30105.bin"
+            events_path = Path(directory) / "mlat_beast_30105_events.jsonl"
+            writer = MlatBeastWriter(binary_path, events_path)
+            chunks = (b"\x1a\x33\xff\x00", b"MLAT\x00\x1a\x1a\x7f")
+            for chunk in chunks:
+                self.assertTrue(writer.record_bytes(chunk))
+            first = SimpleNamespace(
+                frame_type=0x33, beast_timestamp=0xFF004D4C4154,
+                signal=0, modes=bytes.fromhex("920102030405060708090A0B0C0D"))
+            second = SimpleNamespace(
+                frame_type=0x32, beast_timestamp=0x010203040506,
+                signal=17, modes=bytes.fromhex("AABBCCDDEEFF00"))
+            self.assertTrue(writer.record_event(first, START, True))
+            later = START.replace(microsecond=600000)
+            self.assertTrue(writer.record_event(second, later, False))
+            writer.close()
+            self.assertEqual(binary_path.read_bytes(), b"".join(chunks))
+            events = [json.loads(line) for line in
+                      events_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([1, 2], [event["sequence"] for event in events])
+            self.assertEqual("2026-08-17T20:44:17.502832Z",
+                             events[0]["received_at_utc"])
+            self.assertEqual(0x33, events[0]["frame_type"])
+            self.assertEqual("FF004D4C4154", events[0]["beast_timestamp"])
+            self.assertEqual(0, events[0]["signal"])
+            self.assertEqual(first.modes.hex().upper(), events[0]["modes_hex"])
+            self.assertEqual((len(b"".join(chunks)), 2, 1), (
+                writer.bytes_written, writer.frames_recorded,
+                writer.tc19_updates))
+
+    def test_optional_binary_failure_is_fail_open_and_reported_once(self):
+        messages = []
+        writer = MlatBeastWriter(
+            "unused.bin", "unused.jsonl", error_handler=messages.append,
+            binary_opener=FailingBytesFile,
+            events_opener=io.StringIO)
+        self.assertFalse(writer.record_bytes(b"first"))
+        self.assertFalse(writer.record_bytes(b"second"))
+        self.assertEqual(RecordingStatus.FAILED, writer.status)
+        self.assertEqual(1, len(messages))
+
+
 class SessionRecorderTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -197,6 +249,9 @@ class SessionRecorderTests(unittest.TestCase):
         self.assertNotIn("timestamp_timezone", manifest["mlat"])
         self.assertNotIn("environment", manifest)
         self.assertNotIn("raw", manifest)
+        self.assertNotIn("mlat_beast", manifest)
+        self.assertEqual([], list(
+            self.recorder.session_dir.glob("mlat_beast_*")))
 
     def test_optional_raw_writer_records_exact_text_and_extends_manifest(self):
         recorder = SessionRecorder(
@@ -228,6 +283,46 @@ class SessionRecorderTests(unittest.TestCase):
         self.assertEqual(manifest["recording_status"], "complete")
         self.assertEqual(manifest["raw"]["line_count"], 0)
         self.assertFalse(manifest["raw"]["available"])
+
+    def test_optional_mlat_beast_manifest_counts_and_unavailable_state(self):
+        recorder = SessionRecorder(
+            START, 30003, 30106, "Europe/Warsaw",
+            self.base_dir / "mlat-beast", mlat_beast_port=30105)
+        recorder.record_line(30003, "ADS-B\n")
+        recorder.record_line(30106, "MLAT\n")
+        recorder.close(START)
+        manifest = recorder.manifest_data()
+        optional = manifest["mlat_beast"]
+        self.assertEqual("complete", manifest["recording_status"])
+        self.assertEqual("mlat_beast_30105.bin", optional["file"])
+        self.assertEqual(
+            "mlat_beast_30105_events.jsonl", optional["events_file"])
+        self.assertEqual(30105, optional["port"])
+        self.assertEqual("beast-binary-synthetic-mlat", optional["format"])
+        self.assertEqual("magic-mlat-marker",
+                         optional["timestamp_semantics"])
+        self.assertEqual("production-receipt-utc",
+                         optional["receipt_timestamp_semantics"])
+        self.assertFalse(optional["available"])
+        self.assertEqual((0, 0, 0), (
+            optional["bytes_written"], optional["frames_recorded"],
+            optional["tc19_updates"]))
+
+    def test_optional_mlat_beast_failure_does_not_make_core_partial(self):
+        recorder = SessionRecorder(
+            START, 30003, 30106, "Europe/Warsaw",
+            self.base_dir / "failed-mlat-beast", mlat_beast_port=30105)
+        recorder.mlat_beast_writer._binary.close()
+        recorder.mlat_beast_writer._binary = FailingBytesFile()
+        self.assertFalse(recorder.record_mlat_beast_bytes(b"BEAST"))
+        self.assertTrue(recorder.record_line(30003, "ADS-B\n"))
+        self.assertTrue(recorder.record_line(30106, "MLAT\n"))
+        recorder.close(START)
+        manifest = recorder.manifest_data()
+        self.assertEqual("complete", manifest["recording_status"])
+        self.assertEqual("failed", manifest["mlat_beast"]["status"])
+        self.assertEqual("complete", manifest["adsb"]["status"])
+        self.assertEqual("complete", manifest["mlat"]["status"])
 
     def test_failed_raw_writer_does_not_stop_adsb_or_mlat_writers(self):
         recorder = SessionRecorder(
@@ -346,6 +441,53 @@ class ArchiveSessionTests(unittest.TestCase):
                 self.adsb_path.name, self.mlat_path.name, raw_path.name})
             self.assertEqual(archive.read(raw_path.name), raw_content)
             self.assertIsNone(archive.testzip())
+
+    def test_manifest_declared_mlat_beast_members_are_archived_and_verified(self):
+        recorder = SessionRecorder(
+            START, 30003, 30106, "Europe/Warsaw",
+            Path(self.temp.name) / "manifest-sessions",
+            raw_port=30002, mlat_beast_port=30105)
+        recorder.record_line(30003, "ADS-B\n")
+        recorder.record_line(30106, "MLAT\n")
+        recorder.record_line(30002, "RAW\n")
+        beast_bytes = b"\x1a\x33\xff\x00MLAT\x00\x1a\x1a"
+        frame = SimpleNamespace(
+            frame_type=0x33, beast_timestamp=0xFF004D4C4154,
+            signal=0, modes=bytes.fromhex("920102030405060708090A0B0C0D"))
+        recorder.record_mlat_beast_bytes(beast_bytes)
+        recorder.record_mlat_beast_event(frame, START, True)
+        recorder.close(START)
+        self.assertTrue(archive_session(recorder.session_dir))
+        with zipfile.ZipFile(recorder.session_dir / "streams.zip") as archive:
+            self.assertEqual(set(archive.namelist()), {
+                "adsb_30003.log", "mlat_30106.log", "raw_30002.log",
+                "mlat_beast_30105.bin",
+                "mlat_beast_30105_events.jsonl"})
+            self.assertEqual(beast_bytes,
+                             archive.read("mlat_beast_30105.bin"))
+            self.assertIsNone(archive.testzip())
+
+    def test_manifest_count_failure_preserves_all_loose_streams(self):
+        recorder = SessionRecorder(
+            START, 30003, 30106, "Europe/Warsaw",
+            Path(self.temp.name) / "invalid-manifest-sessions",
+            mlat_beast_port=30105)
+        recorder.record_line(30003, "ADS-B\n")
+        recorder.record_line(30106, "MLAT\n")
+        recorder.record_mlat_beast_bytes(b"BEAST")
+        recorder.close(START)
+        manifest = recorder.manifest_data()
+        manifest["mlat_beast"]["bytes_written"] += 1
+        recorder.manifest_path.write_text(
+            json.dumps(manifest), encoding="utf-8")
+        self.assertFalse(archive_session(
+            recorder.session_dir, delete_raw=True))
+        self.assertFalse((recorder.session_dir / "streams.zip").exists())
+        for section, key in (("adsb", "file"), ("mlat", "file"),
+                             ("mlat_beast", "file"),
+                             ("mlat_beast", "events_file")):
+            self.assertTrue((recorder.session_dir /
+                             manifest[section][key]).exists())
 
     def test_delete_after_verified_three_stream_archive_removes_all_logs(self):
         raw_path = self.session_dir / "raw_30002.log"

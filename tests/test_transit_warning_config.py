@@ -149,7 +149,7 @@ class ApplicationConfigurationTests(unittest.TestCase):
                 patch.object(transit.time, "sleep", side_effect=KeyboardInterrupt):
             transit.main()
         self.assertEqual(call(target=transit.read_mlat_beast_track,
-                              args=("mlat.example", 32105)),
+                              args=("mlat.example", 32105, None)),
                          factory.call_args_list[-1])
 
     def test_configuration_error_exits_cleanly_before_starting_threads(self):

@@ -10,6 +10,7 @@ import zipfile
 
 import transit_warning as transit
 from recording import RecordingStatus, SessionRecorder
+from config import InstallationConfig
 
 from tests.test_transit_warning_config import TEST_CONFIG
 
@@ -224,6 +225,7 @@ class MainSessionRecordingTests(unittest.TestCase):
             TEST_CONFIG.adsb_timestamp_timezone))
         self.assertEqual(
             factory.call_args.kwargs["raw_port"], TEST_CONFIG.raw_adsb_port)
+        self.assertIsNone(factory.call_args.kwargs["mlat_beast_port"])
 
     def test_main_loop_flushes_active_session(self):
         recorder = Mock()
@@ -235,6 +237,33 @@ class MainSessionRecordingTests(unittest.TestCase):
             transit.main()
         recorder.flush_if_due.assert_called_once_with()
         recorder.close.assert_called_once()
+
+    def test_enabled_mlat_beast_recording_uses_reader_owned_connection(self):
+        config = InstallationConfig(
+            **{**TEST_CONFIG.__dict__, "mlat_beast_enabled": True,
+               "mlat_beast_host": "mlat.example",
+               "mlat_beast_port": 32105})
+        recorder = Mock()
+        recorder.manifest_data.return_value = {"recording_status": "complete"}
+        threads = [Mock(), Mock(), Mock(), Mock(), Mock()]
+        patches = self.main_patches(True)
+        with patches[0], \
+                patch.object(transit, "load_installation_config",
+                             return_value=config), \
+                patches[2], patches[3], \
+                patch.object(transit, "SessionRecorder",
+                             return_value=recorder) as recorder_factory, \
+                patch.object(transit, "archive_session", return_value=True), \
+                patch.object(transit.threading, "Thread",
+                             side_effect=threads) as thread_factory, \
+                patches[5]:
+            transit.main()
+        self.assertEqual(32105,
+            recorder_factory.call_args.kwargs["mlat_beast_port"])
+        self.assertEqual(call(
+            target=transit.read_mlat_beast_track,
+            args=("mlat.example", 32105, recorder)),
+            thread_factory.call_args_list[-1])
 
     def test_ctrl_c_closes_recorder_with_current_utc_and_joins_threads(self):
         recorder = Mock()
@@ -416,6 +445,34 @@ class AutomaticSessionArchiveTests(unittest.TestCase):
             self.assertEqual(archive.read("raw_30002.log"), b"")
             self.assertEqual(archive.read("adsb_30003.log"), b"ADS-B complete\n")
             self.assertEqual(archive.read("mlat_30106.log"), b"MLAT complete\n")
+        self.assertEqual(
+            {path.name for path in recorder.session_dir.iterdir()},
+            {"manifest.json", "streams.zip"})
+
+    def test_unavailable_mlat_beast_keeps_core_archive_complete(self):
+        started = datetime.datetime(
+            2026, 8, 18, 20, 2, tzinfo=datetime.timezone.utc)
+        recorder = SessionRecorder(
+            started, 30003, 30106, "Europe/Warsaw", self.base_dir,
+            mlat_beast_port=30105)
+        recorder.record_line(30003, "ADS-B complete\n")
+        recorder.record_line(30106, "MLAT complete\n")
+
+        self.shutdown(recorder, started)
+
+        manifest = json.loads(
+            recorder.manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual("complete", manifest["recording_status"])
+        self.assertFalse(manifest["mlat_beast"]["available"])
+        with zipfile.ZipFile(recorder.session_dir / "streams.zip") as archive:
+            self.assertEqual(set(archive.namelist()), {
+                "adsb_30003.log", "mlat_30106.log",
+                "mlat_beast_30105.bin",
+                "mlat_beast_30105_events.jsonl"})
+            self.assertEqual(b"", archive.read("mlat_beast_30105.bin"))
+            self.assertEqual(
+                b"", archive.read("mlat_beast_30105_events.jsonl"))
+            self.assertIsNone(archive.testzip())
         self.assertEqual(
             {path.name for path in recorder.session_dir.iterdir()},
             {"manifest.json", "streams.zip"})
