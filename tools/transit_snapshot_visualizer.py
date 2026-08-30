@@ -34,6 +34,7 @@ HORIZONTAL_TOLERANCE_DEG = 1e-9
 BODY_TOLERANCE_DEG = 1e-6
 ALTITUDE_TOLERANCE_M = 1e-9
 ANGULAR_TOLERANCE_DEG = 1e-9
+DEFAULT_EDGE_TOLERANCE_RADII = 0.05
 
 
 class VisualizerError(ValueError):
@@ -88,6 +89,12 @@ class VisualizationResult:
     high_precision_disk_crossing: bool | None = None
     high_precision_delta_deg: float | None = None
     high_precision_delta_body_radii: float | None = None
+    classification: str | None = None
+    production_minimum_separation_deg: float | None = None
+    production_minimum_ratio: float | None = None
+    production_closest_offset_seconds: float | None = None
+    production_closest_utc: datetime.datetime | None = None
+    production_disk_crossing: bool | None = None
 
 
 def parse_utc(value):
@@ -229,7 +236,7 @@ def _motion_parameter(item, value_key):
 
 
 def _intent_parameter(item, value_key):
-    if item is None:
+    if item is None or item.get(value_key) is None:
         return None
     return IntentParameter(float(item[value_key]), parse_utc(item["timestamp_utc"]),
                            item["source"])
@@ -378,6 +385,19 @@ def trajectory_summary(samples, radius_deg):
         sample.center_separation_deg <= radius_deg for sample in samples)
 
 
+def disk_classification(ratio, edge_tolerance_radii=DEFAULT_EDGE_TOLERANCE_RADII):
+    """Classify a sampled 2D closest approach for diagnostics only."""
+    ratio = float(ratio)
+    tolerance = float(edge_tolerance_radii)
+    if not math.isfinite(tolerance) or tolerance < 0:
+        raise VisualizerError("edge tolerance must be a finite non-negative number")
+    if ratio < 1.0 - tolerance:
+        return "HIT"
+    if ratio <= 1.0 + tolerance:
+        return "EDGE"
+    return "MISS"
+
+
 def zoom_plot_limits(radius_deg, zoom):
     """Return symmetric body-centered limits for a plotting-only zoom."""
     if zoom is None:
@@ -390,7 +410,8 @@ def zoom_plot_limits(radius_deg, zoom):
 
 
 def render_png(document, prediction, prediction_label, samples, output_path,
-               zoom=None, high_precision_samples=None):
+               zoom=None, production_samples=None,
+               edge_tolerance_radii=DEFAULT_EDGE_TOLERANCE_RADII):
     import matplotlib
     matplotlib.use("Agg", force=True)
     from matplotlib import pyplot as plt
@@ -400,24 +421,28 @@ def render_png(document, prediction, prediction_label, samples, output_path,
     radius = body_radius_deg(prediction)
     zoom_limits = zoom_plot_limits(radius, zoom)
     closest, ratio, crossing = trajectory_summary(samples, radius)
-    high_precision_summary = (
-        trajectory_summary(high_precision_samples, radius)
-        if high_precision_samples is not None else None)
+    classification = disk_classification(ratio, edge_tolerance_radii)
+    production_summary = (
+        trajectory_summary(production_samples, radius)
+        if production_samples is not None else None)
     t0_sample = next(sample for sample in samples if sample.offset_seconds == 0.0)
     figure, axis = plt.subplots(figsize=(8, 8))
     axis.add_patch(plt.Circle((0, 0), radius, color="#f5c542", alpha=0.35,
                               ec="#d89200", lw=2, label=prediction["body"]))
     axis.scatter([0], [0], marker="+", color="black", s=80, zorder=4)
     xs, ys = [sample.x_deg for sample in samples], [sample.y_deg for sample in samples]
-    axis.plot(xs, ys, color="#1769aa", lw=1.8,
-              label="production-exact path")
-    if high_precision_samples is not None:
-        high_xs = [sample.x_deg for sample in high_precision_samples]
-        high_ys = [sample.y_deg for sample in high_precision_samples]
-        axis.plot(high_xs, high_ys, color="#d1495b", lw=1.5, ls="--",
-                  label="high-precision diagnostic path")
+    axis.plot(xs, ys, color="#1769aa", lw=2.0,
+              label="smooth diagnostic path")
+    if production_samples is not None:
+        production_xs = [sample.x_deg for sample in production_samples]
+        production_ys = [sample.y_deg for sample in production_samples]
+        axis.plot(production_xs, production_ys, color="#d1495b", lw=1.2,
+                  ls="--", alpha=0.85, label="production-quantized path")
     axis.scatter([t0_sample.x_deg], [t0_sample.y_deg], color="red", s=45,
-                 zorder=5, label="T0")
+                 zorder=5, label="production T0")
+    axis.scatter([closest.x_deg], [closest.y_deg], facecolors="none",
+                 edgecolors="#2a7f2e", marker="o", s=80, linewidths=1.5,
+                 zorder=5, label="sampled 2D closest approach")
     marker_stride = max(1, len(samples) // 10)
     for sample in samples[::marker_stride]:
         axis.scatter([sample.x_deg], [sample.y_deg], color="#1769aa", s=10)
@@ -433,31 +458,16 @@ def render_png(document, prediction, prediction_label, samples, output_path,
     zoom_metadata = (
         "\nZoom: ±{:.1f} body radii".format(float(zoom))
         if zoom is not None else "")
-    if high_precision_summary is None:
-        precision_metadata = ""
-    else:
-        high_closest, high_ratio, high_crossing = high_precision_summary
-        precision_metadata = (
-            "\nHigh precision min: {:.4f}° ({:.3f} radius), "
-            "closest {:+.2f}s, inside: {}\n"
-            "High precision - production: {:+.4f}° ({:+.3f} radius)"
-        ).format(
-            high_closest.center_separation_deg, high_ratio,
-            high_closest.offset_seconds, "YES" if high_crossing else "NO",
-            high_closest.center_separation_deg - closest.center_separation_deg,
-            high_ratio - ratio)
     metadata = (
         "{} / {} | {} | {}\n"
-        "Body alt: {:.3f}° | Production SEP (vertical): {:.4f}°\n"
-        "Sampled minimum center separation: {:.4f}° ({:.3f} radius)\n"
-        "Body radius: {:.4f}° | closest: {:+.2f}s | inside disk: {}{}{}"
+        "Production SEP (vertical): {:.4f}° | Body radius: {:.4f}°\n"
+        "High-precision 2D minimum: {:.4f}° ({:.3f} R) at {:+.2f}s\n"
+        "2D disk result: {} | edge tolerance: ±{:.3f} R{}"
     ).format(aircraft.get("callsign") or "NOCALL", aircraft.get("icao") or "?",
              prediction["body"], prediction_label,
-             float(prediction["body_altitude_deg"]),
-             float(prediction["separation_deg"]),
-             closest.center_separation_deg, ratio, radius,
-             closest.offset_seconds, "YES" if crossing else "NO",
-             zoom_metadata, precision_metadata)
+             float(prediction["separation_deg"]), radius,
+             closest.center_separation_deg, ratio, closest.offset_seconds,
+             classification, float(edge_tolerance_radii), zoom_metadata)
     axis.set_title(metadata, fontsize=10)
     axis.set_xlabel("X: increasing azimuth / visual right (degrees)")
     axis.set_ylabel("Y: increasing altitude / visual up (degrees)")
@@ -472,42 +482,47 @@ def render_png(document, prediction, prediction_label, samples, output_path,
     figure.tight_layout()
     figure.savefig(output_path, dpi=150)
     plt.close(figure)
-    result_arguments = [
+    result = VisualizationResult(
         output_path, prediction_label, float(prediction["separation_deg"]),
         radius, closest.center_separation_deg, ratio,
-        closest.offset_seconds, closest.timestamp_utc, crossing, len(samples)]
-    if high_precision_summary is None:
-        return VisualizationResult(*result_arguments)
-    high_closest, high_ratio, high_crossing = high_precision_summary
+        closest.offset_seconds, closest.timestamp_utc, crossing, len(samples),
+        high_precision_minimum_separation_deg=closest.center_separation_deg,
+        high_precision_minimum_ratio=ratio,
+        high_precision_closest_offset_seconds=closest.offset_seconds,
+        high_precision_closest_utc=closest.timestamp_utc,
+        high_precision_disk_crossing=crossing,
+        classification=classification)
+    if production_summary is None:
+        return result
+    production_closest, production_ratio, production_crossing = production_summary
     return VisualizationResult(
-        *result_arguments,
-        high_precision_minimum_separation_deg=(
-            high_closest.center_separation_deg),
-        high_precision_minimum_ratio=high_ratio,
-        high_precision_closest_offset_seconds=high_closest.offset_seconds,
-        high_precision_closest_utc=high_closest.timestamp_utc,
-        high_precision_disk_crossing=high_crossing,
-        high_precision_delta_deg=(
-            high_closest.center_separation_deg
-            - closest.center_separation_deg),
-        high_precision_delta_body_radii=high_ratio - ratio,
-    )
+        **{**result.__dict__,
+           "high_precision_delta_deg": (closest.center_separation_deg
+                                        - production_closest.center_separation_deg),
+           "high_precision_delta_body_radii": ratio - production_ratio,
+           "production_minimum_separation_deg": production_closest.center_separation_deg,
+           "production_minimum_ratio": production_ratio,
+           "production_closest_offset_seconds": production_closest.offset_seconds,
+           "production_closest_utc": production_closest.timestamp_utc,
+           "production_disk_crossing": production_crossing})
 
 
 def visualize(snapshot_path, output_path, prediction_selector="final",
               before=15.0, after=15.0, step=0.1, zoom=None,
-              high_precision_overlay=False):
+              high_precision_overlay=False, show_production_path=False,
+              edge_tolerance_radii=DEFAULT_EDGE_TOLERANCE_RADII):
     document = load_snapshot(snapshot_path)
     prediction, label = select_prediction(document, prediction_selector)
     check_provider_version(prediction)
-    samples = reconstruct_samples(document, prediction, before, after, step)
-    validate_t0(document, prediction, samples)
-    high_precision_samples = (
-        reconstruct_high_precision_samples(document, samples)
-        if high_precision_overlay else None)
+    production_samples = reconstruct_samples(
+        document, prediction, before, after, step)
+    validate_t0(document, prediction, production_samples)
+    samples = reconstruct_high_precision_samples(document, production_samples)
+    show_production_path = show_production_path or high_precision_overlay
     return render_png(
         document, prediction, label, samples, output_path, zoom=zoom,
-        high_precision_samples=high_precision_samples)
+        production_samples=(production_samples if show_production_path else None),
+        edge_tolerance_radii=edge_tolerance_radii)
 
 
 def build_parser():
@@ -519,7 +534,11 @@ def build_parser():
     parser.add_argument("--after", type=float, default=15.0)
     parser.add_argument("--step", type=float, default=0.1)
     parser.add_argument("--zoom", type=float)
-    parser.add_argument("--high-precision-overlay", action="store_true")
+    parser.add_argument("--show-production-path", action="store_true")
+    parser.add_argument("--high-precision-overlay", action="store_true",
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--edge-tolerance-radii", type=float,
+                        default=DEFAULT_EDGE_TOLERANCE_RADII)
     parser.add_argument("--output", type=Path, required=True)
     return parser
 
@@ -530,23 +549,23 @@ def main(argv=None):
     try:
         result = visualize(args.snapshot, args.output, args.prediction,
                            args.before, args.after, args.step, args.zoom,
-                           args.high_precision_overlay)
+                           args.high_precision_overlay,
+                           args.show_production_path,
+                           args.edge_tolerance_radii)
     except VisualizerError as error:
         parser.error(str(error))
     print("PNG: {}".format(result.output_path))
     print("Production SEP: {:.6f} deg".format(result.production_separation_deg))
-    print("Sampled minimum: {:.6f} deg ({:.3f} radius) at {:+.3f} s".format(
+    print("High-precision 2D minimum: {:.6f} deg ({:.3f} radius) at {:+.3f} s".format(
         result.minimum_separation_deg, result.minimum_ratio,
         result.closest_offset_seconds))
-    print("Disk crossing: {}".format("YES" if result.disk_crossing else "NO"))
-    if result.high_precision_minimum_separation_deg is not None:
-        print("High-precision minimum: {:.6f} deg ({:.3f} radius) at {:+.3f} s".format(
-            result.high_precision_minimum_separation_deg,
-            result.high_precision_minimum_ratio,
-            result.high_precision_closest_offset_seconds))
-        print("High-precision disk crossing: {}".format(
-            "YES" if result.high_precision_disk_crossing else "NO"))
-        print("High-precision delta: {:+.6f} deg ({:+.3f} radius)".format(
+    print("2D disk result: {}".format(result.classification))
+    if result.production_minimum_separation_deg is not None:
+        print("Production-path minimum: {:.6f} deg ({:.3f} radius) at {:+.3f} s".format(
+            result.production_minimum_separation_deg,
+            result.production_minimum_ratio,
+            result.production_closest_offset_seconds))
+        print("High precision - production: {:+.6f} deg ({:+.3f} radius)".format(
             result.high_precision_delta_deg,
             result.high_precision_delta_body_radii))
     return 0

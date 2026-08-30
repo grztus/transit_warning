@@ -153,3 +153,26 @@ address, while `--file` can override the input file for a single-stream
 scenario. Replay scenarios require their corresponding local files under
 `tests/data/`; these files are ignored by Git and may not exist after a fresh
 clone.
+
+## Offline transit snapshot visualizer
+
+Render a schema-v3 transit snapshot with the smooth, high-precision diagnostic
+trajectory:
+
+```console
+python tools/transit_snapshot_visualizer.py snapshot.json --zoom 3 --output transit.png
+```
+
+The visualizer preserves the stored production prediction and vertical SEP,
+but uses unrounded observer-relative geometry for its default plotted path and
+full two-dimensional closest-approach result. To compare it with the exact
+legacy production-quantized geometry, add:
+
+```console
+--show-production-path
+```
+
+`--edge-tolerance-radii` controls the diagnostic limb band and defaults to
+`0.05`: below `0.95 R` is `HIT`, `0.95-1.05 R` is `EDGE`, and above `1.05 R`
+is `MISS`. This classification is offline diagnostics only and does not change
+live alerts or production prediction behavior.

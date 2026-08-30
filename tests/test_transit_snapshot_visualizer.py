@@ -247,9 +247,10 @@ class SnapshotVisualizerTests(unittest.TestCase):
             self.assertEqual(plain.closest_offset_seconds,
                              overlay.closest_offset_seconds)
             self.assertEqual(plain.disk_crossing, overlay.disk_crossing)
-            self.assertIsNone(plain.high_precision_minimum_separation_deg)
-            self.assertIsNotNone(
-                overlay.high_precision_minimum_separation_deg)
+            self.assertEqual(plain.high_precision_minimum_separation_deg,
+                             overlay.high_precision_minimum_separation_deg)
+            self.assertIsNone(plain.production_minimum_separation_deg)
+            self.assertIsNotNone(overlay.production_minimum_separation_deg)
             self.assertGreater(overlay_path.stat().st_size, 1000)
 
     def test_high_precision_classification_delta_is_reported(self):
@@ -262,12 +263,88 @@ class SnapshotVisualizerTests(unittest.TestCase):
                 high_precision_overlay=True)
             self.assertAlmostEqual(
                 result.high_precision_minimum_separation_deg
-                - result.minimum_separation_deg,
+                - result.production_minimum_separation_deg,
                 result.high_precision_delta_deg)
             self.assertAlmostEqual(
-                result.high_precision_minimum_ratio - result.minimum_ratio,
+                result.high_precision_minimum_ratio
+                - result.production_minimum_ratio,
                 result.high_precision_delta_body_radii)
             self.assertIsInstance(result.high_precision_disk_crossing, bool)
+
+    def test_default_trajectory_is_smooth_high_precision_path(self):
+        document = snapshot_fixture()
+        prediction = document["prediction_updates"][-1]
+        production = visualizer.reconstruct_samples(
+            document, prediction, 2, 2, 0.2)
+        smooth = visualizer.reconstruct_high_precision_samples(
+            document, production)
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot_path = Path(directory) / "snapshot.json"
+            output_path = Path(directory) / "smooth.png"
+            snapshot_path.write_text(json.dumps(document), encoding="utf-8")
+            result = visualizer.visualize(
+                snapshot_path, output_path, "final", 2, 2, 0.2)
+        closest, ratio, crossing = visualizer.trajectory_summary(
+            smooth, visualizer.body_radius_deg(prediction))
+        self.assertEqual(closest.center_separation_deg,
+                         result.minimum_separation_deg)
+        self.assertEqual(ratio, result.minimum_ratio)
+        self.assertEqual(crossing, result.disk_crossing)
+        self.assertNotEqual(
+            visualizer.trajectory_summary(
+                production, visualizer.body_radius_deg(prediction))[0]
+            .center_separation_deg,
+            result.minimum_separation_deg)
+
+    def test_show_production_path_preserves_smooth_numerical_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot_path = Path(directory) / "snapshot.json"
+            snapshot_path.write_text(json.dumps(snapshot_fixture()), encoding="utf-8")
+            plain = visualizer.visualize(
+                snapshot_path, Path(directory) / "plain.png", step=0.2)
+            compared = visualizer.visualize(
+                snapshot_path, Path(directory) / "compared.png", step=0.2,
+                show_production_path=True)
+        self.assertEqual(plain.minimum_separation_deg,
+                         compared.minimum_separation_deg)
+        self.assertEqual(plain.closest_offset_seconds,
+                         compared.closest_offset_seconds)
+        self.assertIsNone(plain.production_minimum_separation_deg)
+        self.assertIsNotNone(compared.production_minimum_separation_deg)
+
+    def test_null_selected_altitude_is_unusable_intent(self):
+        prediction = snapshot_fixture()["trigger_prediction"]
+        prediction["frozen_prediction_state"]["vertical"]["selected_altitude"] = {
+            "value_ft": None, "timestamp_utc": None, "source": None}
+        _, _, _, intent, _ = visualizer.vertical_inputs(prediction)
+        self.assertIsNone(intent.selected_altitude)
+        document = snapshot_fixture()
+        document["trigger_prediction"] = prediction
+        document["prediction_updates"] = [copy.deepcopy(prediction)]
+        samples = visualizer.reconstruct_samples(document, prediction, 1, 1, 0.5)
+        self.assertTrue(samples)
+
+    def test_edge_classification_boundaries(self):
+        tolerance = 0.05
+        self.assertEqual("HIT", visualizer.disk_classification(0.9499, tolerance))
+        self.assertEqual("EDGE", visualizer.disk_classification(0.95, tolerance))
+        self.assertEqual("EDGE", visualizer.disk_classification(1.05, tolerance))
+        self.assertEqual("MISS", visualizer.disk_classification(1.0501, tolerance))
+        with self.assertRaisesRegex(visualizer.VisualizerError,
+                                    "edge tolerance"):
+            visualizer.disk_classification(1.0, -0.01)
+
+    def test_t0_and_high_precision_closest_approach_are_distinct(self):
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot_path = Path(directory) / "snapshot.json"
+            snapshot_path.write_text(json.dumps(snapshot_fixture()), encoding="utf-8")
+            result = visualizer.visualize(
+                snapshot_path, Path(directory) / "markers.png", "final",
+                2, 2, 0.05)
+        self.assertNotEqual(0.0, result.closest_offset_seconds)
+        self.assertEqual(
+            T0 + datetime.timedelta(seconds=result.closest_offset_seconds),
+            result.closest_utc)
 
     def test_invalid_cli_arguments_exit_cleanly(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -276,6 +353,10 @@ class SnapshotVisualizerTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 visualizer.main([str(snapshot_path), "--step", "0",
                                  "--output", str(Path(directory) / "x.png")])
+            with self.assertRaises(SystemExit):
+                visualizer.main([
+                    str(snapshot_path), "--edge-tolerance-radii", "-0.1",
+                    "--output", str(Path(directory) / "x.png")])
 
 
 if __name__ == "__main__":
