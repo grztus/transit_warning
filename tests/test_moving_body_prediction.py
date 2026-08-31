@@ -1,7 +1,9 @@
 import datetime
+import math
 import unittest
 from unittest.mock import Mock, patch
 
+import ephem
 import pytz
 
 import transit_warning as transit
@@ -184,6 +186,100 @@ class MovingBodyTransitSolverTests(unittest.TestCase):
         self.assertNotEqual(first, moon)
         self.assertGreater(first.angular_diameter_arcsec, 1000)
         self.assertGreater(moon.angular_diameter_arcsec, 1000)
+
+    @staticmethod
+    def ephem_position(body_type, when, pressure):
+        observer = ephem.Observer()
+        observer.lat = str(TEST_CONFIG.observer_lat)
+        observer.lon = str(TEST_CONFIG.observer_lon)
+        observer.elevation = TEST_CONFIG.observer_elevation_m
+        observer.pressure = pressure
+        observer.temp = 15.0
+        observer.date = ephem.Date(when)
+        body = body_type(observer)
+        body.compute(observer)
+        return math.degrees(body.alt), math.degrees(body.az)
+
+    def test_prediction_ephemeris_is_unrefracted_topocentric(self):
+        transit.apply_installation_config(TEST_CONFIG)
+        moon = transit.body_position_at_utc("moon", UTC_BASE)
+        expected_alt, expected_az = self.ephem_position(
+            ephem.Moon, UTC_BASE, 0)
+        refracted_alt, _ = self.ephem_position(
+            ephem.Moon, UTC_BASE, 1010)
+        self.assertAlmostEqual(moon.altitude_deg, expected_alt, places=10)
+        self.assertAlmostEqual(moon.azimuth_deg, expected_az, places=10)
+        self.assertNotAlmostEqual(moon.altitude_deg, refracted_alt, places=5)
+
+    def test_moon_remains_topocentric_with_parallax(self):
+        transit.apply_installation_config(TEST_CONFIG)
+        when = datetime.datetime(
+            2026, 8, 30, 18, 38, 48, 344000, tzinfo=pytz.utc)
+        moon = transit.body_position_at_utc("moon", when)
+
+        geocentric = ephem.Moon(ephem.Date(when))
+        observer = ephem.Observer()
+        observer.lat = str(TEST_CONFIG.observer_lat)
+        observer.lon = str(TEST_CONFIG.observer_lon)
+        observer.elevation = TEST_CONFIG.observer_elevation_m
+        observer.pressure = 0
+        observer.date = ephem.Date(when)
+        fixed = ephem.FixedBody()
+        fixed._ra = geocentric.g_ra
+        fixed._dec = geocentric.g_dec
+        fixed._epoch = ephem.Date(when)
+        fixed.compute(observer)
+
+        geocentric_altitude = math.degrees(fixed.alt)
+        self.assertGreater(
+            abs(moon.altitude_deg - geocentric_altitude), 0.5)
+
+    def test_thy7db_reference_time_uses_geometric_not_refracted_moon(self):
+        transit.apply_installation_config(TEST_CONFIG)
+        when = datetime.datetime(
+            2026, 8, 30, 18, 38, 48, 344000, tzinfo=pytz.utc)
+        moon = transit.body_position_at_utc("moon", when)
+        geometric_alt, _ = self.ephem_position(ephem.Moon, when, 0)
+        refracted_alt, _ = self.ephem_position(ephem.Moon, when, 1010)
+        self.assertAlmostEqual(moon.altitude_deg, geometric_alt, places=10)
+        self.assertGreater(refracted_alt - moon.altitude_deg, 0.1)
+
+    def test_low_sun_uses_geometric_altitude(self):
+        transit.apply_installation_config(TEST_CONFIG)
+        when = datetime.datetime(
+            2026, 8, 30, 17, 7, 25, tzinfo=pytz.utc)
+        sun = transit.body_position_at_utc("sun", when)
+        geometric_alt, geometric_az = self.ephem_position(ephem.Sun, when, 0)
+        refracted_alt, refracted_az = self.ephem_position(
+            ephem.Sun, when, 1010)
+        self.assertAlmostEqual(sun.altitude_deg, geometric_alt, places=10)
+        self.assertAlmostEqual(sun.azimuth_deg, geometric_az, places=10)
+        self.assertGreater(refracted_alt - sun.altitude_deg, 0.1)
+        self.assertAlmostEqual(refracted_az, sun.azimuth_deg, places=8)
+
+    def test_high_sun_refraction_difference_is_small(self):
+        transit.apply_installation_config(TEST_CONFIG)
+        when = datetime.datetime(2026, 8, 30, 12, 0, tzinfo=pytz.utc)
+        sun = transit.body_position_at_utc("sun", when)
+        refracted_alt, _ = self.ephem_position(ephem.Sun, when, 1010)
+        difference = refracted_alt - sun.altitude_deg
+        self.assertGreater(difference, 0.0)
+        self.assertLess(difference, 0.05)
+
+    def test_solver_receives_geometric_body_position(self):
+        transit.apply_installation_config(TEST_CONFIG)
+        geometric = transit.body_position_at_utc("moon", UTC_BASE)
+        with patch.object(
+                transit, "transit_pred",
+                side_effect=[prediction(10.0), prediction(10.1)]) as solver:
+            solution = solve("moon")
+        self.assertEqual(
+            solution.diagnostic.outcome,
+            transit.TransitSolverOutcome.CONVERGED)
+        self.assertAlmostEqual(solver.call_args_list[0].args[-2],
+                               geometric.altitude_deg)
+        self.assertAlmostEqual(solver.call_args_list[0].args[-1],
+                               geometric.azimuth_deg)
 
     def test_final_diagnostic_keeps_size_from_selected_ephemeris_state(self):
         positions = [

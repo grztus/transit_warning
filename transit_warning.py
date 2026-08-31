@@ -552,6 +552,9 @@ def apply_installation_config(configuration: InstallationConfig):
     gatech = ephem.Observer()
     gatech.lat, gatech.lon = str(my_lat), str(my_lon)
     gatech.elevation = my_elevation_const
+    # Prediction geometry compares unrefracted topocentric body coordinates
+    # with the geometric aircraft line of sight.
+    gatech.pressure = 0
     port_status = {adsb_port: False, mlat_port: False}
 
 
@@ -1603,6 +1606,7 @@ def body_position_at_utc(body_name, when_utc):
     observer.lat = str(my_lat)
     observer.lon = str(my_lon)
     observer.elevation = float(my_elevation_const)
+    observer.pressure = 0
     observer.date = ephem.Date(when_utc.astimezone(pytz.utc))
     if body_name == "sun":
         body = ephem.Sun(observer)

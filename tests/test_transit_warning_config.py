@@ -57,6 +57,7 @@ class ApplicationConfigurationTests(unittest.TestCase):
         self.assertAlmostEqual(float(transit.gatech.lat) * 180.0 / ephem.pi, TEST_CONFIG.observer_lat)
         self.assertAlmostEqual(float(transit.gatech.lon) * 180.0 / ephem.pi, TEST_CONFIG.observer_lon)
         self.assertEqual(transit.gatech.elevation, TEST_CONFIG.observer_elevation_m)
+        self.assertEqual(transit.gatech.pressure, 0.0)
 
     def test_metar_request_uses_configured_station(self):
         transit.apply_installation_config(TEST_CONFIG)
