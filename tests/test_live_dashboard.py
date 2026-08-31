@@ -153,6 +153,32 @@ class DashboardStateTests(unittest.TestCase):
                           "chat_id", "token"):
             self.assertNotIn(forbidden, encoded)
 
+    def test_default_separation_classes_come_from_backend_thresholds(self):
+        for index, (separation, expected) in enumerate((
+                (2.999, "GREEN"), (3.0, "YELLOW"),
+                (4.999, "YELLOW"), (5.0, "RED"),
+                (6.999, "RED"), (7.0, "HIDDEN"))):
+            self.state.publish(candidate(
+                "C{:05d}".format(index), separation=separation))
+        snapshot = self.state.snapshot(NOW)
+        self.assertEqual({
+            "sep_green_max_deg": 3.0,
+            "sep_yellow_max_deg": 5.0,
+            "sep_visible_max_deg": 7.0,
+        }, snapshot["presentation"])
+        self.assertEqual(
+            ["GREEN", "YELLOW", "YELLOW", "RED", "RED", "HIDDEN"],
+            [item["separation_class"]
+             for item in snapshot["sun"]["candidates"]])
+
+    def test_custom_dashboard_thresholds_do_not_use_terminal_globals(self):
+        state = dashboard.DashboardState(
+            sep_green_max_deg=1, sep_yellow_max_deg=2,
+            sep_visible_max_deg=3)
+        state.publish(candidate(separation=1.5))
+        self.assertEqual("YELLOW", state.snapshot(NOW)[
+            "sun"]["candidates"][0]["separation_class"])
+
 
 class DashboardRuntimeTests(unittest.TestCase):
     def test_disabled_creates_no_server(self):
@@ -275,6 +301,10 @@ class DashboardConfigTests(unittest.TestCase):
         self.assertTrue(custom.dashboard_enabled)
         self.assertEqual(("192.0.2.10", 9876),
                          (custom.dashboard_host, custom.dashboard_port))
+        self.assertEqual((3.0, 5.0, 7.0), (
+            default.dashboard_sep_green_max_deg,
+            default.dashboard_sep_yellow_max_deg,
+            default.dashboard_sep_visible_max_deg))
 
     def test_invalid_dashboard_configuration(self):
         with self.assertRaises(ConfigurationError):
@@ -294,20 +324,27 @@ class ProductionIntegrationTests(unittest.TestCase):
         transit.dashboard_runtime = self.old_dashboard
         transit.telegram_alert_separation_deg = self.old_threshold
 
-    def test_publish_reuses_existing_fifteen_degree_population(self):
-        result = (51, 21, 88, 18.0, 10, 100, 120, 0, 88, 6.0, NOW)
+    def test_publish_uses_dashboard_seven_degree_visibility(self):
+        result = (51, 21, 88, 12.0, 10, 100, 120, 0, 88, 6.0, NOW)
         self.assertTrue(transit.publish_dashboard_prediction(
             "A00001", "FLT1", "moon", result, NOW, 100))
         visible = transit.dashboard_runtime.state.snapshot(
             NOW)["moon"]["candidates"]
-        self.assertEqual(12.0, visible[0]["separation_deg"])
+        self.assertEqual(6.0, visible[0]["separation_deg"])
         self.assertEqual("CANDIDATE", visible[0]["state"])
         outside = list(result)
-        outside[3] = 21.0
+        outside[3] = 13.0
         self.assertFalse(transit.publish_dashboard_prediction(
             "A00001", "FLT1", "moon", tuple(outside), NOW, 100))
         self.assertEqual([], transit.dashboard_runtime.state.snapshot(
             NOW)["moon"]["candidates"])
+
+    def test_dashboard_visibility_ignores_terminal_thresholds(self):
+        result = (51, 21, 88, 11.0, 10, 100, 120, 0, 88, 6.0, NOW)
+        with patch.object(transit, "dashboard_sep_visible_max_deg", 6.0), \
+                patch.object(transit, "tmux_sep_visible_max_deg", 4.0):
+            self.assertTrue(transit.publish_dashboard_prediction(
+                "A00001", "FLT1", "moon", result, NOW, 100))
 
     def test_dashboard_publication_failure_does_not_escape(self):
         transit.dashboard_runtime = Mock()
@@ -347,6 +384,7 @@ class ProductionIntegrationTests(unittest.TestCase):
     def test_telegram_and_solver_behavior_are_unchanged(self):
         self.assertEqual(2.0, transit.telegram_alert_separation_deg)
         self.assertEqual(3, transit.transit_separation_sound_alert)
+        self.assertEqual(0.5, transit.TRANSIT_SNAPSHOT_SEP_THRESHOLD_DEG)
         old_geometry = (transit.my_lat, transit.my_lon,
                         transit.my_elevation_const)
         transit.my_lat, transit.my_lon, transit.my_elevation_const = (

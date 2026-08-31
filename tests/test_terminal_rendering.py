@@ -143,7 +143,7 @@ class TerminalRenderingTests(unittest.TestCase):
         hidden = aircraft(sun_time=18)
         hidden[18:22] = [51.0, 2.8, 1.4, 41.9]
         bti26f = aircraft(sun_time=568.0)
-        bti26f[18:22] = [51.0, 38.15, 0.8, 66.3]
+        bti26f[18:22] = [51.0, 44.15, 0.8, 66.3]
         planes = {"HIDDEN": hidden}
         planes.update({"P{:02d}".format(index): aircraft()
                        for index in range(20)})
@@ -158,13 +158,13 @@ class TerminalRenderingTests(unittest.TestCase):
         self.assertIsNone(
             transit.visible_transit_candidate(hidden, "sun"))
         self.assertAlmostEqual(
-            transit.visible_transit_candidate(bti26f, "sun")[0], 12.85)
+            transit.visible_transit_candidate(bti26f, "sun")[0], 6.85)
 
     def test_sun_candidate_requires_separation_strictly_below_limit(self):
         visible = aircraft(sun_time=10)
-        visible[18:20] = [30.0, 44.999]
+        visible[18:20] = [30.0, 36.999]
         boundary = aircraft(sun_time=5)
-        boundary[18:20] = [30.0, 45.0]
+        boundary[18:20] = [30.0, 37.0]
 
         plan = transit.build_terminal_render_plan(
             {"BOUNDARY": boundary, "VISIBLE": visible}, 2, 200)
@@ -177,9 +177,9 @@ class TerminalRenderingTests(unittest.TestCase):
 
     def test_moon_candidate_requires_separation_strictly_below_limit(self):
         visible = aircraft(moon_time=12)
-        visible[23:25] = [20.0, 34.999]
+        visible[23:25] = [20.0, 26.999]
         boundary = aircraft(moon_time=6)
-        boundary[23:25] = [20.0, 35.0]
+        boundary[23:25] = [20.0, 27.0]
 
         plan = transit.build_terminal_render_plan(
             {"BOUNDARY": boundary, "VISIBLE": visible}, 2, 200)
@@ -189,6 +189,26 @@ class TerminalRenderingTests(unittest.TestCase):
         self.assertIsNone(
             transit.visible_transit_candidate(boundary, "moon"))
         self.assertEqual(plan.aircraft_ids, ("VISIBLE", "BOUNDARY"))
+
+    def test_terminal_colors_use_independent_configured_thresholds(self):
+        with patch.object(transit, "tmux_sep_green_max_deg", 2.0), \
+                patch.object(transit, "tmux_sep_yellow_max_deg", 4.0), \
+                patch.object(transit, "dashboard_sep_green_max_deg", 10.0), \
+                patch.object(transit, "dashboard_sep_yellow_max_deg", 11.0):
+            self.assertEqual(transit.GREENALERT,
+                             transit.terminal_separation_color(1.999))
+            self.assertEqual(transit.YELLOW,
+                             transit.terminal_separation_color(2.0))
+            self.assertEqual(transit.RED,
+                             transit.terminal_separation_color(4.0))
+
+    def test_terminal_visibility_ignores_dashboard_thresholds(self):
+        entry = aircraft(sun_time=10)
+        entry[18:20] = [30.0, 35.0]
+        with patch.object(transit, "tmux_sep_visible_max_deg", 6.0), \
+                patch.object(transit, "dashboard_sep_visible_max_deg", 4.0):
+            self.assertIsNotNone(
+                transit.visible_transit_candidate(entry, "sun"))
 
     def test_counts_shown_and_tracked_when_clipped(self):
         planes = {

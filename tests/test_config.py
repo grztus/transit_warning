@@ -67,6 +67,47 @@ class InstallationConfigTests(unittest.TestCase):
         self.assertFalse(result.mlat_beast_enabled)
         self.assertEqual(result.mlat_beast_host, result.mlat_host)
         self.assertEqual(result.mlat_beast_port, 30105)
+        self.assertEqual(
+            (3.0, 5.0, 7.0),
+            (result.tmux_sep_green_max_deg,
+             result.tmux_sep_yellow_max_deg,
+             result.tmux_sep_visible_max_deg))
+        self.assertEqual(
+            (3.0, 5.0, 7.0),
+            (result.dashboard_sep_green_max_deg,
+             result.dashboard_sep_yellow_max_deg,
+             result.dashboard_sep_visible_max_deg))
+
+    def test_presentation_threshold_sets_are_independently_configurable(self):
+        result = self.load({
+            **REQUIRED,
+            "TMUX_SEP_GREEN_MAX_DEG": "1",
+            "TMUX_SEP_YELLOW_MAX_DEG": "2",
+            "TMUX_SEP_VISIBLE_MAX_DEG": "3",
+            "DASHBOARD_SEP_GREEN_MAX_DEG": "4",
+            "DASHBOARD_SEP_YELLOW_MAX_DEG": "5",
+            "DASHBOARD_SEP_VISIBLE_MAX_DEG": "6",
+        })
+        self.assertEqual((1.0, 2.0, 3.0), (
+            result.tmux_sep_green_max_deg,
+            result.tmux_sep_yellow_max_deg,
+            result.tmux_sep_visible_max_deg))
+        self.assertEqual((4.0, 5.0, 6.0), (
+            result.dashboard_sep_green_max_deg,
+            result.dashboard_sep_yellow_max_deg,
+            result.dashboard_sep_visible_max_deg))
+
+    def test_rejects_invalid_presentation_thresholds(self):
+        cases = (
+            ("TMUX_SEP_GREEN_MAX_DEG", "bad", "must be a number"),
+            ("DASHBOARD_SEP_VISIBLE_MAX_DEG", "0", "greater than"),
+            ("TMUX_SEP_YELLOW_MAX_DEG", "3", "GREEN < YELLOW < VISIBLE"),
+            ("DASHBOARD_SEP_GREEN_MAX_DEG", "8", "GREEN < YELLOW < VISIBLE"),
+        )
+        for name, value, message in cases:
+            with self.subTest(name=name, value=value):
+                with self.assertRaisesRegex(ConfigurationError, message):
+                    self.load({**REQUIRED, name: value})
 
     def test_accepts_and_validates_optional_mlat_beast_source(self):
         result = self.load({

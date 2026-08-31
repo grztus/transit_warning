@@ -545,9 +545,13 @@ xtd_tst = 20  # Odchylenie boczne / Cross-track deviation
 
 # Ustawienia ostrzeżeń dla tranzytów / Transit warning settings
 transit_separation_sound_alert = 3
-transit_separation_REDALERT_FG = 7
-transit_separation_GREENALERT_FG = 3
 transit_separation_notignored = 15
+tmux_sep_green_max_deg = 3.0
+tmux_sep_yellow_max_deg = 5.0
+tmux_sep_visible_max_deg = 7.0
+dashboard_sep_green_max_deg = 3.0
+dashboard_sep_yellow_max_deg = 5.0
+dashboard_sep_visible_max_deg = 7.0
 
 # Ustawienia lokalizacji geograficznej i wysokości / Set geographic location and elevation
 my_lat = None
@@ -587,6 +591,9 @@ def apply_installation_config(configuration: InstallationConfig):
     global raw_adsb_host, raw_adsb_port, mlat_beast_enabled
     global mlat_beast_host, mlat_beast_port, port_status
     global telegram_alert_separation_deg, telegram_alert_stability_seconds
+    global tmux_sep_green_max_deg, tmux_sep_yellow_max_deg
+    global tmux_sep_visible_max_deg, dashboard_sep_green_max_deg
+    global dashboard_sep_yellow_max_deg, dashboard_sep_visible_max_deg
     my_lat = configuration.observer_lat
     my_lon = configuration.observer_lon
     my_elevation_const = configuration.observer_elevation_m
@@ -612,6 +619,12 @@ def apply_installation_config(configuration: InstallationConfig):
         configuration.telegram_alert_separation_deg)
     telegram_alert_stability_seconds = (
         configuration.telegram_alert_stability_seconds)
+    tmux_sep_green_max_deg = configuration.tmux_sep_green_max_deg
+    tmux_sep_yellow_max_deg = configuration.tmux_sep_yellow_max_deg
+    tmux_sep_visible_max_deg = configuration.tmux_sep_visible_max_deg
+    dashboard_sep_green_max_deg = configuration.dashboard_sep_green_max_deg
+    dashboard_sep_yellow_max_deg = configuration.dashboard_sep_yellow_max_deg
+    dashboard_sep_visible_max_deg = configuration.dashboard_sep_visible_max_deg
     gatech = ephem.Observer()
     gatech.lat, gatech.lon = str(my_lat), str(my_lon)
     gatech.elevation = my_elevation_const
@@ -1368,9 +1381,19 @@ def visible_transit_candidate(entry, celestial_body, icao=None, now_utc=None):
         if icao is not None else None)
     time2x = stored_time2x if dynamic_time2x is None else dynamic_time2x
     separation = vertical_transit_separation(predicted_alt, body_alt)
-    if time2x <= 0 or separation >= transit_separation_notignored:
+    if time2x <= 0 or separation >= tmux_sep_visible_max_deg:
         return None
     return separation, p2x, h2x, time2x
+
+
+def terminal_separation_color(separation_deg):
+    """Return the configured terminal presentation color for separation."""
+    separation = float(separation_deg)
+    if separation < tmux_sep_green_max_deg:
+        return GREENALERT
+    if separation < tmux_sep_yellow_max_deg:
+        return YELLOW
+    return RED
 
 
 def build_terminal_render_plan(planes, row_limit, maximum_distance,
@@ -1743,7 +1766,7 @@ def publish_dashboard_prediction(icao, callsign, celestial_body,
         time_to_event = float(transit_result[6])
         body = celestial_body.upper()
         if not (0 < time_to_event and int(time_to_event) <= 900
-                and separation < transit_separation_notignored):
+                and separation < dashboard_sep_visible_max_deg):
             dashboard_runtime.withdraw(icao, body, now_utc)
             return False
         return dashboard_runtime.publish(DashboardCandidate(
@@ -2788,17 +2811,9 @@ def tabela(output=None, full=False, force=False):
                 sun_values = visible_transit_candidate(
                     plane_dict[pentry], "sun", pentry, aktual_t)
 
-                if (sun_values is not None
-                        and sun_values[0] < transit_separation_GREENALERT_FG):
+                if sun_values is not None:
                     separation_deg = sun_values[0]
-                    wiersz += '{}{:>7.2f}{} {:>7.1f} {:>7.1f} {:>8.1f}'.format(GREENALERT, separation_deg, RESET, *sun_values[1:])
-                elif (sun_values is not None
-                      and sun_values[0] < transit_separation_REDALERT_FG):
-                    separation_deg = sun_values[0]
-                    wiersz += '{}{:>7.2f}{} {:>7.1f} {:>7.1f} {:>8.1f}'.format(REDALERT, separation_deg, RESET, *sun_values[1:])
-                elif sun_values is not None:
-                    separation_deg = sun_values[0]
-                    wiersz += '{}{:>7.2f}{} {:>7.1f} {:>7.1f} {:>8.1f}'.format(RED, separation_deg, RESET, *sun_values[1:])
+                    wiersz += '{}{:>7.2f}{} {:>7.1f} {:>7.1f} {:>8.1f}'.format(terminal_separation_color(separation_deg), separation_deg, RESET, *sun_values[1:])
                 else:
                     wiersz += '{:>7} {:>7} {:>7} {:>8}'.format('---', '---', '---', '---')
 
@@ -2807,17 +2822,9 @@ def tabela(output=None, full=False, force=False):
                 moon_values = visible_transit_candidate(
                     plane_dict[pentry], "moon", pentry, aktual_t)
 
-                if (moon_values is not None
-                        and moon_values[0] < transit_separation_GREENALERT_FG):
+                if moon_values is not None:
                     separation_deg2 = moon_values[0]
-                    wiersz += '{}{:>7.2f}{} {:>7.1f} {:>7.1f} {:>8.1f}'.format(GREENALERT, separation_deg2, RESET, *moon_values[1:])
-                elif (moon_values is not None
-                      and moon_values[0] < transit_separation_REDALERT_FG):
-                    separation_deg2 = moon_values[0]
-                    wiersz += '{}{:>7.2f}{} {:>7.1f} {:>7.1f} {:>8.1f}'.format(REDALERT, separation_deg2, RESET, *moon_values[1:])
-                elif moon_values is not None:
-                    separation_deg2 = moon_values[0]
-                    wiersz += '{}{:>7.2f}{} {:>7.1f} {:>7.1f} {:>8.1f}'.format(RED, separation_deg2, RESET, *moon_values[1:])
+                    wiersz += '{}{:>7.2f}{} {:>7.1f} {:>7.1f} {:>8.1f}'.format(terminal_separation_color(separation_deg2), separation_deg2, RESET, *moon_values[1:])
                 else:
                     wiersz += '{:>7} {:>7} {:>7} {:>8}'.format('---', '---', '---', '---')
 
@@ -3615,6 +3622,9 @@ def main():
         configuration.dashboard_port,
         clock.now_utc,
         error_handler=lambda message: print(message),
+        sep_green_max_deg=configuration.dashboard_sep_green_max_deg,
+        sep_yellow_max_deg=configuration.dashboard_sep_yellow_max_deg,
+        sep_visible_max_deg=configuration.dashboard_sep_visible_max_deg,
     )
     install_table_snapshot_signal_handler()
     stop_event.clear()

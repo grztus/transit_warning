@@ -146,7 +146,19 @@ It is disabled and bound to localhost by default:
 DASHBOARD_ENABLED=false
 DASHBOARD_HOST=127.0.0.1
 DASHBOARD_PORT=8765
+TMUX_SEP_GREEN_MAX_DEG=3
+TMUX_SEP_YELLOW_MAX_DEG=5
+TMUX_SEP_VISIBLE_MAX_DEG=7
+DASHBOARD_SEP_GREEN_MAX_DEG=3
+DASHBOARD_SEP_YELLOW_MAX_DEG=5
+DASHBOARD_SEP_VISIBLE_MAX_DEG=7
 ```
+
+Terminal and dashboard separation presentation is configured independently.
+With the defaults, separation below 3 degrees is green, 3 to below 5 degrees
+is yellow, 5 to below 7 degrees is red, and values at or above 7 degrees are
+not presented as transit candidates in that presentation layer. These settings
+do not change the independent Telegram, audible gong, or snapshot thresholds.
 
 For a local test, set `DASHBOARD_ENABLED=true`, start Transit Warning, and open
 `http://127.0.0.1:8765/` on the same computer. The read-only JSON state is at

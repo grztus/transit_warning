@@ -46,6 +46,12 @@ class InstallationConfig:
     dashboard_enabled: bool = False
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8765
+    tmux_sep_green_max_deg: float = 3.0
+    tmux_sep_yellow_max_deg: float = 5.0
+    tmux_sep_visible_max_deg: float = 7.0
+    dashboard_sep_green_max_deg: float = 3.0
+    dashboard_sep_yellow_max_deg: float = 5.0
+    dashboard_sep_visible_max_deg: float = 7.0
 
 
 def _required(values, name, errors):
@@ -157,6 +163,26 @@ def _optional_nonnegative_float(values, name, default, errors,
     return value
 
 
+def _presentation_thresholds(values, prefix, errors):
+    names = (
+        "{}_SEP_GREEN_MAX_DEG".format(prefix),
+        "{}_SEP_YELLOW_MAX_DEG".format(prefix),
+        "{}_SEP_VISIBLE_MAX_DEG".format(prefix),
+    )
+    defaults = (3.0, 5.0, 7.0)
+    result = tuple(
+        _optional_finite_float(
+            values, name, default, errors, minimum=0.0, maximum=180.0)
+        for name, default in zip(names, defaults)
+    )
+    if all(value is not None for value in result) and not (
+            result[0] < result[1] < result[2]):
+        errors.append(
+            "{} presentation thresholds must satisfy GREEN < YELLOW < VISIBLE"
+            .format(prefix))
+    return result
+
+
 def _metar_station(values, errors):
     value = _required(values, "METAR_STATION", errors)
     if value is None:
@@ -229,6 +255,9 @@ def load_installation_config(
     dashboard_enabled = _boolean(values, "DASHBOARD_ENABLED", False, errors)
     dashboard_host = _host(values, "DASHBOARD_HOST", "127.0.0.1", errors)
     dashboard_port = _port(values, "DASHBOARD_PORT", 8765, errors)
+    tmux_thresholds = _presentation_thresholds(values, "TMUX", errors)
+    dashboard_thresholds = _presentation_thresholds(
+        values, "DASHBOARD", errors)
     if telegram_notifications_enabled:
         if not telegram_bot_token:
             errors.append(
@@ -271,4 +300,10 @@ def load_installation_config(
         dashboard_enabled=dashboard_enabled,
         dashboard_host=dashboard_host,
         dashboard_port=dashboard_port,
+        tmux_sep_green_max_deg=tmux_thresholds[0],
+        tmux_sep_yellow_max_deg=tmux_thresholds[1],
+        tmux_sep_visible_max_deg=tmux_thresholds[2],
+        dashboard_sep_green_max_deg=dashboard_thresholds[0],
+        dashboard_sep_yellow_max_deg=dashboard_thresholds[1],
+        dashboard_sep_visible_max_deg=dashboard_thresholds[2],
     )

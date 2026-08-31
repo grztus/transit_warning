@@ -11,6 +11,9 @@ import threading
 UTC = datetime.timezone.utc
 DEFAULT_HISTORY_LIMIT = 100
 WITHDRAW_HISTORY_GRACE_SECONDS = 3.0
+DEFAULT_SEP_GREEN_MAX_DEG = 3.0
+DEFAULT_SEP_YELLOW_MAX_DEG = 5.0
+DEFAULT_SEP_VISIBLE_MAX_DEG = 7.0
 
 
 def utc_text(value):
@@ -35,8 +38,14 @@ class DashboardCandidate:
 class DashboardState:
     """Thread-safe live queues and bounded, non-persistent event history."""
 
-    def __init__(self, history_limit=DEFAULT_HISTORY_LIMIT):
+    def __init__(self, history_limit=DEFAULT_HISTORY_LIMIT,
+                 sep_green_max_deg=DEFAULT_SEP_GREEN_MAX_DEG,
+                 sep_yellow_max_deg=DEFAULT_SEP_YELLOW_MAX_DEG,
+                 sep_visible_max_deg=DEFAULT_SEP_VISIBLE_MAX_DEG):
         self.history_limit = int(history_limit)
+        self.sep_green_max_deg = float(sep_green_max_deg)
+        self.sep_yellow_max_deg = float(sep_yellow_max_deg)
+        self.sep_visible_max_deg = float(sep_visible_max_deg)
         self._live = {"SUN": {}, "MOON": {}}
         self._history = []
         self._generated_at_utc = None
@@ -138,6 +147,11 @@ class DashboardState:
                 "sun": {"candidates": self._body_snapshot_locked("SUN")},
                 "moon": {"candidates": self._body_snapshot_locked("MOON")},
                 "recent_events": deepcopy(self._history),
+                "presentation": {
+                    "sep_green_max_deg": self.sep_green_max_deg,
+                    "sep_yellow_max_deg": self.sep_yellow_max_deg,
+                    "sep_visible_max_deg": self.sep_visible_max_deg,
+                },
             }
         return result
 
@@ -150,8 +164,7 @@ class DashboardState:
         )
         return [self._candidate_dict(item["candidate"]) for item in items]
 
-    @staticmethod
-    def _candidate_dict(candidate):
+    def _candidate_dict(self, candidate):
         result = asdict(candidate)
         result["predicted_event_utc"] = utc_text(
             candidate.predicted_event_utc)
@@ -159,7 +172,19 @@ class DashboardState:
             candidate.last_prediction_update_utc)
         result["state"] = (
             "TELEGRAM RANGE" if candidate.telegram_range else "CANDIDATE")
+        result["separation_class"] = self._separation_class(
+            candidate.separation_deg)
         return result
+
+    def _separation_class(self, separation_deg):
+        separation = float(separation_deg)
+        if separation < self.sep_green_max_deg:
+            return "GREEN"
+        if separation < self.sep_yellow_max_deg:
+            return "YELLOW"
+        if separation < self.sep_visible_max_deg:
+            return "RED"
+        return "HIDDEN"
 
 
 class DisabledDashboard:
@@ -240,11 +265,17 @@ def _handler_factory(state, now_utc):
 
 
 def start_dashboard(enabled, host, port, now_utc, error_handler=None,
-                    server_factory=ThreadingHTTPServer):
+                    server_factory=ThreadingHTTPServer,
+                    sep_green_max_deg=DEFAULT_SEP_GREEN_MAX_DEG,
+                    sep_yellow_max_deg=DEFAULT_SEP_YELLOW_MAX_DEG,
+                    sep_visible_max_deg=DEFAULT_SEP_VISIBLE_MAX_DEG):
     if not enabled:
         return DisabledDashboard()
     errors = error_handler or (lambda message: None)
-    state = DashboardState()
+    state = DashboardState(
+        sep_green_max_deg=sep_green_max_deg,
+        sep_yellow_max_deg=sep_yellow_max_deg,
+        sep_visible_max_deg=sep_visible_max_deg)
     try:
         state.tick(now_utc())
         server = server_factory(
