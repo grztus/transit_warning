@@ -38,6 +38,9 @@ class InstallationConfig:
     mlat_beast_enabled: bool = False
     mlat_beast_host: str = "127.0.0.1"
     mlat_beast_port: int = 30105
+    telegram_notifications_enabled: bool = False
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
 
 
 def _required(values, name, errors):
@@ -171,6 +174,17 @@ def load_installation_config(
     mlat_beast_host = _host(
         values, "MLAT_BEAST_HOST", mlat_host or "127.0.0.1", errors)
     mlat_beast_port = _port(values, "MLAT_BEAST_PORT", 30105, errors)
+    telegram_notifications_enabled = _boolean(
+        values, "TELEGRAM_NOTIFICATIONS_ENABLED", False, errors)
+    telegram_bot_token = str(values.get("TELEGRAM_BOT_TOKEN", "")).strip()
+    telegram_chat_id = str(values.get("TELEGRAM_CHAT_ID", "")).strip()
+    if telegram_notifications_enabled:
+        if not telegram_bot_token:
+            errors.append(
+                "TELEGRAM_BOT_TOKEN is required when Telegram notifications are enabled")
+        if not telegram_chat_id:
+            errors.append(
+                "TELEGRAM_CHAT_ID is required when Telegram notifications are enabled")
 
     if (adsb_host is not None and adsb_port is not None
             and mlat_host is not None and mlat_port is not None
@@ -198,4 +212,7 @@ def load_installation_config(
         mlat_beast_enabled=mlat_beast_enabled,
         mlat_beast_host=mlat_beast_host,
         mlat_beast_port=mlat_beast_port,
+        telegram_notifications_enabled=telegram_notifications_enabled,
+        telegram_bot_token=telegram_bot_token,
+        telegram_chat_id=telegram_chat_id,
     )

@@ -106,6 +106,10 @@ from raw_adsb_diagnostic_replay import (
 from transit_clock import ReplayClock, clock_from_args
 from transit_time import AdsBTimestampOffsetValidator, port_timestamp_to_utc
 from transit_snapshot import TransitSnapshotManager, runtime_git_commit
+from telegram_notifications import (
+    TransitNotification,
+    create_telegram_notifier,
+)
 from transit_prediction_model import (
     AngularPosition,
     INTENT_FRESHNESS_SECONDS,
@@ -164,6 +168,7 @@ def parse_runtime_args(arguments):
     parser.add_argument("--environment-record")
     parser.add_argument("--raw-diagnostics-replay")
     parser.add_argument("--record", action="store_true")
+    parser.add_argument("--test-notification", action="store_true")
     args = parser.parse_args(arguments)
     if args.environment_replay is not None and args.environment_record is not None:
         parser.error("--environment-replay and --environment-record cannot be used together")
@@ -175,6 +180,8 @@ def parse_runtime_args(arguments):
         parser.error("--record requires --clock real")
     if args.raw_diagnostics_replay is not None and args.clock != "replay":
         parser.error("--raw-diagnostics-replay requires --clock replay")
+    if args.test_notification and args.clock != "real":
+        parser.error("--test-notification requires --clock real")
     return args
 
 
@@ -184,6 +191,7 @@ replay_time_lock = threading.Lock()
 replay_time_initialized = not isinstance(clock, ReplayClock)
 environment_replay = None
 raw_diagnostic_replay = None
+telegram_notifier = None
 environment_recorder = None
 daily_environment_recorder = None
 adsb_timestamp_validator = None
@@ -1634,6 +1642,39 @@ def capture_transit_prediction(icao, callsign, celestial_body,
         pass
 
 
+def emit_transit_notification(icao, callsign, celestial_body,
+                              transit_result, now_utc, distance_km,
+                              separation_deg=None):
+    """Emit an already-computed interesting prediction, always fail-open."""
+    if telegram_notifier is None or not transit_result:
+        return False
+    try:
+        separation = (
+            vertical_transit_separation(transit_result[3], transit_result[9])
+            if separation_deg is None else float(separation_deg))
+        time_to_event = float(transit_result[6])
+        if not (0 <= int(time_to_event) <= 900
+                and separation < transit_separation_sound_alert):
+            return False
+        event = TransitNotification(
+            created_at_utc=now_utc,
+            body=celestial_body.upper(),
+            icao=icao,
+            callsign=callsign or None,
+            predicted_transit_utc=(
+                now_utc + datetime.timedelta(seconds=time_to_event)),
+            time_to_event_seconds=time_to_event,
+            separation_deg=separation,
+            body_azimuth_deg=float(transit_result[8]),
+            body_altitude_deg=float(transit_result[9]),
+            aircraft_altitude_deg=float(transit_result[3]),
+            distance_km=float(distance_km),
+        )
+        return telegram_notifier.notify(event)
+    except Exception:
+        return False
+
+
 def initialize_transit_snapshots():
     """Initialize the optional validation layer without affecting startup."""
     global transit_snapshot_manager
@@ -2787,7 +2828,7 @@ def close_active_sockets():
 
 
 def shutdown_runtime(threads, recorder):
-    global shutdown_complete
+    global shutdown_complete, telegram_notifier
     with shutdown_lock:
         if shutdown_complete:
             return
@@ -2800,6 +2841,12 @@ def shutdown_runtime(threads, recorder):
         except Exception:
             pass
     close_transit_snapshots(clock.now_utc())
+    if telegram_notifier is not None:
+        try:
+            telegram_notifier.close()
+        except Exception:
+            pass
+        telegram_notifier = None
     if recorder is not None:
         try:
             recorder.close(clock.now_utc())
@@ -3337,6 +3384,9 @@ def process_line(line, port):
                     plane_dict[icao][24], plane_dict[icao][23])
                 if -transit_separation_sound_alert < separation_deg < transit_separation_sound_alert:
                     gong()
+                    emit_transit_notification(
+                        icao, flight, "moon", tst_int1, prediction_now,
+                        distance, separation_deg)
                 if delta_time <= 2:  # Ustaw flagę tranzytu jeśli czas do tranzytu jest mniejszy lub równy 2 sekundy / Set transit flag if time to transit is less than or equal to 2 second
                     plane_dict[icao][31] = True
                     plane_dict[icao][30] = clock.now_utc()  # Ustaw czas rozpoczęcia tranzytu / Set transit start time
@@ -3372,6 +3422,9 @@ def process_line(line, port):
                     plane_dict[icao][19], plane_dict[icao][18])
                 if -transit_separation_sound_alert < separation_deg2 < transit_separation_sound_alert:
                     gong()
+                    emit_transit_notification(
+                        icao, flight, "sun", tst_int2, prediction_now,
+                        distance, separation_deg2)
                 if delta_time <= 2:  # Ustaw flagę tranzytu jeśli czas do tranzytu jest mniejszy lub równy 2 sekundy / Set transit flag if time to transit is less than or equal to 2 second
                     plane_dict[icao][31] = True
                     plane_dict[icao][30] = clock.now_utc()  # Ustaw czas rozpoczęcia tranzytu / Set transit start time
@@ -3398,13 +3451,31 @@ def process_line(line, port):
 
 def main():
     global daily_environment_recorder, session_recorder, session_recording_requested
-    global transit_snapshot_manager
+    global transit_snapshot_manager, telegram_notifier
     global shutdown_complete
     try:
         configuration = load_installation_config()
     except ConfigurationError as error:
         raise SystemExit(str(error))
     apply_installation_config(configuration)
+    telegram_notifier = create_telegram_notifier(
+        configuration.telegram_notifications_enabled,
+        configuration.telegram_bot_token,
+        configuration.telegram_chat_id,
+        error_handler=lambda message: print(message),
+    )
+    if getattr(runtime_args, "test_notification", False) is True:
+        try:
+            if not configuration.telegram_notifications_enabled:
+                raise SystemExit(
+                    "Telegram notifications are disabled; enable them before testing")
+            if not telegram_notifier.send_test(clock.now_utc()):
+                raise SystemExit("Telegram test notification failed")
+            print("Telegram test notification: OK")
+            return
+        finally:
+            telegram_notifier.close()
+            telegram_notifier = None
     install_table_snapshot_signal_handler()
     stop_event.clear()
     with shutdown_lock:

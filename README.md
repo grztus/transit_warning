@@ -65,6 +65,10 @@ Optional FlightAware MLAT Beast precision-track settings are
 `MLAT_BEAST_ENABLED` (disabled by default), `MLAT_BEAST_HOST` (defaults to
 `MLAT_HOST`), and `MLAT_BEAST_PORT` (normally `30105`).
 
+Optional outgoing Telegram alerts use `TELEGRAM_NOTIFICATIONS_ENABLED`
+(disabled by default), `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_CHAT_ID`. Credentials
+belong only in the private `.env` file.
+
 `ADSB_TIMESTAMP_TIMEZONE` describes the timezone used by the host producing the
 naive SBS timestamps. It is not the timezone of the computer running Transit
 Warning. Conversion uses the date of each record and the applicable IANA
@@ -88,6 +92,29 @@ Start normal RealClock operation with:
 ```console
 python transit_warning.py
 ```
+
+### Telegram notifications
+
+Create a bot with Telegram's `@BotFather`, place its token in
+`TELEGRAM_BOT_TOKEN`, and send a message to the new bot. Obtain the target chat
+ID from the Bot API `getUpdates` response, then set:
+
+```dotenv
+TELEGRAM_NOTIFICATIONS_ENABLED=true
+TELEGRAM_BOT_TOKEN=123456:replace-with-your-token
+TELEGRAM_CHAT_ID=replace-with-your-chat-id
+```
+
+Test the outgoing connection without starting aircraft receivers or the normal
+prediction loop:
+
+```console
+python transit_warning.py --test-notification
+```
+
+Alerts are predictions, not guarantees of a photographic transit. Checkpoint 1
+supports outgoing alerts only; incoming commands, webhooks, and observer
+location/GPS updates are intentionally not implemented.
 
 The application validates the installation configuration before creating the
 observer or starting the TCP threads. In RealClock mode it always records the
