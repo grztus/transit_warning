@@ -1,5 +1,7 @@
 import datetime
 import json
+from pathlib import Path
+import tempfile
 import unittest
 import urllib.request
 from types import SimpleNamespace
@@ -7,6 +9,7 @@ from unittest.mock import Mock, patch
 
 from config import ConfigurationError, load_installation_config
 import live_dashboard as dashboard
+from dashboard_history import DashboardHistoryStore
 import transit_warning as transit
 
 
@@ -153,6 +156,24 @@ class DashboardStateTests(unittest.TestCase):
                           "chat_id", "token"):
             self.assertNotIn(forbidden, encoded)
 
+    def test_retained_events_persist_but_insignificant_transient_does_not(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = DashboardHistoryStore(Path(directory) / "history")
+            state = dashboard.DashboardState(history_store=store)
+            state.publish(candidate("PASSED", seconds=1))
+            state.tick(NOW + datetime.timedelta(seconds=2))
+            state.publish(candidate("WITHD", seconds=600))
+            state.mark_history_worthy("WITHD", "SUN")
+            state.withdraw("WITHD", "SUN", NOW)
+            state.publish(candidate("SHORT", seconds=600))
+            state.withdraw("SHORT", "SUN", NOW)
+            restarted = DashboardHistoryStore(Path(directory) / "history")
+            records = restarted.query(limit=10)["records"]
+        self.assertEqual(["WITHD", "PASSED"],
+                         [item["icao"] for item in records])
+        self.assertEqual(["WITHDRAWN", "PASSED"],
+                         [item["outcome"] for item in records])
+
     def test_default_separation_classes_come_from_backend_thresholds(self):
         for index, (separation, expected) in enumerate((
                 (2.999, "GREEN"), (3.0, "YELLOW"),
@@ -232,6 +253,71 @@ class DashboardRuntimeTests(unittest.TestCase):
         self.assertIn("setInterval(refresh,3000)", html)
         self.assertIn("document.querySelectorAll('[data-utc]')", html)
 
+    def test_mobile_sep_uses_backend_class_and_time_is_seconds_only(self):
+        html = dashboard.DASHBOARD_HTML
+        self.assertIn("sepClass(c.separation_class)", html)
+        self.assertIn("eventTime(c.predicted_event_utc)", html)
+        self.assertIn("slice(11,19)+' UTC'", html)
+        javascript = html.split("<script>", 1)[1]
+        self.assertNotIn("separation_deg < 3", javascript)
+        self.assertNotIn("separation_deg < 5", javascript)
+        self.assertNotIn("separation_deg < 7", javascript)
+
+    def test_api_keeps_full_timestamp_and_history_is_separate_bounded_endpoint(self):
+        precise = NOW.replace(microsecond=697668)
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = dashboard.start_dashboard(
+                True, "127.0.0.1", 0, lambda: NOW,
+                history_dir=directory)
+            try:
+                runtime.publish(candidate(update=precise))
+                port = runtime.server.server_address[1]
+                with urllib.request.urlopen(
+                        "http://127.0.0.1:{}/api/state".format(port),
+                        timeout=2) as response:
+                    state = json.loads(response.read().decode("utf-8"))
+                with urllib.request.urlopen(
+                        "http://127.0.0.1:{}/api/history?limit=25".format(port),
+                        timeout=2) as response:
+                    history = json.loads(response.read().decode("utf-8"))
+            finally:
+                runtime.close()
+        self.assertEqual(
+            "2026-08-31T12:00:00.697668Z",
+            state["sun"]["candidates"][0]["last_prediction_update_utc"])
+        self.assertLessEqual(history["limit"], 100)
+        self.assertEqual([], history["records"])
+
+    def test_history_http_filters_paginates_and_exports_csv(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = dashboard.start_dashboard(
+                True, "127.0.0.1", 0, lambda: NOW,
+                history_dir=directory)
+            try:
+                for index in range(3):
+                    runtime.publish(candidate(
+                        "H{:05d}".format(index),
+                        body="MOON" if index == 1 else "SUN",
+                        seconds=index + 1))
+                    runtime.tick(NOW + datetime.timedelta(seconds=index + 1))
+                port = runtime.server.server_address[1]
+                url = ("http://127.0.0.1:{}/api/history?body=SUN&limit=1"
+                       .format(port))
+                with urllib.request.urlopen(url, timeout=2) as response:
+                    page = json.loads(response.read().decode("utf-8"))
+                with urllib.request.urlopen(
+                        "http://127.0.0.1:{}/api/history/export.csv?body=MOON"
+                        .format(port), timeout=2) as response:
+                    exported = response.read().decode("utf-8-sig")
+                    disposition = response.headers["Content-Disposition"]
+            finally:
+                runtime.close()
+        self.assertEqual(1, len(page["records"]))
+        self.assertTrue(page["has_more"])
+        self.assertIn("H00001", exported)
+        self.assertNotIn("H00000", exported)
+        self.assertIn("attachment", disposition)
+
     def test_health_is_active_with_empty_queues_and_fresh_heartbeat(self):
         state = dashboard.DashboardState()
         state.tick(NOW)
@@ -305,11 +391,17 @@ class DashboardConfigTests(unittest.TestCase):
             default.dashboard_sep_green_max_deg,
             default.dashboard_sep_yellow_max_deg,
             default.dashboard_sep_visible_max_deg))
+        self.assertTrue(default.dashboard_history_enabled)
+        self.assertEqual("recordings/dashboard_history",
+                         default.dashboard_history_dir)
 
     def test_invalid_dashboard_configuration(self):
         with self.assertRaises(ConfigurationError):
             self.load({**self.BASE, "DASHBOARD_HOST": " ",
                        "DASHBOARD_PORT": "70000"})
+        with self.assertRaisesRegex(ConfigurationError,
+                                   "DASHBOARD_HISTORY_DIR"):
+            self.load({**self.BASE, "DASHBOARD_HISTORY_DIR": " "})
 
 
 class ProductionIntegrationTests(unittest.TestCase):

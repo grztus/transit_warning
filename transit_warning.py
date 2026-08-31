@@ -3625,6 +3625,8 @@ def main():
         sep_green_max_deg=configuration.dashboard_sep_green_max_deg,
         sep_yellow_max_deg=configuration.dashboard_sep_yellow_max_deg,
         sep_visible_max_deg=configuration.dashboard_sep_visible_max_deg,
+        history_enabled=configuration.dashboard_history_enabled,
+        history_dir=configuration.dashboard_history_dir,
     )
     install_table_snapshot_signal_handler()
     stop_event.clear()

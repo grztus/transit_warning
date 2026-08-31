@@ -146,6 +146,8 @@ It is disabled and bound to localhost by default:
 DASHBOARD_ENABLED=false
 DASHBOARD_HOST=127.0.0.1
 DASHBOARD_PORT=8765
+DASHBOARD_HISTORY_ENABLED=true
+DASHBOARD_HISTORY_DIR=recordings/dashboard_history
 TMUX_SEP_GREEN_MAX_DEG=3
 TMUX_SEP_YELLOW_MAX_DEG=5
 TMUX_SEP_VISIBLE_MAX_DEG=7
@@ -175,8 +177,10 @@ absolute predicted UTC timestamps. A compact ACTIVE/STALE/DISCONNECTED indicator
 uses the main-loop heartbeat and polling results, independently of whether any
 candidates are present. Events which pass normally, reach the near-event window,
 or trigger a Telegram notification are retained in recent history; an early
-insignificant transient is discarded. Recent history is not persisted and is
-lost when Transit Warning restarts. Checkpoint 2 intentionally has no
+insignificant transient is discarded. Retained history is appended to daily UTC
+JSONL files under `DASHBOARD_HISTORY_DIR`; the 100-record in-memory list remains
+only a recent hot cache. History can be filtered by UTC date, callsign, and body,
+loaded in bounded pages, and exported as CSV. Checkpoint 2 intentionally has no
 authentication, so LAN binding should only be used on a trusted private network.
 
 The application validates the installation configuration before creating the
