@@ -441,7 +441,8 @@ class AutomaticSessionArchiveTests(unittest.TestCase):
         self.assertEqual(manifest["raw"]["line_count"], 0)
         with zipfile.ZipFile(recorder.session_dir / "streams.zip") as archive:
             self.assertEqual(set(archive.namelist()), {
-                "raw_30002.log", "adsb_30003.log", "mlat_30106.log"})
+                "raw_30002.log", "raw_30002_events.jsonl",
+                "adsb_30003.log", "mlat_30106.log"})
             self.assertEqual(archive.read("raw_30002.log"), b"")
             self.assertEqual(archive.read("adsb_30003.log"), b"ADS-B complete\n")
             self.assertEqual(archive.read("mlat_30106.log"), b"MLAT complete\n")

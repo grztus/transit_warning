@@ -73,6 +73,7 @@ import ephem
 import re
 import socket
 import threading
+from types import SimpleNamespace
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import wraps
@@ -92,7 +93,16 @@ from environment import (
 from metar import fetch_awc_metar
 from mlat_beast_track import decode_mlat_beast_tc19, truncation_bin_consistent
 from recording import RecordingStatus, SessionRecorder, archive_session
-from raw_adsb_track import decode_raw_tc19_track
+from raw_adsb_track import (
+    decode_raw_tc19_altitude,
+    decode_raw_tc19_track,
+    decode_raw_tc31_version,
+)
+from raw_adsb_diagnostic_replay import (
+    RawDiagnosticFormatError,
+    RawDiagnosticReplay,
+    iter_raw_diagnostic_events,
+)
 from transit_clock import ReplayClock, clock_from_args
 from transit_time import AdsBTimestampOffsetValidator, port_timestamp_to_utc
 from transit_snapshot import TransitSnapshotManager, runtime_git_commit
@@ -152,6 +162,7 @@ def parse_runtime_args(arguments):
     parser.add_argument("--clock", choices=("real", "replay"), default="real")
     parser.add_argument("--environment-replay")
     parser.add_argument("--environment-record")
+    parser.add_argument("--raw-diagnostics-replay")
     parser.add_argument("--record", action="store_true")
     args = parser.parse_args(arguments)
     if args.environment_replay is not None and args.environment_record is not None:
@@ -162,6 +173,8 @@ def parse_runtime_args(arguments):
         parser.error("--environment-record requires --clock real")
     if args.record and args.clock != "real":
         parser.error("--record requires --clock real")
+    if args.raw_diagnostics_replay is not None and args.clock != "replay":
+        parser.error("--raw-diagnostics-replay requires --clock replay")
     return args
 
 
@@ -170,6 +183,7 @@ clock = clock_from_args(["--clock", runtime_args.clock])
 replay_time_lock = threading.Lock()
 replay_time_initialized = not isinstance(clock, ReplayClock)
 environment_replay = None
+raw_diagnostic_replay = None
 environment_recorder = None
 daily_environment_recorder = None
 adsb_timestamp_validator = None
@@ -228,6 +242,8 @@ plane_dict = {}
 altitude_sources = {}
 aircraft_motion_states = {}
 raw_adsb_tracks = {}
+raw_adsb_versions = {}
+gnss_altitude_states = {}
 mlat_beast_tracks = {}
 mlat_coarse_tracks = {}
 aircraft_intent_states = {}
@@ -290,6 +306,24 @@ class RawAdsbTrackState:
     raw_updated_at_utc: datetime.datetime
     coarse_anchor_deg: float | None
     hold_valid: bool = True
+
+
+@dataclass(frozen=True)
+class RawAdsbVersionState:
+    adsb_version: int
+    updated_at_utc: datetime.datetime
+    datum: str
+
+
+@dataclass(frozen=True)
+class GnssAltitudeDiagnosticState:
+    gnss_minus_baro_ft: float | None
+    raw_encoded_value: int
+    tc19_subtype: int
+    updated_at_utc: datetime.datetime
+    available: bool
+    vertical_rate_source: str
+    receiver_timestamp_hex: str | None
 
 
 @dataclass
@@ -663,6 +697,153 @@ def update_raw_adsb_track(decoded, updated_at_utc):
         )
 
 
+def _adsb_datum_for_version(adsb_version):
+    return "WGS84_HAE" if adsb_version == 2 else "UNKNOWN"
+
+
+def update_raw_adsb_version(decoded, updated_at_utc):
+    """Store diagnostic ADS-B version without affecting motion state."""
+    with plane_dict_lock:
+        raw_adsb_versions[decoded.icao] = RawAdsbVersionState(
+            adsb_version=int(decoded.adsb_version),
+            updated_at_utc=updated_at_utc,
+            datum=_adsb_datum_for_version(int(decoded.adsb_version)),
+        )
+
+
+def update_gnss_altitude_diagnostic(decoded, updated_at_utc):
+    """Store diagnostic TC19 altitude difference; never select altitude."""
+    with plane_dict_lock:
+        gnss_altitude_states[decoded.icao] = GnssAltitudeDiagnosticState(
+            gnss_minus_baro_ft=decoded.gnss_minus_baro_ft,
+            raw_encoded_value=int(decoded.gnss_minus_baro_raw),
+            tc19_subtype=int(decoded.subtype),
+            updated_at_utc=updated_at_utc,
+            available=bool(decoded.available),
+            vertical_rate_source=str(decoded.vertical_rate_source),
+            receiver_timestamp_hex=decoded.receiver_timestamp_hex,
+        )
+
+
+def _latest_pressure_altitude_measurement(icao):
+    candidates = list(altitude_sources.get(icao, {}).values())
+    return max(candidates, key=lambda item: item.timestamp_utc) if candidates else None
+
+
+def gnss_altitude_snapshot_diagnostics(icao, now_utc):
+    """Return additive diagnostic data without changing production altitude."""
+    with plane_dict_lock:
+        state = gnss_altitude_states.get(icao)
+        version = raw_adsb_versions.get(icao)
+        measurement = _latest_pressure_altitude_measurement(icao)
+        result = {
+            "available": bool(state is not None and state.available),
+            "fresh": False,
+            "tc19_timestamp": _snapshot_utc_text(
+                state.updated_at_utc if state is not None else None),
+            "tc19_subtype": state.tc19_subtype if state is not None else None,
+            "receiver_timestamp_hex": (
+                state.receiver_timestamp_hex if state is not None else None),
+            "raw_encoded_value": (
+                state.raw_encoded_value if state is not None else None),
+            "gnss_minus_baro_ft": (
+                state.gnss_minus_baro_ft if state is not None else None),
+            "adsb_version": (
+                version.adsb_version if version is not None else None),
+            "adsb_version_timestamp": _snapshot_utc_text(
+                version.updated_at_utc if version is not None else None),
+            "datum": version.datum if version is not None else "UNKNOWN",
+            "vertical_rate_source": (
+                state.vertical_rate_source if state is not None else None),
+            "pressure_altitude_ft": None,
+            "pressure_altitude_timestamp": None,
+            "pressure_altitude_source": None,
+            "qnh_hpa": float(pressure),
+            "production_qnh_corrected_altitude_m": None,
+            "implied_gnss_altitude_ft": None,
+            "implied_gnss_hae_m": None,
+            "geoid_correction_m": None,
+            "derived_orthometric_altitude_m": None,
+            "altitude_difference_vs_production_m": None,
+            "provenance": "RAW_ADSB_TC19_DIAGNOSTIC",
+            "fallback_reason": None,
+        }
+        if state is None:
+            result["fallback_reason"] = "no_tc19"
+            return result
+        age = max(0.0, (now_utc - state.updated_at_utc).total_seconds())
+        if not state.available:
+            result["fallback_reason"] = "tc19_unavailable"
+            return result
+        if age > MOTION_FRESH_PARAMETER_SECONDS:
+            result["fallback_reason"] = "tc19_stale"
+            return result
+        result["fresh"] = True
+        if measurement is None:
+            result["fallback_reason"] = "pressure_altitude_unavailable"
+            return result
+        measurement_age = max(
+            0.0, (now_utc - measurement.timestamp_utc).total_seconds())
+        pair_delta = abs(
+            (state.updated_at_utc - measurement.timestamp_utc).total_seconds())
+        if (measurement_age > MOTION_FRESH_PARAMETER_SECONDS
+                or pair_delta > MOTION_FRESH_PARAMETER_SECONDS):
+            result["fallback_reason"] = "pressure_altitude_stale"
+            return result
+        implied_ft = (
+            float(measurement.altitude_baro_ft)
+            + float(state.gnss_minus_baro_ft))
+        result.update({
+            "pressure_altitude_ft": float(measurement.altitude_baro_ft),
+            "pressure_altitude_timestamp": _snapshot_utc_text(
+                measurement.timestamp_utc),
+            "pressure_altitude_source": measurement.source,
+            "production_qnh_corrected_altitude_m": float(
+                measurement.altitude_corrected_m),
+            "implied_gnss_altitude_ft": implied_ft,
+        })
+        if version is None:
+            result["fallback_reason"] = "adsb_version_unavailable"
+            return result
+        if version.datum != "WGS84_HAE":
+            result["fallback_reason"] = "datum_unknown"
+            return result
+        result.update({
+            "implied_gnss_hae_m": implied_ft * 0.3048,
+            "fallback_reason": "geoid_conversion_unavailable",
+        })
+        return result
+
+
+def raw_adsb_diagnostic_event(decoded, updated_at_utc):
+    """Build one compact deterministic TC19/TC31 journal record."""
+    if hasattr(decoded, "gnss_minus_baro_raw"):
+        return {
+            "version": 1,
+            "time": _snapshot_utc_text(updated_at_utc),
+            "icao": decoded.icao,
+            "message_type": "TC19",
+            "subtype": int(decoded.subtype),
+            "raw_encoded_value": int(decoded.gnss_minus_baro_raw),
+            "gnss_minus_baro_ft": decoded.gnss_minus_baro_ft,
+            "available": bool(decoded.available),
+            "vertical_rate_source": decoded.vertical_rate_source,
+            "receiver_timestamp_hex": decoded.receiver_timestamp_hex,
+            "provenance": "RAW_ADSB_TC19",
+        }
+    return {
+        "version": 1,
+        "time": _snapshot_utc_text(updated_at_utc),
+        "icao": decoded.icao,
+        "message_type": "TC31",
+        "subtype": int(decoded.subtype),
+        "adsb_version": int(decoded.adsb_version),
+        "datum": _adsb_datum_for_version(int(decoded.adsb_version)),
+        "receiver_timestamp_hex": decoded.receiver_timestamp_hex,
+        "provenance": "RAW_ADSB_TC31",
+    }
+
+
 def _confirm_mlat_beast_track(state, coarse, now_utc):
     if (coarse is None or coarse.source != "mlat"
             or max(0.0, (now_utc - coarse.updated_at_utc).total_seconds())
@@ -960,6 +1141,13 @@ def configure_environment_replay(path):
     )
 
 
+def configure_raw_diagnostic_replay(path):
+    global raw_diagnostic_replay
+    raw_diagnostic_replay = (
+        RawDiagnosticReplay(iter_raw_diagnostic_events(path))
+        if path is not None else None)
+
+
 def configure_environment_recording(path):
     global environment_recorder
     if path is None:
@@ -1029,6 +1217,30 @@ def apply_replay_environment(timestamp_utc):
     for event in environment_replay.pop_through(timestamp_utc):
         if event.type == "qnh":
             pressure = event.value_hpa
+
+
+def apply_replay_raw_diagnostics(timestamp_utc):
+    if raw_diagnostic_replay is None:
+        return
+    for event in raw_diagnostic_replay.pop_through(timestamp_utc):
+        record = event.record
+        if record["message_type"] == "TC19":
+            update_gnss_altitude_diagnostic(SimpleNamespace(
+                icao=record["icao"],
+                subtype=record["subtype"],
+                gnss_minus_baro_raw=record["raw_encoded_value"],
+                gnss_minus_baro_ft=record["gnss_minus_baro_ft"],
+                available=record["available"],
+                vertical_rate_source=record["vertical_rate_source"],
+                receiver_timestamp_hex=record.get(
+                    "receiver_timestamp_hex")), event.time)
+        else:
+            update_raw_adsb_version(SimpleNamespace(
+                icao=record["icao"],
+                subtype=record["subtype"],
+                adsb_version=record["adsb_version"],
+                receiver_timestamp_hex=record.get(
+                    "receiver_timestamp_hex")), event.time)
 
 
 def advance_replay_time(timestamp_utc):
@@ -1405,6 +1617,8 @@ def _capture_transit_prediction(icao, callsign, celestial_body,
                 float(transit_result[3]) - float(transit_result[9])),
         },
         "body_angular_diameter_arcsec": body_size,
+        "gnss_altitude_diagnostics": gnss_altitude_snapshot_diagnostics(
+            icao, now_utc),
         "frozen_prediction_state": frozen_prediction_state,
     })
 
@@ -1527,6 +1741,8 @@ def clean_dict():
         altitude_sources.pop(icao, None)
         aircraft_motion_states.pop(icao, None)
         raw_adsb_tracks.pop(icao, None)
+        raw_adsb_versions.pop(icao, None)
+        gnss_altitude_states.pop(icao, None)
         mlat_beast_tracks.pop(icao, None)
         mlat_coarse_tracks.pop(icao, None)
         aircraft_intent_states.pop(icao, None)
@@ -2524,6 +2740,8 @@ def clean_transit_dict():
         altitude_sources.pop(icao, None)
         aircraft_motion_states.pop(icao, None)
         raw_adsb_tracks.pop(icao, None)
+        raw_adsb_versions.pop(icao, None)
+        gnss_altitude_states.pop(icao, None)
         mlat_beast_tracks.pop(icao, None)
         mlat_coarse_tracks.pop(icao, None)
         aircraft_intent_states.pop(icao, None)
@@ -2714,11 +2932,29 @@ def read_raw_adsb_track(host, port, session_recorder=None):
                     except Exception:
                         pass
                 raw_adsb_track_diagnostics.frames_received += 1
+                received_at_utc = clock.now_utc()
+                altitude_diagnostic = decode_raw_tc19_altitude(line)
+                version_diagnostic = decode_raw_tc31_version(line)
+                diagnostic = altitude_diagnostic or version_diagnostic
+                if diagnostic is not None:
+                    if altitude_diagnostic is not None:
+                        update_gnss_altitude_diagnostic(
+                            altitude_diagnostic, received_at_utc)
+                    else:
+                        update_raw_adsb_version(
+                            version_diagnostic, received_at_utc)
+                    if session_recorder is not None:
+                        try:
+                            session_recorder.record_raw_diagnostic_event(
+                                raw_adsb_diagnostic_event(
+                                    diagnostic, received_at_utc))
+                        except Exception:
+                            pass
                 decoded = decode_raw_tc19_track(line)
                 if decoded is None:
                     raw_adsb_track_diagnostics.rejected_frames += 1
                     continue
-                update_raw_adsb_track(decoded, clock.now_utc())
+                update_raw_adsb_track(decoded, received_at_utc)
                 raw_adsb_track_diagnostics.valid_track_updates += 1
             if not stop_event.is_set() and stop_event.wait(5):
                 break
@@ -2844,6 +3080,7 @@ def process_line(line, port):
         advance_replay_time(logged_date_time_utc)
         if isinstance(clock, ReplayClock):
             apply_replay_environment(clock.now_utc())
+            apply_replay_raw_diagnostics(clock.now_utc())
 
     if mtype == "1":
         flight = parts[10].strip()
@@ -3187,6 +3424,15 @@ def main():
             get_metar_press()
     except (OSError, EnvironmentFormatError, EnvironmentRecordError) as error:
         raise SystemExit("Invalid environment file: {}".format(error))
+    try:
+        raw_replay_path = getattr(
+            runtime_args, "raw_diagnostics_replay", None)
+        if not isinstance(raw_replay_path, (str, os.PathLike)):
+            raw_replay_path = None
+        configure_raw_diagnostic_replay(
+            raw_replay_path)
+    except (OSError, RawDiagnosticFormatError) as error:
+        raise SystemExit("Invalid RAW diagnostic replay: {}".format(error))
 
     if session_recording_requested:
         try:

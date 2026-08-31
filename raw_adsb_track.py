@@ -17,6 +17,30 @@ class RawAdsbTrack:
     east_west_velocity_knots: float
     north_south_velocity_knots: float
     subtype: int
+    gnss_minus_baro_raw: int
+    gnss_minus_baro_ft: float | None
+    gnss_minus_baro_available: bool
+    vertical_rate_source: str
+    receiver_timestamp_hex: str | None
+
+
+@dataclass(frozen=True)
+class RawTc19Altitude:
+    icao: str
+    subtype: int
+    gnss_minus_baro_raw: int
+    gnss_minus_baro_ft: float | None
+    available: bool
+    vertical_rate_source: str
+    receiver_timestamp_hex: str | None
+
+
+@dataclass(frozen=True)
+class RawAdsbVersion:
+    icao: str
+    subtype: int
+    adsb_version: int
+    receiver_timestamp_hex: str | None
 
 
 def _bits(value, total_bits, start, end):
@@ -43,8 +67,7 @@ def extract_modes_hex(line):
     return text.upper() if RAW_FRAME_RE.fullmatch(text) else None
 
 
-def decode_raw_tc19_track(line):
-    """Decode a valid DF17 TC19 subtype 1/2 ground-velocity vector."""
+def _validated_message(line):
     message_hex = extract_modes_hex(line)
     if message_hex is None:
         return None
@@ -54,6 +77,62 @@ def decode_raw_tc19_track(line):
     value = int.from_bytes(message, "big")
     if _bits(value, 112, 0, 5) != 17:
         return None
+    text = str(line).strip()
+    if " " in text:
+        text = text.rsplit(None, 1)[-1]
+    receiver_timestamp = text[1:13].upper() if text.startswith("@") else None
+    return value, receiver_timestamp
+
+
+def decode_raw_tc19_altitude(line):
+    """Decode diagnostic TC19 GNSS-minus-baro without requiring velocity."""
+    parsed = _validated_message(line)
+    if parsed is None:
+        return None
+    value, receiver_timestamp = parsed
+    if _bits(value, 112, 32, 37) != 19:
+        return None
+    raw = _bits(value, 112, 81, 88)
+    available = raw not in (0, 127)
+    difference = None
+    if available:
+        difference = float((raw - 1) * 25)
+        if _bits(value, 112, 80, 81):
+            difference = -difference
+    return RawTc19Altitude(
+        icao="{:06X}".format(_bits(value, 112, 8, 32)),
+        subtype=_bits(value, 112, 37, 40),
+        gnss_minus_baro_raw=raw,
+        gnss_minus_baro_ft=difference,
+        available=available,
+        vertical_rate_source=(
+            "BAROMETRIC" if _bits(value, 112, 67, 68) else "GNSS"),
+        receiver_timestamp_hex=receiver_timestamp,
+    )
+
+
+def decode_raw_tc31_version(line):
+    """Decode ADS-B version from a valid TC31 operational-status message."""
+    parsed = _validated_message(line)
+    if parsed is None:
+        return None
+    value, receiver_timestamp = parsed
+    if _bits(value, 112, 32, 37) != 31:
+        return None
+    return RawAdsbVersion(
+        icao="{:06X}".format(_bits(value, 112, 8, 32)),
+        subtype=_bits(value, 112, 37, 40),
+        adsb_version=_bits(value, 112, 72, 75),
+        receiver_timestamp_hex=receiver_timestamp,
+    )
+
+
+def decode_raw_tc19_track(line):
+    """Decode a valid DF17 TC19 subtype 1/2 ground-velocity vector."""
+    parsed = _validated_message(line)
+    if parsed is None:
+        return None
+    value, receiver_timestamp = parsed
     if _bits(value, 112, 32, 37) != 19:
         return None
     subtype = _bits(value, 112, 37, 40)
@@ -71,10 +150,16 @@ def decode_raw_tc19_track(line):
     if _bits(value, 112, 56, 57):
         north_south = -north_south
     track = math.degrees(math.atan2(east_west, north_south)) % 360.0
+    altitude = decode_raw_tc19_altitude(line)
     return RawAdsbTrack(
         icao="{:06X}".format(_bits(value, 112, 8, 32)),
         track_deg=track,
         east_west_velocity_knots=float(east_west),
         north_south_velocity_knots=float(north_south),
         subtype=subtype,
+        gnss_minus_baro_raw=altitude.gnss_minus_baro_raw,
+        gnss_minus_baro_ft=altitude.gnss_minus_baro_ft,
+        gnss_minus_baro_available=altitude.available,
+        vertical_rate_source=altitude.vertical_rate_source,
+        receiver_timestamp_hex=receiver_timestamp,
     )

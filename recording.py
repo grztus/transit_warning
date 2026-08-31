@@ -69,7 +69,7 @@ def _manifest_archive_members(session_dir):
     for section_name, keys, required in (
             ("adsb", ("file",), True),
             ("mlat", ("file",), True),
-            ("raw", ("file",), False),
+            ("raw", ("file", "events_file"), False),
             ("mlat_beast", ("file", "events_file"), False)):
         section = manifest.get(section_name)
         if section is None:
@@ -106,6 +106,14 @@ def _validate_manifest_recorded_counts(session_dir):
         if actual_lines != int(section.get("line_count", -1)):
             raise ValueError("{} line count does not match manifest".format(
                 section_name))
+        if section_name == "raw" and section.get("events_file"):
+            events_path = session_dir / section["events_file"]
+            with events_path.open("rb") as events:
+                event_count = sum(1 for _ in events)
+            if event_count != int(section.get(
+                    "diagnostic_event_count", -1)):
+                raise ValueError(
+                    "raw diagnostic event count does not match manifest")
 
     section = manifest.get("mlat_beast")
     if not section or not section.get("file"):
@@ -518,6 +526,7 @@ class SessionRecorder:
         self._lock = threading.RLock()
         self.writers = {}
         self.mlat_beast_writer = None
+        self.raw_events_writer = None
 
         try:
             _utc_text(session_start_utc)
@@ -538,6 +547,10 @@ class SessionRecorder:
             self.writers[raw_port] = stream_writer_factory(
                 self.session_dir / "raw_{}.log".format(raw_port),
                 "RAW ADS-B", error_handler, monotonic=monotonic)
+            self.raw_events_writer = stream_writer_factory(
+                self.session_dir / "raw_{}_events.jsonl".format(raw_port),
+                "RAW ADS-B diagnostics", error_handler,
+                monotonic=monotonic)
         if mlat_beast_port is not None:
             self.mlat_beast_writer = mlat_beast_writer_factory(
                 self.session_dir / "mlat_beast_{}.bin".format(
@@ -623,6 +636,20 @@ class SessionRecorder:
                 raw, self.raw_port, "receiver-clock",
                 stream_format="raw-mode-s-text",
                 include_availability=True)
+            events = self.raw_events_writer
+            result["raw"].update({
+                "events_file": events.path.name if events is not None else None,
+                "diagnostics_format": "raw-adsb-diagnostics-jsonl-v1",
+                "diagnostic_event_count": (
+                    events.lines_written if events is not None else 0),
+                "diagnostics_status": (
+                    "failed" if events is not None
+                    and events.status == RecordingStatus.FAILED
+                    else "complete" if events is not None and self._closed
+                    else "recording" if events is not None else None),
+                "diagnostics_error": (
+                    events.error_message if events is not None else None),
+            })
         mlat_beast = self.mlat_beast_writer
         if mlat_beast is not None:
             if mlat_beast.status == RecordingStatus.FAILED:
@@ -684,6 +711,15 @@ class SessionRecorder:
             return False
         return self.mlat_beast_writer.record_bytes(chunk)
 
+    def record_raw_diagnostic_event(self, event):
+        if self._closed or self.raw_events_writer is None:
+            return False
+        try:
+            line = json.dumps(event, separators=(",", ":")) + "\n"
+        except Exception:
+            return False
+        return self.raw_events_writer.record_line(line)
+
     def record_mlat_beast_event(
             self, frame, received_at_utc, tc19_update=False):
         if self._closed or self.mlat_beast_writer is None:
@@ -695,6 +731,8 @@ class SessionRecorder:
         """Flush dirty writers whose one-second deadline has elapsed."""
         for writer in self.writers.values():
             writer.flush_if_due()
+        if self.raw_events_writer is not None:
+            self.raw_events_writer.flush_if_due()
         if self.mlat_beast_writer is not None:
             self.mlat_beast_writer.flush_if_due()
 
@@ -704,6 +742,8 @@ class SessionRecorder:
                 return
             for writer in self.writers.values():
                 writer.close()
+            if self.raw_events_writer is not None:
+                self.raw_events_writer.close()
             if self.mlat_beast_writer is not None:
                 self.mlat_beast_writer.close()
             try:

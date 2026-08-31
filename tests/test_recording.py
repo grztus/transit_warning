@@ -450,6 +450,15 @@ class ArchiveSessionTests(unittest.TestCase):
         recorder.record_line(30003, "ADS-B\n")
         recorder.record_line(30106, "MLAT\n")
         recorder.record_line(30002, "RAW\n")
+        raw_event = {
+            "version": 1, "time": "2026-08-17T20:44:17.502832Z",
+            "icao": "4BAB26", "message_type": "TC19", "subtype": 1,
+            "raw_encoded_value": 48, "gnss_minus_baro_ft": 1175.0,
+            "available": True, "vertical_rate_source": "BAROMETRIC",
+            "receiver_timestamp_hex": None,
+            "provenance": "RAW_ADSB_TC19",
+        }
+        self.assertTrue(recorder.record_raw_diagnostic_event(raw_event))
         beast_bytes = b"\x1a\x33\xff\x00MLAT\x00\x1a\x1a"
         frame = SimpleNamespace(
             frame_type=0x33, beast_timestamp=0xFF004D4C4154,
@@ -457,12 +466,21 @@ class ArchiveSessionTests(unittest.TestCase):
         recorder.record_mlat_beast_bytes(beast_bytes)
         recorder.record_mlat_beast_event(frame, START, True)
         recorder.close(START)
+        raw_manifest = recorder.manifest_data()["raw"]
+        self.assertEqual("raw_30002_events.jsonl",
+                         raw_manifest["events_file"])
+        self.assertEqual(1, raw_manifest["diagnostic_event_count"])
+        self.assertEqual("complete", raw_manifest["diagnostics_status"])
         self.assertTrue(archive_session(recorder.session_dir))
         with zipfile.ZipFile(recorder.session_dir / "streams.zip") as archive:
             self.assertEqual(set(archive.namelist()), {
                 "adsb_30003.log", "mlat_30106.log", "raw_30002.log",
+                "raw_30002_events.jsonl",
                 "mlat_beast_30105.bin",
                 "mlat_beast_30105_events.jsonl"})
+            recorded_event = json.loads(
+                archive.read("raw_30002_events.jsonl").decode("utf-8"))
+            self.assertEqual(raw_event, recorded_event)
             self.assertEqual(beast_bytes,
                              archive.read("mlat_beast_30105.bin"))
             self.assertIsNone(archive.testzip())
