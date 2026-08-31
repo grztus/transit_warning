@@ -124,39 +124,61 @@ class RawTrackPrecedenceTests(unittest.TestCase):
             effective = transit.effective_track_parameter("4BAA92", 150, NOW)
             self.assertEqual("RAW_ADSB_TC19_HELD", effective.source)
 
-    def test_coarse_track_change_up_invalidates_hold_immediately(self):
+    def test_adjacent_coarse_bucket_does_not_invalidate_hold(self):
         self.add_fallback(value=151.0)
         self.add_raw(raw_age=10.0)
         effective = transit.effective_track_parameter("4BAA92", 151, NOW)
-        self.assertEqual((151.0, "adsb"), (effective.value, effective.source))
-        self.assertFalse(transit.raw_adsb_tracks["4BAA92"].hold_valid)
+        self.assertEqual("RAW_ADSB_TC19_HELD", effective.source)
+        self.assertTrue(transit.raw_adsb_tracks["4BAA92"].hold_valid)
 
-    def test_coarse_track_change_down_invalidates_hold_immediately(self):
+    def test_intermediate_disagreement_requires_two_distinct_updates(self):
         self.add_fallback(value=149.0)
         self.add_raw(raw_age=10.0)
         effective = transit.effective_track_parameter("4BAA92", 149, NOW)
+        self.assertEqual("RAW_ADSB_TC19_HELD", effective.source)
+        transit.aircraft_motion_states["4BAA92"].track = MotionParameter(
+            149.0, NOW + datetime.timedelta(seconds=1), "adsb")
+        effective = transit.effective_track_parameter(
+            "4BAA92", 149, NOW + datetime.timedelta(seconds=1))
         self.assertEqual((149.0, "adsb"), (effective.value, effective.source))
         self.assertFalse(transit.raw_adsb_tracks["4BAA92"].hold_valid)
 
-    def test_invalidated_raw_does_not_resurrect_when_coarse_returns_to_anchor(self):
-        self.add_fallback(value=151.0)
+    def test_large_disagreement_invalidates_hold_immediately(self):
+        self.add_fallback(value=154.0)
         self.add_raw(raw_age=10.0)
-        transit.effective_track_parameter("4BAA92", 151, NOW)
+        effective = transit.effective_track_parameter("4BAA92", 154, NOW)
+        self.assertEqual((154.0, "adsb"), (effective.value, effective.source))
+        self.assertFalse(transit.raw_adsb_tracks["4BAA92"].hold_valid)
+
+    def test_hold_expires_after_twenty_seconds(self):
+        self.add_fallback()
+        self.add_raw(raw_age=20.0)
+        self.assertEqual("RAW_ADSB_TC19_HELD",
+                         transit.effective_track_parameter(
+                             "4BAA92", 150, NOW).source)
+        self.add_raw(raw_age=20.001)
+        self.assertEqual("adsb", transit.effective_track_parameter(
+            "4BAA92", 150, NOW).source)
+
+    def test_invalidated_raw_does_not_resurrect_when_coarse_returns_to_anchor(self):
+        self.add_fallback(value=154.0)
+        self.add_raw(raw_age=10.0)
+        transit.effective_track_parameter("4BAA92", 154, NOW)
         transit.aircraft_motion_states["4BAA92"].track = MotionParameter(
             150.0, NOW, "adsb")
         effective = transit.effective_track_parameter("4BAA92", 150, NOW)
         self.assertEqual((150.0, "adsb"), (effective.value, effective.source))
 
     def test_new_raw_frame_reestablishes_anchor_after_invalidation(self):
-        self.add_fallback(value=151.0)
+        self.add_fallback(value=154.0)
         self.add_raw(raw_age=10.0)
-        transit.effective_track_parameter("4BAA92", 151, NOW)
+        transit.effective_track_parameter("4BAA92", 154, NOW)
         decoded = decode_raw_tc19_track(FRAME_SOUTHEAST)
         transit.update_raw_adsb_track(decoded, NOW)
-        effective = transit.effective_track_parameter("4BAA92", 151, NOW)
+        effective = transit.effective_track_parameter("4BAA92", 154, NOW)
         self.assertEqual(decoded.track_deg, effective.value)
         self.assertEqual("RAW_ADSB_TC19_FRESH", effective.source)
-        self.assertEqual(151.0,
+        self.assertEqual(154.0,
                          transit.raw_adsb_tracks["4BAA92"].coarse_anchor_deg)
 
     def test_stale_raw_and_stale_coarse_does_not_use_held_value(self):
@@ -173,11 +195,11 @@ class RawTrackPrecedenceTests(unittest.TestCase):
         effective = transit.effective_track_parameter("4BAA92", 150, NOW)
         self.assertEqual("RAW_ADSB_TC19_HELD", effective.source)
 
-    def test_source_change_to_different_mlat_track_invalidates_hold(self):
-        self.add_fallback(value=151.0, source="mlat")
+    def test_source_change_to_large_different_mlat_track_invalidates_hold(self):
+        self.add_fallback(value=154.0, source="mlat")
         self.add_raw(raw_age=10.0)
-        effective = transit.effective_track_parameter("4BAA92", 151, NOW)
-        self.assertEqual((151.0, "mlat"), (effective.value, effective.source))
+        effective = transit.effective_track_parameter("4BAA92", 154, NOW)
+        self.assertEqual((154.0, "mlat"), (effective.value, effective.source))
 
     def test_display_uses_decimal_for_fresh_and_held_only(self):
         self.add_fallback()

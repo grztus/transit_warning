@@ -42,6 +42,7 @@ class InstallationConfig:
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     telegram_alert_separation_deg: float = 2.0
+    telegram_alert_stability_seconds: float = 5.0
     dashboard_enabled: bool = False
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8765
@@ -138,6 +139,24 @@ def _optional_finite_float(values, name, default, errors,
     return value
 
 
+def _optional_nonnegative_float(values, name, default, errors,
+                                maximum=None):
+    raw_value = str(values.get(name, default)).strip()
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        errors.append("{} must be a number".format(name))
+        return None
+    if not math.isfinite(value):
+        errors.append("{} must be a finite number".format(name))
+        return None
+    if value < 0 or (maximum is not None and value > maximum):
+        errors.append("{} must be in the range 0..{}".format(
+            name, maximum))
+        return None
+    return value
+
+
 def _metar_station(values, errors):
     value = _required(values, "METAR_STATION", errors)
     if value is None:
@@ -204,6 +223,9 @@ def load_installation_config(
     telegram_alert_separation_deg = _optional_finite_float(
         values, "TELEGRAM_ALERT_SEPARATION_DEG", 2.0, errors,
         minimum=0.0, maximum=180.0)
+    telegram_alert_stability_seconds = _optional_nonnegative_float(
+        values, "TELEGRAM_ALERT_STABILITY_SECONDS", 5.0, errors,
+        maximum=900.0)
     dashboard_enabled = _boolean(values, "DASHBOARD_ENABLED", False, errors)
     dashboard_host = _host(values, "DASHBOARD_HOST", "127.0.0.1", errors)
     dashboard_port = _port(values, "DASHBOARD_PORT", 8765, errors)
@@ -245,6 +267,7 @@ def load_installation_config(
         telegram_bot_token=telegram_bot_token,
         telegram_chat_id=telegram_chat_id,
         telegram_alert_separation_deg=telegram_alert_separation_deg,
+        telegram_alert_stability_seconds=telegram_alert_stability_seconds,
         dashboard_enabled=dashboard_enabled,
         dashboard_host=dashboard_host,
         dashboard_port=dashboard_port,

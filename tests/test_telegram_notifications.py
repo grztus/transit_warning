@@ -13,10 +13,11 @@ UTC = datetime.timezone.utc
 NOW = datetime.datetime(2026, 8, 31, 12, 0, tzinfo=UTC)
 
 
-def event(body="MOON", seconds=42, separation=0.31):
+def event(body="MOON", seconds=42, separation=0.31, created=NOW,
+          icao="4BAB26", callsign="THY7DB"):
     return telegram.TransitNotification(
-        created_at_utc=NOW, body=body, icao="4BAB26", callsign="THY7DB",
-        predicted_transit_utc=NOW + datetime.timedelta(seconds=seconds),
+        created_at_utc=created, body=body, icao=icao, callsign=callsign,
+        predicted_transit_utc=created + datetime.timedelta(seconds=seconds),
         time_to_event_seconds=seconds, separation_deg=separation,
         body_azimuth_deg=88.0, body_altitude_deg=6.2,
         aircraft_altitude_deg=6.51, distance_km=100.0)
@@ -62,6 +63,70 @@ class TelegramNotifierTests(unittest.TestCase):
         finally:
             notifier.close()
         self.assertEqual(1, len(transport.messages))
+
+    def test_stability_requires_five_continuous_seconds(self):
+        transport = FakeTransport()
+        notifier = telegram.TelegramNotifier(
+            transport, stability_seconds=5.0)
+        try:
+            self.assertFalse(notifier.consider(event()))
+            self.assertFalse(notifier.consider(event(
+                created=NOW + datetime.timedelta(seconds=4))))
+            self.assertTrue(notifier.consider(event(
+                created=NOW + datetime.timedelta(seconds=5))))
+            self.assertTrue(transport.sent.wait(1))
+        finally:
+            notifier.close()
+        self.assertEqual(1, len(transport.messages))
+
+    def test_cancel_resets_pending_stability_interval(self):
+        notifier = telegram.TelegramNotifier(
+            FakeTransport(), stability_seconds=5.0)
+        try:
+            self.assertFalse(notifier.consider(event()))
+            self.assertTrue(notifier.cancel("4BAB26", "MOON"))
+            self.assertFalse(notifier.consider(event(
+                created=NOW + datetime.timedelta(seconds=5))))
+            self.assertFalse(notifier.consider(event(
+                created=NOW + datetime.timedelta(seconds=9))))
+            self.assertTrue(notifier.consider(event(
+                created=NOW + datetime.timedelta(seconds=10))))
+        finally:
+            notifier.close()
+
+    def test_zero_stability_preserves_immediate_send(self):
+        notifier = telegram.TelegramNotifier(
+            FakeTransport(), stability_seconds=0)
+        try:
+            self.assertTrue(notifier.consider(event()))
+        finally:
+            notifier.close()
+
+    def test_same_icao_can_alert_again_after_previous_event_expiry(self):
+        notifier = telegram.TelegramNotifier(
+            FakeTransport(), stability_seconds=0)
+        try:
+            self.assertTrue(notifier.consider(event(callsign="FIRST")))
+            self.assertFalse(notifier.consider(event(
+                created=NOW + datetime.timedelta(seconds=30),
+                callsign="CHANGED")))
+            later = NOW + datetime.timedelta(hours=2)
+            self.assertTrue(notifier.consider(event(
+                created=later, callsign="SECOND")))
+        finally:
+            notifier.close()
+
+    def test_sun_and_moon_pending_states_are_independent(self):
+        notifier = telegram.TelegramNotifier(
+            FakeTransport(), stability_seconds=5.0)
+        try:
+            self.assertFalse(notifier.consider(event("SUN")))
+            self.assertFalse(notifier.consider(event("MOON")))
+            at_five = NOW + datetime.timedelta(seconds=5)
+            self.assertTrue(notifier.consider(event("SUN", created=at_five)))
+            self.assertTrue(notifier.consider(event("MOON", created=at_five)))
+        finally:
+            notifier.close()
 
     def test_https_transport_posts_chat_and_message_with_timeout(self):
         captured = {}
@@ -133,6 +198,7 @@ class TelegramConfigTests(unittest.TestCase):
         self.assertEqual("", config.telegram_bot_token)
         self.assertEqual("", config.telegram_chat_id)
         self.assertEqual(2.0, config.telegram_alert_separation_deg)
+        self.assertEqual(5.0, config.telegram_alert_stability_seconds)
 
     def test_enabled_requires_token_and_chat(self):
         with self.assertRaises(ConfigurationError) as caught:
@@ -153,6 +219,22 @@ class TelegramConfigTests(unittest.TestCase):
                         **self.BASE,
                         "TELEGRAM_ALERT_SEPARATION_DEG": invalid})
 
+    def test_alert_stability_is_configurable_and_allows_zero(self):
+        self.assertEqual(0.0, self.load({
+            **self.BASE, "TELEGRAM_ALERT_STABILITY_SECONDS": "0",
+        }).telegram_alert_stability_seconds)
+        self.assertEqual(7.5, self.load({
+            **self.BASE, "TELEGRAM_ALERT_STABILITY_SECONDS": "7.5",
+        }).telegram_alert_stability_seconds)
+        for invalid in ("-0.1", "901", "nan", "bad"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(
+                        ConfigurationError,
+                        "TELEGRAM_ALERT_STABILITY_SECONDS"):
+                    self.load({
+                        **self.BASE,
+                        "TELEGRAM_ALERT_STABILITY_SECONDS": invalid})
+
 
 class TransitIntegrationTests(unittest.TestCase):
     def setUp(self):
@@ -166,22 +248,23 @@ class TransitIntegrationTests(unittest.TestCase):
 
     def test_emit_uses_configured_condition_and_is_fail_open(self):
         notifier = Mock()
-        notifier.notify.side_effect = RuntimeError("network")
+        notifier.consider.side_effect = RuntimeError("network")
         transit.telegram_notifier = notifier
         result = (51, 21, 88, 6.5, 10, 100, 42, 0, 88, 6.2, NOW)
         self.assertFalse(transit.emit_transit_notification(
             "4BAB26", "THY7DB", "moon", result, NOW, 100))
-        notifier.notify.assert_called_once()
+        notifier.consider.assert_called_once()
         notifier.reset_mock()
         outside = list(result)
         outside[3] = 10.0
         self.assertFalse(transit.emit_transit_notification(
             "4BAB26", "THY7DB", "moon", tuple(outside), NOW, 100))
-        notifier.notify.assert_not_called()
+        notifier.consider.assert_not_called()
+        notifier.cancel.assert_called_once()
 
     def test_telegram_two_degree_threshold_is_independent_of_gong(self):
         notifier = Mock()
-        notifier.notify.return_value = True
+        notifier.consider.return_value = True
         transit.telegram_notifier = notifier
         inside = (51, 21, 88, 7.99, 10, 100, 42, 0, 88, 6.0, NOW)
         boundary = (51, 21, 88, 8.0, 10, 100, 42, 0, 88, 6.0, NOW)
@@ -192,7 +275,7 @@ class TransitIntegrationTests(unittest.TestCase):
             "A00002", "TWO", "moon", boundary, NOW, 100))
         self.assertFalse(transit.emit_transit_notification(
             "A00003", "THREE", "moon", audible_only, NOW, 100))
-        self.assertEqual(1, notifier.notify.call_count)
+        self.assertEqual(1, notifier.consider.call_count)
 
     def test_telegram_horizon_requires_strictly_positive_time(self):
         notifier = Mock()
@@ -203,7 +286,7 @@ class TransitIntegrationTests(unittest.TestCase):
             self.assertFalse(transit.emit_transit_notification(
                 "4BAB26", "THY7DB", "moon", result, NOW, 100))
         result = (51, 21, 88, 6.5, 10, 100, 900.0, 0, 88, 6.2, NOW)
-        notifier.notify.return_value = True
+        notifier.consider.return_value = True
         self.assertTrue(transit.emit_transit_notification(
             "4BAB26", "THY7DB", "moon", result, NOW, 100))
 

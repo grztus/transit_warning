@@ -222,6 +222,10 @@ MOTION_FRESH_PARAMETER_SECONDS = 5.0
 MOTION_FRESH_DELTA_SECONDS = 3.0
 MOTION_STALE_SECONDS = 10.0
 MOTION_STALE_DELTA_SECONDS = 10.0
+PRECISION_TRACK_HOLD_SECONDS = 20.0
+PRECISION_TRACK_COMPATIBLE_DELTA_DEG = 1.5
+PRECISION_TRACK_IMMEDIATE_REJECT_DELTA_DEG = 3.0
+PRECISION_TRACK_PERSISTENT_UPDATES = 2
 TRANSIT_SNAPSHOT_SEP_THRESHOLD_DEG = 0.5
 TRANSIT_SNAPSHOT_ARM_SECONDS = 15.0
 TRANSIT_SNAPSHOT_FINALIZE_GRACE_SECONDS = 2.0
@@ -320,6 +324,8 @@ class RawAdsbTrackState:
     raw_updated_at_utc: datetime.datetime
     coarse_anchor_deg: float | None
     hold_valid: bool = True
+    last_coarse_evaluated_utc: datetime.datetime | None = None
+    coarse_disagreement_updates: int = 0
 
 
 @dataclass(frozen=True)
@@ -353,6 +359,8 @@ class MlatBeastTrackState:
     coarse_anchor_timestamp_utc: datetime.datetime | None = None
     confirmed: bool = False
     hold_valid: bool = True
+    last_coarse_evaluated_utc: datetime.datetime | None = None
+    coarse_disagreement_updates: int = 0
 
 
 @dataclass(frozen=True)
@@ -568,6 +576,7 @@ mlat_beast_enabled = False
 mlat_beast_host = None
 mlat_beast_port = None
 telegram_alert_separation_deg = 2.0
+telegram_alert_stability_seconds = 5.0
 
 
 def apply_installation_config(configuration: InstallationConfig):
@@ -577,7 +586,7 @@ def apply_installation_config(configuration: InstallationConfig):
     global mlat_host, mlat_port, beast_host, beast_port
     global raw_adsb_host, raw_adsb_port, mlat_beast_enabled
     global mlat_beast_host, mlat_beast_port, port_status
-    global telegram_alert_separation_deg
+    global telegram_alert_separation_deg, telegram_alert_stability_seconds
     my_lat = configuration.observer_lat
     my_lon = configuration.observer_lon
     my_elevation_const = configuration.observer_elevation_m
@@ -601,6 +610,8 @@ def apply_installation_config(configuration: InstallationConfig):
     mlat_beast_port = configuration.mlat_beast_port
     telegram_alert_separation_deg = (
         configuration.telegram_alert_separation_deg)
+    telegram_alert_stability_seconds = (
+        configuration.telegram_alert_stability_seconds)
     gatech = ephem.Observer()
     gatech.lat, gatech.lon = str(my_lat), str(my_lon)
     gatech.elevation = my_elevation_const
@@ -883,11 +894,44 @@ def _reconcile_mlat_beast_track(icao, coarse, now_utc):
         return
     if not state.confirmed:
         _confirm_mlat_beast_track(state, coarse, now_utc)
-        return
-    anchor_time = state.coarse_anchor_timestamp_utc
-    if (anchor_time is not None and coarse.updated_at_utc > anchor_time
-            and float(coarse.value) != state.coarse_anchor_deg):
+
+
+def _track_delta_degrees(left, right):
+    return abs((float(left) - float(right) + 180.0) % 360.0 - 180.0)
+
+
+def _held_precision_is_valid(state, precise_value, precise_updated_at,
+                             coarse, now_utc, coarse_source=None):
+    """Apply bounded, coarse-confirmed hysteresis to stale precision."""
+    if not state.hold_valid:
+        return False
+    precise_age = max(
+        0.0, (now_utc - precise_updated_at).total_seconds())
+    if precise_age > PRECISION_TRACK_HOLD_SECONDS:
+        return False
+    if coarse is None or (coarse_source is not None
+                          and coarse.source != coarse_source):
+        return False
+    coarse_age = max(
+        0.0, (now_utc - coarse.updated_at_utc).total_seconds())
+    if coarse_age > MOTION_FRESH_PARAMETER_SECONDS:
+        return False
+
+    difference = _track_delta_degrees(coarse.value, precise_value)
+    if difference <= PRECISION_TRACK_COMPATIBLE_DELTA_DEG:
+        state.coarse_disagreement_updates = 0
+        state.last_coarse_evaluated_utc = coarse.updated_at_utc
+        return True
+    if difference >= PRECISION_TRACK_IMMEDIATE_REJECT_DELTA_DEG:
         state.hold_valid = False
+        return False
+    if state.last_coarse_evaluated_utc != coarse.updated_at_utc:
+        state.last_coarse_evaluated_utc = coarse.updated_at_utc
+        state.coarse_disagreement_updates += 1
+    if state.coarse_disagreement_updates >= PRECISION_TRACK_PERSISTENT_UPDATES:
+        state.hold_valid = False
+        return False
+    return True
 
 
 def update_mlat_beast_track(decoded, updated_at_utc):
@@ -912,24 +956,15 @@ def _effective_mlat_beast_track_locked(icao, now_utc):
     if state is None or not state.confirmed or not state.hold_valid:
         return None
     coarse = mlat_coarse_tracks.get(icao)
-    if (coarse is not None
-            and state.coarse_anchor_timestamp_utc is not None
-            and coarse.updated_at_utc > state.coarse_anchor_timestamp_utc
-            and float(coarse.value) != state.coarse_anchor_deg):
-        state.hold_valid = False
-        return None
     precise_age = max(
         0.0, (now_utc - state.received_at_utc).total_seconds())
     if precise_age <= MOTION_FRESH_PARAMETER_SECONDS:
         return MotionParameter(
             state.precise_value_deg, state.received_at_utc,
             "MLAT_BEAST_TC19_FRESH")
-    coarse_age = (
-        max(0.0, (now_utc - coarse.updated_at_utc).total_seconds())
-        if coarse is not None else None)
-    if (coarse is not None and coarse.source == "mlat"
-            and coarse_age <= MOTION_FRESH_PARAMETER_SECONDS
-            and float(coarse.value) == state.coarse_anchor_deg):
+    if _held_precision_is_valid(
+            state, state.precise_value_deg, state.received_at_utc,
+            coarse, now_utc, coarse_source="mlat"):
         return MotionParameter(
             state.precise_value_deg, coarse.updated_at_utc,
             "MLAT_BEAST_TC19_HELD")
@@ -942,31 +977,23 @@ def effective_track_parameter(icao, fallback_track=None, now_utc=None):
     with plane_dict_lock:
         state = aircraft_motion_states.get(icao)
         coarse = state.track if state is not None else None
-        coarse_age = (
-            max(0.0, (now - coarse.updated_at_utc).total_seconds())
-            if coarse is not None else None)
-        coarse_fresh = (
-            coarse_age is not None
-            and coarse_age <= MOTION_FRESH_PARAMETER_SECONDS)
         raw_track = raw_adsb_tracks.get(icao)
         if raw_track is not None and raw_track.hold_valid:
-            anchor = raw_track.coarse_anchor_deg
-            if (anchor is not None and coarse_fresh
-                    and coarse.value != anchor):
-                raw_track.hold_valid = False
-            else:
-                raw_age = max(
-                    0.0, (now - raw_track.raw_updated_at_utc).total_seconds())
-                if raw_age <= MOTION_FRESH_PARAMETER_SECONDS:
-                    return MotionParameter(
-                        raw_track.precise_value_deg,
-                        raw_track.raw_updated_at_utc,
-                        "RAW_ADSB_TC19_FRESH")
-                if anchor is not None and coarse_fresh and coarse.value == anchor:
-                    return MotionParameter(
-                        raw_track.precise_value_deg,
-                        coarse.updated_at_utc,
-                        "RAW_ADSB_TC19_HELD")
+            raw_age = max(
+                0.0, (now - raw_track.raw_updated_at_utc).total_seconds())
+            if raw_age <= MOTION_FRESH_PARAMETER_SECONDS:
+                return MotionParameter(
+                    raw_track.precise_value_deg,
+                    raw_track.raw_updated_at_utc,
+                    "RAW_ADSB_TC19_FRESH")
+            if (raw_track.coarse_anchor_deg is not None
+                    and _held_precision_is_valid(
+                        raw_track, raw_track.precise_value_deg,
+                        raw_track.raw_updated_at_utc, coarse, now)):
+                return MotionParameter(
+                    raw_track.precise_value_deg,
+                    coarse.updated_at_utc,
+                    "RAW_ADSB_TC19_HELD")
         position = state.position if state is not None else None
         if (mlat_beast_enabled and position is not None
                 and position.source == "mlat"):
@@ -1656,7 +1683,14 @@ def emit_transit_notification(icao, callsign, celestial_body,
                               transit_result, now_utc, distance_km,
                               separation_deg=None):
     """Emit an already-computed interesting prediction, always fail-open."""
-    if telegram_notifier is None or not transit_result:
+    if telegram_notifier is None:
+        return False
+    body = celestial_body.upper()
+    if not transit_result:
+        try:
+            telegram_notifier.cancel(icao, body)
+        except Exception:
+            pass
         return False
     try:
         separation = (
@@ -1665,10 +1699,11 @@ def emit_transit_notification(icao, callsign, celestial_body,
         time_to_event = float(transit_result[6])
         if not (0 < time_to_event <= 900
                 and separation < telegram_alert_separation_deg):
+            telegram_notifier.cancel(icao, body)
             return False
         event = TransitNotification(
             created_at_utc=now_utc,
-            body=celestial_body.upper(),
+            body=body,
             icao=icao,
             callsign=callsign or None,
             predicted_transit_utc=(
@@ -1680,7 +1715,19 @@ def emit_transit_notification(icao, callsign, celestial_body,
             aircraft_altitude_deg=float(transit_result[3]),
             distance_km=float(distance_km),
         )
-        return telegram_notifier.notify(event)
+        return telegram_notifier.consider(event)
+    except Exception:
+        return False
+
+
+def cancel_pending_transit_notification(icao, celestial_body=None):
+    """Reset only unsent Telegram stability state, always fail-open."""
+    if telegram_notifier is None:
+        return False
+    try:
+        if celestial_body is None:
+            return telegram_notifier.cancel_aircraft(icao)
+        return telegram_notifier.cancel(icao, celestial_body.upper())
     except Exception:
         return False
 
@@ -1797,6 +1844,7 @@ def clear_transit_prediction_state(icao, entry, celestial_body,
     last_valid.pop(icao, None)
     predicted_times.pop(icao, None)
     vertical_transit_diagnostics.pop((icao, celestial_body), None)
+    cancel_pending_transit_notification(icao, celestial_body)
     try:
         dashboard_runtime.withdraw(icao, celestial_body, clock.now_utc())
     except Exception:
@@ -1833,6 +1881,7 @@ def clean_dict():
     current_time = clock.now_utc()
     to_delete = [icao for icao, entry in plane_dict.items() if (current_time - entry[0]).total_seconds() > MAX_AGE_SECONDS]
     for icao in to_delete:
+        cancel_pending_transit_notification(icao)
         try:
             dashboard_runtime.withdraw_aircraft(icao, current_time)
         except Exception:
@@ -2043,8 +2092,6 @@ def _snapshot_mlat_beast_track(
             reason = "CONFIRMATION_TIME_DELTA"
         elif not bin_consistent:
             reason = "COARSE_BIN_MISMATCH"
-    elif not state.hold_valid:
-        reason = "COARSE_ANCHOR_CHANGED"
     elif position is None or position.source != "mlat":
         reason = "POSITION_SOURCE_NOT_MLAT"
     elif precise_age <= MOTION_FRESH_PARAMETER_SECONDS:
@@ -2055,26 +2102,26 @@ def _snapshot_mlat_beast_track(
             if selected_source in (
                 "RAW_ADSB_TC19_FRESH", "RAW_ADSB_TC19_HELD")
             else "NOT_SELECTED")
-    elif (coarse is not None and coarse.source == "mlat"
-          and coarse_age <= MOTION_FRESH_PARAMETER_SECONDS
-          and float(coarse.value) == state.coarse_anchor_deg):
+    elif selected_source == "MLAT_BEAST_TC19_HELD":
         freshness = "HELD"
-        reason = (
-            "SELECTED" if selected_source == "MLAT_BEAST_TC19_HELD"
-            else "RAW_ADSB_PRIORITY"
-            if selected_source in (
-                "RAW_ADSB_TC19_FRESH", "RAW_ADSB_TC19_HELD")
-            else "NOT_SELECTED")
+        reason = "SELECTED"
+    elif selected_source in (
+            "RAW_ADSB_TC19_FRESH", "RAW_ADSB_TC19_HELD"):
+        freshness = (
+            "FRESH" if selected_source.endswith("_FRESH") else "HELD")
+        reason = "RAW_ADSB_PRIORITY"
+    elif not state.hold_valid:
+        reason = "COURSE_CHANGE"
+    elif precise_age > PRECISION_TRACK_HOLD_SECONDS:
+        reason = "PRECISION_TRACK_EXPIRED"
     elif coarse is None:
         reason = "NO_MLAT_COARSE_TRACK"
     elif coarse.source != "mlat":
         reason = "COARSE_SOURCE_NOT_MLAT"
     elif coarse_age > MOTION_FRESH_PARAMETER_SECONDS:
         reason = "COARSE_TRACK_STALE"
-    elif float(coarse.value) != state.coarse_anchor_deg:
-        reason = "COARSE_ANCHOR_CHANGED"
     else:
-        reason = "PRECISION_TRACK_EXPIRED"
+        reason = "NOT_SELECTED"
 
     return {
         "effective_track_value_deg": (
@@ -2099,6 +2146,7 @@ def _snapshot_mlat_beast_track(
             state.coarse_anchor_timestamp_utc),
         "confirmed": state.confirmed,
         "hold_valid": state.hold_valid,
+        "coarse_disagreement_updates": state.coarse_disagreement_updates,
         "freshness_classification": freshness,
         "quality_reason": reason,
         "precise_age_seconds": precise_age,
@@ -2836,6 +2884,7 @@ def clean_transit_dict():
     current_time = clock.now_utc()
     to_delete = [icao for icao, entry in plane_dict.items() if len(entry) > 31 and entry[31] and isinstance(entry[30], datetime.datetime) and (current_time - entry[30]).total_seconds() > 120]
     for icao in to_delete:
+        cancel_pending_transit_notification(icao)
         try:
             dashboard_runtime.withdraw_aircraft(icao, current_time)
         except Exception:
@@ -3402,6 +3451,7 @@ def process_line(line, port):
         if distance > alert_distance and plane_dict[icao][8] == "ENTERING":
             plane_dict[icao][8] = "LEAVING"
         if motion_freshness.status == MotionFreshnessStatus.STALE:
+            cancel_pending_transit_notification(icao)
             try:
                 dashboard_runtime.withdraw_aircraft(icao, clock.now_utc())
             except Exception:
@@ -3544,6 +3594,7 @@ def main():
         configuration.telegram_notifications_enabled,
         configuration.telegram_bot_token,
         configuration.telegram_chat_id,
+        stability_seconds=configuration.telegram_alert_stability_seconds,
         error_handler=lambda message: print(message),
     )
     if getattr(runtime_args, "test_notification", False) is True:

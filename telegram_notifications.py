@@ -94,11 +94,13 @@ def format_test_notification(now_utc):
 class TelegramNotifier:
     """Queue notifications without blocking the prediction input path."""
 
-    def __init__(self, transport, error_handler=None):
+    def __init__(self, transport, error_handler=None, stability_seconds=5.0):
         self._transport = transport
         self._error_handler = error_handler or (lambda message: None)
         self._queue = queue.Queue(maxsize=100)
         self._events = {}
+        self._pending = {}
+        self._stability_seconds = float(stability_seconds)
         self._lock = threading.Lock()
         self._closed = False
         self._worker = threading.Thread(
@@ -115,6 +117,7 @@ class TelegramNotifier:
                        if now > expiry]
             for item in expired:
                 self._events.pop(item, None)
+            self._pending.pop(key, None)
             if key in self._events:
                 current = self._events[key]
                 proposed = event.predicted_transit_utc + datetime.timedelta(
@@ -130,6 +133,49 @@ class TelegramNotifier:
         except queue.Full:
             self._report("Telegram notification queue is full")
             return False
+
+    def consider(self, event):
+        """Accept an eligible event only after continuous stable eligibility."""
+        if self._stability_seconds <= 0:
+            return self.notify(event)
+        key = (event.icao.upper(), event.body.upper())
+        now = event.created_at_utc
+        with self._lock:
+            if self._closed:
+                return False
+            expired = [item for item, expiry in self._events.items()
+                       if now > expiry]
+            for item in expired:
+                self._events.pop(item, None)
+            if key in self._events:
+                current = self._events[key]
+                proposed = event.predicted_transit_utc + datetime.timedelta(
+                    seconds=EVENT_EXPIRY_GRACE_SECONDS)
+                if proposed > current:
+                    self._events[key] = proposed
+                self._pending.pop(key, None)
+                return False
+            pending = self._pending.get(key)
+            if pending is None:
+                self._pending[key] = (now, event)
+                return False
+            started_at, _ = pending
+            self._pending[key] = (started_at, event)
+            ready = (now - started_at).total_seconds() >= self._stability_seconds
+            if ready:
+                self._pending.pop(key, None)
+        return self.notify(event) if ready else False
+
+    def cancel(self, icao, body):
+        with self._lock:
+            return self._pending.pop(
+                (icao.upper(), body.upper()), None) is not None
+
+    def cancel_aircraft(self, icao):
+        changed = False
+        for body in ("SUN", "MOON"):
+            changed = self.cancel(icao, body) or changed
+        return changed
 
     def send_test(self, now_utc):
         success, error = self._transport.send(format_test_notification(now_utc))
@@ -171,15 +217,26 @@ class DisabledTelegramNotifier:
     def notify(self, event):
         return False
 
+    def consider(self, event):
+        return False
+
+    def cancel(self, icao, body):
+        return False
+
+    def cancel_aircraft(self, icao):
+        return False
+
     def close(self):
         return None
 
 
 def create_telegram_notifier(enabled, token, chat_id, error_handler=None,
-                             transport_factory=TelegramTransport):
+                             transport_factory=TelegramTransport,
+                             stability_seconds=5.0):
     if not enabled:
         return DisabledTelegramNotifier()
     if not token or not chat_id:
         raise ValueError("Telegram notifications require bot token and chat ID")
     return TelegramNotifier(
-        transport_factory(token, chat_id), error_handler=error_handler)
+        transport_factory(token, chat_id), error_handler=error_handler,
+        stability_seconds=stability_seconds)

@@ -211,9 +211,9 @@ class MlatBeastSelectionTests(unittest.TestCase):
                 self.decoded.icao, 188, later).source)
         changed = later + datetime.timedelta(seconds=1)
         transit._update_motion_parameter(
-            self.decoded.icao, "track", 189, changed, 30106)
+            self.decoded.icao, "track", 192, changed, 30106)
         self.assertEqual("mlat", transit.effective_track_parameter(
-            self.decoded.icao, 189, changed).source)
+            self.decoded.icao, 192, changed).source)
         returned = changed + datetime.timedelta(seconds=1)
         transit._update_motion_parameter(
             self.decoded.icao, "track", 188, returned, 30106)
@@ -223,6 +223,36 @@ class MlatBeastSelectionTests(unittest.TestCase):
         self.assertEqual("MLAT_BEAST_TC19_FRESH",
             transit.effective_track_parameter(
                 self.decoded.icao, 188, returned).source)
+
+    def test_adjacent_bucket_is_held_and_twenty_second_cap_expires(self):
+        self.motion()
+        transit.update_mlat_beast_track(self.decoded, NOW)
+        adjacent = NOW + datetime.timedelta(seconds=10)
+        transit._update_motion_parameter(
+            self.decoded.icao, "track", 189, adjacent, 30106)
+        self.assertEqual("MLAT_BEAST_TC19_HELD",
+            transit.effective_track_parameter(
+                self.decoded.icao, 189, adjacent).source)
+        expired = NOW + datetime.timedelta(seconds=20, milliseconds=1)
+        transit._update_motion_parameter(
+            self.decoded.icao, "track", 189, expired, 30106)
+        self.assertEqual("mlat", transit.effective_track_parameter(
+            self.decoded.icao, 189, expired).source)
+
+    def test_intermediate_change_requires_two_distinct_coarse_updates(self):
+        self.motion()
+        transit.update_mlat_beast_track(self.decoded, NOW)
+        first = NOW + datetime.timedelta(seconds=8)
+        transit._update_motion_parameter(
+            self.decoded.icao, "track", 186, first, 30106)
+        self.assertEqual("MLAT_BEAST_TC19_HELD",
+            transit.effective_track_parameter(
+                self.decoded.icao, 186, first).source)
+        second = first + datetime.timedelta(seconds=1)
+        transit._update_motion_parameter(
+            self.decoded.icao, "track", 186, second, 30106)
+        self.assertEqual("mlat", transit.effective_track_parameter(
+            self.decoded.icao, 186, second).source)
 
     def test_raw_priority_independence_and_position_transitions(self):
         state = self.motion()

@@ -327,6 +327,23 @@ class ProductionIntegrationTests(unittest.TestCase):
             "recent_events"]
         self.assertEqual("WITHDRAWN", history[0]["outcome"])
 
+    def test_dashboard_publication_is_immediate_while_telegram_is_pending(self):
+        result = (51, 21, 88, 6.5, 10, 100, 600, 0, 88, 6.0, NOW)
+        notifier = Mock()
+        notifier.consider.return_value = False
+        old_notifier = transit.telegram_notifier
+        transit.telegram_notifier = notifier
+        try:
+            self.assertTrue(transit.publish_dashboard_prediction(
+                "A00001", "FLT1", "sun", result, NOW, 100))
+            self.assertFalse(transit.emit_transit_notification(
+                "A00001", "FLT1", "sun", result, NOW, 100, 0.5))
+            self.assertEqual(1, len(
+                transit.dashboard_runtime.state.snapshot(NOW)[
+                    "sun"]["candidates"]))
+        finally:
+            transit.telegram_notifier = old_notifier
+
     def test_telegram_and_solver_behavior_are_unchanged(self):
         self.assertEqual(2.0, transit.telegram_alert_separation_deg)
         self.assertEqual(3, transit.transit_separation_sound_alert)

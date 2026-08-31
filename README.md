@@ -105,6 +105,7 @@ TELEGRAM_NOTIFICATIONS_ENABLED=true
 TELEGRAM_BOT_TOKEN=123456:replace-with-your-token
 TELEGRAM_CHAT_ID=replace-with-your-chat-id
 TELEGRAM_ALERT_SEPARATION_DEG=2.0
+TELEGRAM_ALERT_STABILITY_SECONDS=5
 ```
 
 Test the outgoing connection without starting aircraft receivers or the normal
@@ -117,10 +118,12 @@ python transit_warning.py --test-notification
 Telegram is an early attention/wake-up channel, not the live user interface.
 It sends one potential-transit alert per active aircraft and Sun/Moon event
 when the accepted prediction is within the existing approximately 15-minute
-horizon and its separation first falls below the configured threshold (2.0°
-by default). Subsequent countdown and improving-separation updates are
-intentionally not sent. Alerts are predictions, not guarantees of a
-photographic transit.
+horizon and its separation remains continuously below the configured threshold
+(2.0° by default) for the stability interval (five seconds by default). A brief
+prediction that leaves the eligible range resets the timer. Set the stability
+interval to `0` to retain immediate-send behavior. Subsequent countdown and
+improving-separation updates are intentionally not sent. Alerts are predictions,
+not guarantees of a photographic transit.
 
 Checkpoint 1 supports outgoing alerts only; incoming commands, webhooks, and
 observer location/GPS updates are intentionally not implemented.
