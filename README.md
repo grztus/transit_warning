@@ -125,16 +125,44 @@ photographic transit.
 Checkpoint 1 supports outgoing alerts only; incoming commands, webhooks, and
 observer location/GPS updates are intentionally not implemented.
 
-#### Planned live dashboard (design note only)
+#### Future dashboard graphics (design note only)
 
-A later checkpoint should provide a separate mobile-friendly web dashboard
-with continuously updated nearest Sun and Moon candidates. Each side should
-show callsign, live countdown, predicted separation, azimuth/elevation, and
-event status, even before the candidate reaches the Telegram threshold. A
-compact graphic should reuse the offline visualizer concepts: the Sun/Moon
-disk, predicted aircraft trajectory, direction of motion, and near-miss or
-crossing geometry. This checkpoint does not implement the dashboard, HTTP or
-WebSocket server, GPS, mobile observer, incoming commands, or location handling.
+A later checkpoint may add a compact graphic that reuses the offline visualizer
+concepts: the Sun/Moon disk, predicted aircraft trajectory, direction of motion,
+and near-miss or crossing geometry. Checkpoint 2 does not implement trajectory
+graphics, GPS, mobile observer, incoming commands, or location handling.
+
+### Live dashboard
+
+The optional read-only mobile dashboard shows independent chronological queues
+of future Sun and Moon candidates plus a bounded in-memory recent-event history.
+It uses already-computed production predictions and does not run another solver.
+It is disabled and bound to localhost by default:
+
+```dotenv
+DASHBOARD_ENABLED=false
+DASHBOARD_HOST=127.0.0.1
+DASHBOARD_PORT=8765
+```
+
+For a local test, set `DASHBOARD_ENABLED=true`, start Transit Warning, and open
+`http://127.0.0.1:8765/` on the same computer. The read-only JSON state is at
+`http://127.0.0.1:8765/api/state`. To test from a phone on the same
+trusted LAN, explicitly set `DASHBOARD_HOST` to the Debian host's LAN address,
+restart Transit Warning, and open `http://<debian-lan-ip>:8765/` on the phone.
+No real LAN address is stored in the repository. Return to localhost-only mode
+by restoring `DASHBOARD_HOST=127.0.0.1`, or disable the server completely with
+`DASHBOARD_ENABLED=false`.
+
+The dashboard uses plain HTML/CSS/JavaScript with no CDN. The browser polls
+state every three seconds and calculates visible countdowns locally from the
+absolute predicted UTC timestamps. A compact ACTIVE/STALE/DISCONNECTED indicator
+uses the main-loop heartbeat and polling results, independently of whether any
+candidates are present. Events which pass normally, reach the near-event window,
+or trigger a Telegram notification are retained in recent history; an early
+insignificant transient is discarded. Recent history is not persisted and is
+lost when Transit Warning restarts. Checkpoint 2 intentionally has no
+authentication, so LAN binding should only be used on a trusted private network.
 
 The application validates the installation configuration before creating the
 observer or starting the TCP threads. In RealClock mode it always records the

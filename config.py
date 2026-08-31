@@ -42,6 +42,9 @@ class InstallationConfig:
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     telegram_alert_separation_deg: float = 2.0
+    dashboard_enabled: bool = False
+    dashboard_host: str = "127.0.0.1"
+    dashboard_port: int = 8765
 
 
 def _required(values, name, errors):
@@ -201,6 +204,9 @@ def load_installation_config(
     telegram_alert_separation_deg = _optional_finite_float(
         values, "TELEGRAM_ALERT_SEPARATION_DEG", 2.0, errors,
         minimum=0.0, maximum=180.0)
+    dashboard_enabled = _boolean(values, "DASHBOARD_ENABLED", False, errors)
+    dashboard_host = _host(values, "DASHBOARD_HOST", "127.0.0.1", errors)
+    dashboard_port = _port(values, "DASHBOARD_PORT", 8765, errors)
     if telegram_notifications_enabled:
         if not telegram_bot_token:
             errors.append(
@@ -239,4 +245,7 @@ def load_installation_config(
         telegram_bot_token=telegram_bot_token,
         telegram_chat_id=telegram_chat_id,
         telegram_alert_separation_deg=telegram_alert_separation_deg,
+        dashboard_enabled=dashboard_enabled,
+        dashboard_host=dashboard_host,
+        dashboard_port=dashboard_port,
     )

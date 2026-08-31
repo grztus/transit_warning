@@ -110,6 +110,11 @@ from telegram_notifications import (
     TransitNotification,
     create_telegram_notifier,
 )
+from live_dashboard import (
+    DashboardCandidate,
+    DisabledDashboard,
+    start_dashboard,
+)
 from transit_prediction_model import (
     AngularPosition,
     INTENT_FRESHNESS_SECONDS,
@@ -192,6 +197,7 @@ replay_time_initialized = not isinstance(clock, ReplayClock)
 environment_replay = None
 raw_diagnostic_replay = None
 telegram_notifier = None
+dashboard_runtime = DisabledDashboard()
 environment_recorder = None
 daily_environment_recorder = None
 adsb_timestamp_validator = None
@@ -1679,6 +1685,47 @@ def emit_transit_notification(icao, callsign, celestial_body,
         return False
 
 
+def publish_dashboard_prediction(icao, callsign, celestial_body,
+                                 transit_result, now_utc, distance_km,
+                                 separation_deg=None):
+    """Publish existing production output without recomputing geometry."""
+    try:
+        separation = (
+            vertical_transit_separation(transit_result[3], transit_result[9])
+            if separation_deg is None else float(separation_deg))
+        time_to_event = float(transit_result[6])
+        body = celestial_body.upper()
+        if not (0 < time_to_event and int(time_to_event) <= 900
+                and separation < transit_separation_notignored):
+            dashboard_runtime.withdraw(icao, body, now_utc)
+            return False
+        return dashboard_runtime.publish(DashboardCandidate(
+            body=body,
+            icao=icao,
+            callsign=callsign or None,
+            predicted_event_utc=(
+                now_utc + datetime.timedelta(seconds=time_to_event)),
+            separation_deg=separation,
+            body_azimuth_deg=float(transit_result[8]),
+            body_elevation_deg=float(transit_result[9]),
+            aircraft_elevation_deg=float(transit_result[3]),
+            distance_km=float(distance_km),
+            last_prediction_update_utc=now_utc,
+            telegram_range=(separation < telegram_alert_separation_deg),
+        ))
+    except Exception:
+        return False
+
+
+def mark_dashboard_history_worthy(icao, celestial_body):
+    """Preserve a dashboard event accepted by the Telegram trigger path."""
+    try:
+        return dashboard_runtime.mark_history_worthy(
+            icao, celestial_body.upper())
+    except Exception:
+        return False
+
+
 def initialize_transit_snapshots():
     """Initialize the optional validation layer without affecting startup."""
     global transit_snapshot_manager
@@ -1750,6 +1797,10 @@ def clear_transit_prediction_state(icao, entry, celestial_body,
     last_valid.pop(icao, None)
     predicted_times.pop(icao, None)
     vertical_transit_diagnostics.pop((icao, celestial_body), None)
+    try:
+        dashboard_runtime.withdraw(icao, celestial_body, clock.now_utc())
+    except Exception:
+        pass
 
 
 def _store_transit_solver_solution(icao, celestial_body, solution):
@@ -1782,6 +1833,10 @@ def clean_dict():
     current_time = clock.now_utc()
     to_delete = [icao for icao, entry in plane_dict.items() if (current_time - entry[0]).total_seconds() > MAX_AGE_SECONDS]
     for icao in to_delete:
+        try:
+            dashboard_runtime.withdraw_aircraft(icao, current_time)
+        except Exception:
+            pass
         del plane_dict[icao]
         altitude_sources.pop(icao, None)
         aircraft_motion_states.pop(icao, None)
@@ -2781,6 +2836,10 @@ def clean_transit_dict():
     current_time = clock.now_utc()
     to_delete = [icao for icao, entry in plane_dict.items() if len(entry) > 31 and entry[31] and isinstance(entry[30], datetime.datetime) and (current_time - entry[30]).total_seconds() > 120]
     for icao in to_delete:
+        try:
+            dashboard_runtime.withdraw_aircraft(icao, current_time)
+        except Exception:
+            pass
         del plane_dict[icao]
         altitude_sources.pop(icao, None)
         aircraft_motion_states.pop(icao, None)
@@ -2832,7 +2891,7 @@ def close_active_sockets():
 
 
 def shutdown_runtime(threads, recorder):
-    global shutdown_complete, telegram_notifier
+    global shutdown_complete, telegram_notifier, dashboard_runtime
     with shutdown_lock:
         if shutdown_complete:
             return
@@ -2851,6 +2910,11 @@ def shutdown_runtime(threads, recorder):
         except Exception:
             pass
         telegram_notifier = None
+    try:
+        dashboard_runtime.close()
+    except Exception:
+        pass
+    dashboard_runtime = DisabledDashboard()
     if recorder is not None:
         try:
             recorder.close(clock.now_utc())
@@ -3338,6 +3402,10 @@ def process_line(line, port):
         if distance > alert_distance and plane_dict[icao][8] == "ENTERING":
             plane_dict[icao][8] = "LEAVING"
         if motion_freshness.status == MotionFreshnessStatus.STALE:
+            try:
+                dashboard_runtime.withdraw_aircraft(icao, clock.now_utc())
+            except Exception:
+                pass
             sun_alt, sun_az, moon_alt, moon_az = tabela()
             clean_dict()
             clean_transit_dict()
@@ -3386,11 +3454,16 @@ def process_line(line, port):
                 plane_dict[icao][27] = dst_p2x
                 separation_deg = vertical_transit_separation(
                     plane_dict[icao][24], plane_dict[icao][23])
-                if -transit_separation_sound_alert < separation_deg < transit_separation_sound_alert:
-                    gong()
-                emit_transit_notification(
+                publish_dashboard_prediction(
                     icao, flight, "moon", tst_int1, prediction_now,
                     distance, separation_deg)
+                if -transit_separation_sound_alert < separation_deg < transit_separation_sound_alert:
+                    gong()
+                notification_triggered = emit_transit_notification(
+                    icao, flight, "moon", tst_int1, prediction_now,
+                    distance, separation_deg)
+                if notification_triggered:
+                    mark_dashboard_history_worthy(icao, "moon")
                 if delta_time <= 2:  # Ustaw flagę tranzytu jeśli czas do tranzytu jest mniejszy lub równy 2 sekundy / Set transit flag if time to transit is less than or equal to 2 second
                     plane_dict[icao][31] = True
                     plane_dict[icao][30] = clock.now_utc()  # Ustaw czas rozpoczęcia tranzytu / Set transit start time
@@ -3424,11 +3497,16 @@ def process_line(line, port):
                 plane_dict[icao][21] = dst_p2x
                 separation_deg2 = vertical_transit_separation(
                     plane_dict[icao][19], plane_dict[icao][18])
-                if -transit_separation_sound_alert < separation_deg2 < transit_separation_sound_alert:
-                    gong()
-                emit_transit_notification(
+                publish_dashboard_prediction(
                     icao, flight, "sun", tst_int2, prediction_now,
                     distance, separation_deg2)
+                if -transit_separation_sound_alert < separation_deg2 < transit_separation_sound_alert:
+                    gong()
+                notification_triggered = emit_transit_notification(
+                    icao, flight, "sun", tst_int2, prediction_now,
+                    distance, separation_deg2)
+                if notification_triggered:
+                    mark_dashboard_history_worthy(icao, "sun")
                 if delta_time <= 2:  # Ustaw flagę tranzytu jeśli czas do tranzytu jest mniejszy lub równy 2 sekundy / Set transit flag if time to transit is less than or equal to 2 second
                     plane_dict[icao][31] = True
                     plane_dict[icao][30] = clock.now_utc()  # Ustaw czas rozpoczęcia tranzytu / Set transit start time
@@ -3455,7 +3533,7 @@ def process_line(line, port):
 
 def main():
     global daily_environment_recorder, session_recorder, session_recording_requested
-    global transit_snapshot_manager, telegram_notifier
+    global transit_snapshot_manager, telegram_notifier, dashboard_runtime
     global shutdown_complete
     try:
         configuration = load_installation_config()
@@ -3480,6 +3558,13 @@ def main():
         finally:
             telegram_notifier.close()
             telegram_notifier = None
+    dashboard_runtime = start_dashboard(
+        configuration.dashboard_enabled and not isinstance(clock, ReplayClock),
+        configuration.dashboard_host,
+        configuration.dashboard_port,
+        clock.now_utc,
+        error_handler=lambda message: print(message),
+    )
     install_table_snapshot_signal_handler()
     stop_event.clear()
     with shutdown_lock:
@@ -3552,6 +3637,7 @@ def main():
         while True:
             time.sleep(1)
             process_table_snapshot_request()
+            dashboard_runtime.tick(clock.now_utc())
             if daily_environment_recorder is not None:
                 daily_environment_recorder.rotate_if_needed(clock.now_utc())
             if session_recorder is not None:
