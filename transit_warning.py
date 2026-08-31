@@ -92,6 +92,7 @@ from environment import (
 )
 from metar import fetch_awc_metar
 from mlat_beast_track import decode_mlat_beast_tc19, truncation_bin_consistent
+from observer_position import ObserverPosition, StaticObserverPositionProvider
 from recording import RecordingStatus, SessionRecorder, archive_session
 from raw_adsb_track import (
     decode_raw_tc19_altitude,
@@ -557,6 +558,7 @@ dashboard_sep_visible_max_deg = 7.0
 my_lat = None
 my_lon = None
 my_elevation_const = None
+observer_position_provider = None
 transition_altitude_ft = None
 near_airport_elevation = 100  # Wysokość najbliższego lotniska / Nearest airport elevation
 
@@ -585,6 +587,7 @@ telegram_alert_stability_seconds = 5.0
 
 def apply_installation_config(configuration: InstallationConfig):
     global my_lat, my_lon, my_elevation_const, transition_altitude_ft
+    global observer_position_provider
     global metar_station, gatech
     global adsb_host, adsb_port, adsb_timestamp_timezone, adsb_timestamp_validator
     global mlat_host, mlat_port, beast_host, beast_port
@@ -594,9 +597,16 @@ def apply_installation_config(configuration: InstallationConfig):
     global tmux_sep_green_max_deg, tmux_sep_yellow_max_deg
     global tmux_sep_visible_max_deg, dashboard_sep_green_max_deg
     global dashboard_sep_yellow_max_deg, dashboard_sep_visible_max_deg
-    my_lat = configuration.observer_lat
-    my_lon = configuration.observer_lon
-    my_elevation_const = configuration.observer_elevation_m
+    observer_position_provider = StaticObserverPositionProvider(
+        ObserverPosition(
+            latitude_deg=configuration.observer_lat,
+            longitude_deg=configuration.observer_lon,
+            elevation_m=configuration.observer_elevation_m,
+        ))
+    observer_position = observer_position_provider.current()
+    my_lat = observer_position.latitude_deg
+    my_lon = observer_position.longitude_deg
+    my_elevation_const = observer_position.elevation_m
     transition_altitude_ft = configuration.transition_altitude_ft
     metar_station = configuration.metar_station
     adsb_host = configuration.adsb_host
@@ -625,13 +635,25 @@ def apply_installation_config(configuration: InstallationConfig):
     dashboard_sep_green_max_deg = configuration.dashboard_sep_green_max_deg
     dashboard_sep_yellow_max_deg = configuration.dashboard_sep_yellow_max_deg
     dashboard_sep_visible_max_deg = configuration.dashboard_sep_visible_max_deg
-    gatech = ephem.Observer()
-    gatech.lat, gatech.lon = str(my_lat), str(my_lon)
-    gatech.elevation = my_elevation_const
-    # Prediction geometry compares unrefracted topocentric body coordinates
-    # with the geometric aircraft line of sight.
-    gatech.pressure = 0
+    gatech = ephem_observer_for_position(observer_position)
     port_status = {adsb_port: False, mlat_port: False}
+
+
+def current_observer_position():
+    """Return the immutable observer context configured for this process."""
+    if observer_position_provider is None:
+        raise RuntimeError("observer position is not configured")
+    return observer_position_provider.current()
+
+
+def ephem_observer_for_position(observer_position):
+    """Build the shared geometric PyEphem observer for one static context."""
+    observer = ephem.Observer()
+    observer.lat = str(observer_position.latitude_deg)
+    observer.lon = str(observer_position.longitude_deg)
+    observer.elevation = float(observer_position.elevation_m)
+    observer.pressure = 0
+    return observer
 
 
 def correct_pressure_altitude(pressure_altitude_ft, qnh_hpa):
@@ -1551,10 +1573,16 @@ def predict_vertical_state_at_time(
 
 
 def apply_vertical_prediction_to_transit_result(
-        icao, celestial_body, transit_result, current_altitude_m, now_utc):
+        icao, celestial_body, transit_result, current_altitude_m, now_utc,
+        observer_position=None):
     """Update only the final vertical angle of a solved 2D transit."""
     if not transit_result:
         return transit_result
+    if observer_position is None:
+        observer_position = ObserverPosition(
+            float(my_lat) if my_lat is not None else 0.0,
+            float(my_lon) if my_lon is not None else 0.0,
+            float(my_elevation_const))
     vertical_state = predict_vertical_state_at_time(
         current_altitude_m,
         aircraft_motion_states.get(icao),
@@ -1574,14 +1602,14 @@ def apply_vertical_prediction_to_transit_result(
         if h2x_km == 0:
             h2x_km = 0.001
         updated[3] = degrees(atan(
-            (prediction.predicted_altitude_m - my_elevation_const)
+            (prediction.predicted_altitude_m - observer_position.elevation_m)
             / (h2x_km * 1000)))
     after = vertical_transit_separation(updated[3], updated[9])
     altitude_before_clamp = float(transit_result[3])
     if prediction_2e.mode == VerticalPredictionMode.DYNAMIC_VALID:
         h2x_km = float(transit_result[4]) or 0.001
         altitude_before_clamp = degrees(atan(
-            (prediction_2e.predicted_altitude_m - my_elevation_const)
+            (prediction_2e.predicted_altitude_m - observer_position.elevation_m)
             / (h2x_km * 1000)))
     intent_details["separation_before_clamp"] = vertical_transit_separation(
         altitude_before_clamp, transit_result[9])
@@ -1615,7 +1643,8 @@ def get_vertical_transit_diagnostic(icao, celestial_body):
 
 
 def _capture_transit_prediction(icao, callsign, celestial_body,
-                                transit_result, now_utc, solver_input):
+                                transit_result, now_utc, solver_input,
+                                observer_position):
     """Pass an already solved prediction to the optional validation layer."""
     if transit_snapshot_manager is None or not transit_result:
         return
@@ -1658,8 +1687,9 @@ def _capture_transit_prediction(icao, callsign, celestial_body,
         "callsign": callsign or None,
         "body": celestial_body.upper(),
         "observer": {
-            "lat": my_lat, "lon": my_lon,
-            "elevation_m": my_elevation_const,
+            "lat": observer_position.latitude_deg,
+            "lon": observer_position.longitude_deg,
+            "elevation_m": observer_position.elevation_m,
         },
         "time2x_seconds": float(transit_result[6]),
         "aircraft_altitude_m": aircraft_altitude_m,
@@ -1692,12 +1722,16 @@ def _capture_transit_prediction(icao, callsign, celestial_body,
 
 
 def capture_transit_prediction(icao, callsign, celestial_body,
-                               transit_result, now_utc, solver_input):
+                               transit_result, now_utc, solver_input,
+                               observer_position=None):
     """Keep every TC29G failure outside the aircraft input path."""
     try:
+        if observer_position is None:
+            observer_position = ObserverPosition(
+                float(my_lat), float(my_lon), float(my_elevation_const))
         _capture_transit_prediction(
             icao, callsign, celestial_body, transit_result, now_utc,
-            solver_input)
+            solver_input, observer_position)
     except Exception:
         pass
 
@@ -1961,19 +1995,25 @@ def log_transits(icao, flight, transit_info, celestial_body):
         file.write(line)
 
 # Funkcja do przewidywania tranzytów / Function to predict transits
-def transit_pred(obs2moon, plane_pos, track, velocity, elevation, moon_alt, moon_az):
+def transit_pred(obs2moon, plane_pos, track, velocity, elevation, moon_alt,
+                 moon_az, observer_position=None):
     if moon_alt < 0.1:
         return 0
+    if observer_position is None:
+        observer_position = ObserverPosition(
+            float(obs2moon[0]), float(obs2moon[1]), float(my_elevation_const))
+    observer_coordinates = observer_position.coordinates
     moon_az = float(moon_az)
     intersection = solve_great_circle_intersection(
-        obs2moon, plane_pos, track, velocity, elevation, moon_az,
-        my_elevation_const)
+        observer_coordinates, plane_pos, track, velocity, elevation, moon_az,
+        observer_position.elevation_m)
     if intersection is None:
         return 0
     moon_alt_B = 90.00 - moon_alt
     ideal_dist = (sin(radians(moon_alt_B)) * elevation) / sin(radians(moon_alt)) / 1000
-    ideal_lat = asin(sin(radians(my_lat)) * cos(ideal_dist / earth_R) + cos(radians(my_lat)) * sin(ideal_dist / earth_R) * cos(radians(moon_az)))
-    ideal_lon = radians(my_lon) + atan2(sin(radians(moon_az)) * sin(ideal_dist / earth_R) * cos(radians(my_lat)), cos(ideal_dist / earth_R) - sin(radians(my_lat)) * sin(ideal_lat))
+    observer_lat, observer_lon = observer_coordinates
+    ideal_lat = asin(sin(radians(observer_lat)) * cos(ideal_dist / earth_R) + cos(radians(observer_lat)) * sin(ideal_dist / earth_R) * cos(radians(moon_az)))
+    ideal_lon = radians(observer_lon) + atan2(sin(radians(moon_az)) * sin(ideal_dist / earth_R) * cos(radians(observer_lat)), cos(ideal_dist / earth_R) - sin(radians(observer_lat)) * sin(ideal_lat))
     ideal_lat, ideal_lon = degrees(ideal_lat), degrees(ideal_lon)
     ideal_lon = (ideal_lon + 540) % 360 - 180
     return (intersection.latitude_deg, intersection.longitude_deg,
@@ -1985,16 +2025,15 @@ def transit_pred(obs2moon, plane_pos, track, velocity, elevation, moon_alt, moon
             clock.now_utc())
 
 
-def body_position_at_utc(body_name, when_utc):
+def body_position_at_utc(body_name, when_utc, observer_position=None):
     """Return one shared PyEphem body state at an explicit UTC time."""
     if (when_utc.tzinfo is None
             or when_utc.utcoffset() != datetime.timedelta(0)):
         raise ValueError("body ephemeris requires timezone-aware UTC")
-    observer = ephem.Observer()
-    observer.lat = str(my_lat)
-    observer.lon = str(my_lon)
-    observer.elevation = float(my_elevation_const)
-    observer.pressure = 0
+    if observer_position is None:
+        observer_position = ObserverPosition(
+            float(my_lat), float(my_lon), float(my_elevation_const))
+    observer = ephem_observer_for_position(observer_position)
     observer.date = ephem.Date(when_utc.astimezone(pytz.utc))
     if body_name == "sun":
         body = ephem.Sun(observer)
@@ -2426,13 +2465,15 @@ def capture_transit_observation(icao, timestamp_utc, message_source,
         pass
 
 
-def moving_body_transit_pred(body_name, obs2body, plane_pos, track,
+def moving_body_transit_pred(body_name, observer_position, plane_pos, track,
                              velocity, elevation, prediction_base_utc,
                              fallback_body_position=None):
     """Iteratively solve the existing geometry against a moving Sun/Moon."""
-    geometry_args = (obs2body, plane_pos, track, velocity, elevation)
+    geometry_args = (
+        observer_position.coordinates, plane_pos, track, velocity, elevation)
     try:
-        body_position = body_position_at_utc(body_name, prediction_base_utc)
+        body_position = body_position_at_utc(
+            body_name, prediction_base_utc, observer_position)
         body_alt, body_az = body_position
         body_size = _body_angular_diameter(body_position)
     except Exception:
@@ -2440,7 +2481,8 @@ def moving_body_transit_pred(body_name, obs2body, plane_pos, track,
         if fallback_body_position is not None:
             fallback_alt, fallback_az = fallback_body_position
             fallback_result = transit_pred(
-                *geometry_args, fallback_alt, fallback_az)
+                *geometry_args, fallback_alt, fallback_az,
+                observer_position=observer_position)
             fallback_time = _moving_body_result_time(fallback_result)
             if (fallback_time is None or fallback_time <= 0
                     or fallback_time > 900):
@@ -2452,7 +2494,9 @@ def moving_body_transit_pred(body_name, obs2body, plane_pos, track,
             _body_angular_diameter(fallback_body_position),
             _body_evaluated_at_utc(fallback_body_position))
 
-    initial_result = transit_pred(*geometry_args, body_alt, body_az)
+    initial_result = transit_pred(
+        *geometry_args, body_alt, body_az,
+        observer_position=observer_position)
     if not initial_result:
         return _moving_body_solution(
             body_name, prediction_base_utc, None, None, 0, None,
@@ -2473,7 +2517,8 @@ def moving_body_transit_pred(body_name, obs2body, plane_pos, track,
         body_time = prediction_base_utc + datetime.timedelta(
             seconds=current_time)
         try:
-            body_position = body_position_at_utc(body_name, body_time)
+            body_position = body_position_at_utc(
+                body_name, body_time, observer_position)
             body_alt, body_az = body_position
             body_size = _body_angular_diameter(body_position)
         except Exception:
@@ -2483,7 +2528,9 @@ def moving_body_transit_pred(body_name, obs2body, plane_pos, track,
                 TransitSolverOutcome.TECHNICAL_FALLBACK,
                 results[0][1], results[0][2])
 
-        next_result = transit_pred(*geometry_args, body_alt, body_az)
+        next_result = transit_pred(
+            *geometry_args, body_alt, body_az,
+            observer_position=observer_position)
         if not next_result:
             return _moving_body_solution(
                 body_name, prediction_base_utc, initial_time, None,
@@ -3211,6 +3258,11 @@ def process_line(line, port):
     if not line:
         return
 
+    # Capture one immutable observer for this complete processing/prediction
+    # operation so no calculation can observe a partially changed context.
+    observer_position = current_observer_position()
+    observer_coordinates = observer_position.coordinates
+
     parts = line.split(",")
     if len(parts) < 2:
         return
@@ -3348,19 +3400,20 @@ def process_line(line, port):
         if plane_lat and plane_lon:
             _update_motion_position(
                 icao, plane_lat, plane_lon, date_time_utc, port)
-            distance = round(haversine((my_lat, my_lon), (plane_lat, plane_lon)), 1)
+            distance = round(haversine(
+                observer_coordinates, (plane_lat, plane_lon)), 1)
             if distance == 0:
                 distance = 0.01
             angular_position = (
                 angular_position_from_observer(
-                    (my_lat, my_lon), my_elevation_const,
+                    observer_coordinates, observer_position.elevation_m,
                     (plane_lat, plane_lon), elevation,
                     distance_km=distance)
                 if elevation is not None else None)
             if angular_position is None:
                 azimuth = angular_position_from_observer(
-                    (my_lat, my_lon), my_elevation_const,
-                    (plane_lat, plane_lon), my_elevation_const,
+                    observer_coordinates, observer_position.elevation_m,
+                    (plane_lat, plane_lon), observer_position.elevation_m,
                     distance_km=distance).azimuth_deg
                 altitude = ""
             else:
@@ -3477,13 +3530,13 @@ def process_line(line, port):
                 pass
         prediction_base_utc = clock.now_utc()
         moon_solution = moving_body_transit_pred(
-            "moon", (my_lat, my_lon), (plane_lat, plane_lon), track,
+            "moon", observer_position, (plane_lat, plane_lon), track,
             velocity, elevation, prediction_base_utc,
             fallback_body_position=BodyPosition(
                 moon_alt, moon_az, moon_body_angular_diameter_arcsec,
                 moon_body_evaluated_at_utc))
         sun_solution = moving_body_transit_pred(
-            "sun", (my_lat, my_lon), (plane_lat, plane_lon), track,
+            "sun", observer_position, (plane_lat, plane_lon), track,
             velocity, elevation, prediction_base_utc,
             fallback_body_position=BodyPosition(
                 sun_alt, sun_az, sun_body_angular_diameter_arcsec,
@@ -3494,9 +3547,11 @@ def process_line(line, port):
             icao, "sun", sun_solution)
         prediction_now = prediction_base_utc
         tst_int1 = apply_vertical_prediction_to_transit_result(
-            icao, "moon", tst_int1, elevation, prediction_now)
+            icao, "moon", tst_int1, elevation, prediction_now,
+            observer_position)
         tst_int2 = apply_vertical_prediction_to_transit_result(
-            icao, "sun", tst_int2, elevation, prediction_now)
+            icao, "sun", tst_int2, elevation, prediction_now,
+            observer_position)
         if tst_int1:
             alt_a = round(tst_int1[3], 2)
             dst_h2x = round(tst_int1[4], 2)
@@ -3529,7 +3584,7 @@ def process_line(line, port):
                     icao, "moon", prediction_now, final_time2x)
                 capture_transit_prediction(
                     icao, flight, "moon", tst_int1, prediction_now,
-                    snapshot_solver_input)
+                    snapshot_solver_input, observer_position)
             else:
                 clear_transit_prediction_state(
                     icao, plane_dict[icao], "moon", 23)
@@ -3572,7 +3627,7 @@ def process_line(line, port):
                     icao, "sun", prediction_now, final_time2x)
                 capture_transit_prediction(
                     icao, flight, "sun", tst_int2, prediction_now,
-                    snapshot_solver_input)
+                    snapshot_solver_input, observer_position)
             else:
                 clear_transit_prediction_state(
                     icao, plane_dict[icao], "sun", 18)

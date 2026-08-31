@@ -9,6 +9,7 @@ import pytz
 import transit_warning as transit
 from config import InstallationConfig
 from transit_clock import ReplayClock
+from observer_position import ObserverPosition
 
 
 UTC_BASE = datetime.datetime(
@@ -37,7 +38,8 @@ def prediction(time2x, separation=1.0, body_alt=20.0):
 
 def solve(body="sun", fallback=None):
     return transit.moving_body_transit_pred(
-        body, (51.0, 21.0), (51.2, 21.2), 180.0, 800.0,
+        body, ObserverPosition(51.0, 21.0, 200.0),
+        (51.2, 21.2), 180.0, 800.0,
         10000.0, UTC_BASE, fallback_body_position=fallback)
 
 
