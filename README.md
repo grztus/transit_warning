@@ -66,8 +66,9 @@ Optional FlightAware MLAT Beast precision-track settings are
 `MLAT_HOST`), and `MLAT_BEAST_PORT` (normally `30105`).
 
 Optional outgoing Telegram alerts use `TELEGRAM_NOTIFICATIONS_ENABLED`
-(disabled by default), `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_CHAT_ID`. Credentials
-belong only in the private `.env` file.
+(disabled by default), `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and
+`TELEGRAM_ALERT_SEPARATION_DEG` (default `2.0`). Credentials belong only in
+the private `.env` file.
 
 `ADSB_TIMESTAMP_TIMEZONE` describes the timezone used by the host producing the
 naive SBS timestamps. It is not the timezone of the computer running Transit
@@ -103,6 +104,7 @@ ID from the Bot API `getUpdates` response, then set:
 TELEGRAM_NOTIFICATIONS_ENABLED=true
 TELEGRAM_BOT_TOKEN=123456:replace-with-your-token
 TELEGRAM_CHAT_ID=replace-with-your-chat-id
+TELEGRAM_ALERT_SEPARATION_DEG=2.0
 ```
 
 Test the outgoing connection without starting aircraft receivers or the normal
@@ -112,9 +114,27 @@ prediction loop:
 python transit_warning.py --test-notification
 ```
 
-Alerts are predictions, not guarantees of a photographic transit. Checkpoint 1
-supports outgoing alerts only; incoming commands, webhooks, and observer
-location/GPS updates are intentionally not implemented.
+Telegram is an early attention/wake-up channel, not the live user interface.
+It sends one potential-transit alert per active aircraft and Sun/Moon event
+when the accepted prediction is within the existing approximately 15-minute
+horizon and its separation first falls below the configured threshold (2.0°
+by default). Subsequent countdown and improving-separation updates are
+intentionally not sent. Alerts are predictions, not guarantees of a
+photographic transit.
+
+Checkpoint 1 supports outgoing alerts only; incoming commands, webhooks, and
+observer location/GPS updates are intentionally not implemented.
+
+#### Planned live dashboard (design note only)
+
+A later checkpoint should provide a separate mobile-friendly web dashboard
+with continuously updated nearest Sun and Moon candidates. Each side should
+show callsign, live countdown, predicted separation, azimuth/elevation, and
+event status, even before the candidate reaches the Telegram threshold. A
+compact graphic should reuse the offline visualizer concepts: the Sun/Moon
+disk, predicted aircraft trajectory, direction of motion, and near-miss or
+crossing geometry. This checkpoint does not implement the dashboard, HTTP or
+WebSocket server, GPS, mobile observer, incoming commands, or location handling.
 
 The application validates the installation configuration before creating the
 observer or starting the TCP threads. In RealClock mode it always records the

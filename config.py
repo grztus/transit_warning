@@ -41,6 +41,7 @@ class InstallationConfig:
     telegram_notifications_enabled: bool = False
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    telegram_alert_separation_deg: float = 2.0
 
 
 def _required(values, name, errors):
@@ -115,6 +116,25 @@ def _boolean(values, name, default, errors):
     return None
 
 
+def _optional_finite_float(values, name, default, errors,
+                           minimum=None, maximum=None):
+    raw_value = str(values.get(name, default)).strip()
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        errors.append("{} must be a number".format(name))
+        return None
+    if not math.isfinite(value):
+        errors.append("{} must be a finite number".format(name))
+        return None
+    if ((minimum is not None and value <= minimum)
+            or (maximum is not None and value > maximum)):
+        errors.append("{} must be greater than {} and at most {}".format(
+            name, minimum, maximum))
+        return None
+    return value
+
+
 def _metar_station(values, errors):
     value = _required(values, "METAR_STATION", errors)
     if value is None:
@@ -178,6 +198,9 @@ def load_installation_config(
         values, "TELEGRAM_NOTIFICATIONS_ENABLED", False, errors)
     telegram_bot_token = str(values.get("TELEGRAM_BOT_TOKEN", "")).strip()
     telegram_chat_id = str(values.get("TELEGRAM_CHAT_ID", "")).strip()
+    telegram_alert_separation_deg = _optional_finite_float(
+        values, "TELEGRAM_ALERT_SEPARATION_DEG", 2.0, errors,
+        minimum=0.0, maximum=180.0)
     if telegram_notifications_enabled:
         if not telegram_bot_token:
             errors.append(
@@ -215,4 +238,5 @@ def load_installation_config(
         telegram_notifications_enabled=telegram_notifications_enabled,
         telegram_bot_token=telegram_bot_token,
         telegram_chat_id=telegram_chat_id,
+        telegram_alert_separation_deg=telegram_alert_separation_deg,
     )

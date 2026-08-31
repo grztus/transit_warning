@@ -561,6 +561,7 @@ raw_adsb_port = None
 mlat_beast_enabled = False
 mlat_beast_host = None
 mlat_beast_port = None
+telegram_alert_separation_deg = 2.0
 
 
 def apply_installation_config(configuration: InstallationConfig):
@@ -570,6 +571,7 @@ def apply_installation_config(configuration: InstallationConfig):
     global mlat_host, mlat_port, beast_host, beast_port
     global raw_adsb_host, raw_adsb_port, mlat_beast_enabled
     global mlat_beast_host, mlat_beast_port, port_status
+    global telegram_alert_separation_deg
     my_lat = configuration.observer_lat
     my_lon = configuration.observer_lon
     my_elevation_const = configuration.observer_elevation_m
@@ -591,6 +593,8 @@ def apply_installation_config(configuration: InstallationConfig):
     mlat_beast_enabled = configuration.mlat_beast_enabled
     mlat_beast_host = configuration.mlat_beast_host
     mlat_beast_port = configuration.mlat_beast_port
+    telegram_alert_separation_deg = (
+        configuration.telegram_alert_separation_deg)
     gatech = ephem.Observer()
     gatech.lat, gatech.lon = str(my_lat), str(my_lon)
     gatech.elevation = my_elevation_const
@@ -1653,8 +1657,8 @@ def emit_transit_notification(icao, callsign, celestial_body,
             vertical_transit_separation(transit_result[3], transit_result[9])
             if separation_deg is None else float(separation_deg))
         time_to_event = float(transit_result[6])
-        if not (0 <= int(time_to_event) <= 900
-                and separation < transit_separation_sound_alert):
+        if not (0 < time_to_event <= 900
+                and separation < telegram_alert_separation_deg):
             return False
         event = TransitNotification(
             created_at_utc=now_utc,
@@ -3384,9 +3388,9 @@ def process_line(line, port):
                     plane_dict[icao][24], plane_dict[icao][23])
                 if -transit_separation_sound_alert < separation_deg < transit_separation_sound_alert:
                     gong()
-                    emit_transit_notification(
-                        icao, flight, "moon", tst_int1, prediction_now,
-                        distance, separation_deg)
+                emit_transit_notification(
+                    icao, flight, "moon", tst_int1, prediction_now,
+                    distance, separation_deg)
                 if delta_time <= 2:  # Ustaw flagę tranzytu jeśli czas do tranzytu jest mniejszy lub równy 2 sekundy / Set transit flag if time to transit is less than or equal to 2 second
                     plane_dict[icao][31] = True
                     plane_dict[icao][30] = clock.now_utc()  # Ustaw czas rozpoczęcia tranzytu / Set transit start time
@@ -3422,9 +3426,9 @@ def process_line(line, port):
                     plane_dict[icao][19], plane_dict[icao][18])
                 if -transit_separation_sound_alert < separation_deg2 < transit_separation_sound_alert:
                     gong()
-                    emit_transit_notification(
-                        icao, flight, "sun", tst_int2, prediction_now,
-                        distance, separation_deg2)
+                emit_transit_notification(
+                    icao, flight, "sun", tst_int2, prediction_now,
+                    distance, separation_deg2)
                 if delta_time <= 2:  # Ustaw flagę tranzytu jeśli czas do tranzytu jest mniejszy lub równy 2 sekundy / Set transit flag if time to transit is less than or equal to 2 second
                     plane_dict[icao][31] = True
                     plane_dict[icao][30] = clock.now_utc()  # Ustaw czas rozpoczęcia tranzytu / Set transit start time

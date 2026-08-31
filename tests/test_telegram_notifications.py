@@ -132,6 +132,7 @@ class TelegramConfigTests(unittest.TestCase):
         self.assertFalse(config.telegram_notifications_enabled)
         self.assertEqual("", config.telegram_bot_token)
         self.assertEqual("", config.telegram_chat_id)
+        self.assertEqual(2.0, config.telegram_alert_separation_deg)
 
     def test_enabled_requires_token_and_chat(self):
         with self.assertRaises(ConfigurationError) as caught:
@@ -140,15 +141,30 @@ class TelegramConfigTests(unittest.TestCase):
         self.assertIn("TELEGRAM_BOT_TOKEN", message)
         self.assertIn("TELEGRAM_CHAT_ID", message)
 
+    def test_alert_separation_is_configurable_and_validated(self):
+        config = self.load({
+            **self.BASE, "TELEGRAM_ALERT_SEPARATION_DEG": "1.25"})
+        self.assertEqual(1.25, config.telegram_alert_separation_deg)
+        for invalid in ("0", "-1", "181", "nan", "not-a-number"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(
+                        ConfigurationError, "TELEGRAM_ALERT_SEPARATION_DEG"):
+                    self.load({
+                        **self.BASE,
+                        "TELEGRAM_ALERT_SEPARATION_DEG": invalid})
+
 
 class TransitIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.old_notifier = transit.telegram_notifier
+        self.old_threshold = transit.telegram_alert_separation_deg
+        transit.telegram_alert_separation_deg = 2.0
 
     def tearDown(self):
         transit.telegram_notifier = self.old_notifier
+        transit.telegram_alert_separation_deg = self.old_threshold
 
-    def test_emit_uses_existing_three_degree_condition_and_is_fail_open(self):
+    def test_emit_uses_configured_condition_and_is_fail_open(self):
         notifier = Mock()
         notifier.notify.side_effect = RuntimeError("network")
         transit.telegram_notifier = notifier
@@ -162,6 +178,34 @@ class TransitIntegrationTests(unittest.TestCase):
         self.assertFalse(transit.emit_transit_notification(
             "4BAB26", "THY7DB", "moon", tuple(outside), NOW, 100))
         notifier.notify.assert_not_called()
+
+    def test_telegram_two_degree_threshold_is_independent_of_gong(self):
+        notifier = Mock()
+        notifier.notify.return_value = True
+        transit.telegram_notifier = notifier
+        inside = (51, 21, 88, 7.99, 10, 100, 42, 0, 88, 6.0, NOW)
+        boundary = (51, 21, 88, 8.0, 10, 100, 42, 0, 88, 6.0, NOW)
+        audible_only = (51, 21, 88, 8.5, 10, 100, 42, 0, 88, 6.0, NOW)
+        self.assertTrue(transit.emit_transit_notification(
+            "A00001", "ONE", "moon", inside, NOW, 100))
+        self.assertFalse(transit.emit_transit_notification(
+            "A00002", "TWO", "moon", boundary, NOW, 100))
+        self.assertFalse(transit.emit_transit_notification(
+            "A00003", "THREE", "moon", audible_only, NOW, 100))
+        self.assertEqual(1, notifier.notify.call_count)
+
+    def test_telegram_horizon_requires_strictly_positive_time(self):
+        notifier = Mock()
+        transit.telegram_notifier = notifier
+        for seconds in (0.0, -0.1, 900.001):
+            result = (51, 21, 88, 6.5, 10, 100, seconds,
+                      0, 88, 6.2, NOW)
+            self.assertFalse(transit.emit_transit_notification(
+                "4BAB26", "THY7DB", "moon", result, NOW, 100))
+        result = (51, 21, 88, 6.5, 10, 100, 900.0, 0, 88, 6.2, NOW)
+        notifier.notify.return_value = True
+        self.assertTrue(transit.emit_transit_notification(
+            "4BAB26", "THY7DB", "moon", result, NOW, 100))
 
     def test_disabled_notification_path_does_not_change_prediction_result(self):
         old_geometry = (
