@@ -198,6 +198,7 @@ class TelegramConfigTests(unittest.TestCase):
         self.assertEqual("", config.telegram_bot_token)
         self.assertEqual("", config.telegram_chat_id)
         self.assertEqual(2.0, config.telegram_alert_separation_deg)
+        self.assertEqual(300.0, config.telegram_alert_horizon_seconds)
         self.assertEqual(5.0, config.telegram_alert_stability_seconds)
 
     def test_enabled_requires_token_and_chat(self):
@@ -235,16 +236,32 @@ class TelegramConfigTests(unittest.TestCase):
                         **self.BASE,
                         "TELEGRAM_ALERT_STABILITY_SECONDS": invalid})
 
+    def test_alert_horizon_is_configurable_and_validated(self):
+        config = self.load({
+            **self.BASE, "TELEGRAM_ALERT_HORIZON_SECONDS": "180"})
+        self.assertEqual(180.0, config.telegram_alert_horizon_seconds)
+        for invalid in ("0", "-1", "901", "nan", "bad"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(
+                        ConfigurationError,
+                        "TELEGRAM_ALERT_HORIZON_SECONDS"):
+                    self.load({
+                        **self.BASE,
+                        "TELEGRAM_ALERT_HORIZON_SECONDS": invalid})
+
 
 class TransitIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.old_notifier = transit.telegram_notifier
         self.old_threshold = transit.telegram_alert_separation_deg
+        self.old_horizon = transit.telegram_alert_horizon_seconds
         transit.telegram_alert_separation_deg = 2.0
+        transit.telegram_alert_horizon_seconds = 300.0
 
     def tearDown(self):
         transit.telegram_notifier = self.old_notifier
         transit.telegram_alert_separation_deg = self.old_threshold
+        transit.telegram_alert_horizon_seconds = self.old_horizon
 
     def test_emit_uses_configured_condition_and_is_fail_open(self):
         notifier = Mock()
@@ -280,15 +297,48 @@ class TransitIntegrationTests(unittest.TestCase):
     def test_telegram_horizon_requires_strictly_positive_time(self):
         notifier = Mock()
         transit.telegram_notifier = notifier
-        for seconds in (0.0, -0.1, 900.001):
+        for seconds in (0.0, -0.1, 300.001):
             result = (51, 21, 88, 6.5, 10, 100, seconds,
                       0, 88, 6.2, NOW)
             self.assertFalse(transit.emit_transit_notification(
                 "4BAB26", "THY7DB", "moon", result, NOW, 100))
-        result = (51, 21, 88, 6.5, 10, 100, 900.0, 0, 88, 6.2, NOW)
+        result = (51, 21, 88, 6.5, 10, 100, 300.0, 0, 88, 6.2, NOW)
         notifier.consider.return_value = True
         self.assertTrue(transit.emit_transit_notification(
             "4BAB26", "THY7DB", "moon", result, NOW, 100))
+
+    def test_configured_horizon_controls_eligibility(self):
+        notifier = Mock()
+        notifier.consider.return_value = True
+        transit.telegram_notifier = notifier
+        transit.telegram_alert_horizon_seconds = 120.0
+        outside = (51, 21, 88, 6.5, 10, 100, 120.001,
+                   0, 88, 6.2, NOW)
+        boundary = (51, 21, 88, 6.5, 10, 100, 120.0,
+                    0, 88, 6.2, NOW)
+        self.assertFalse(transit.emit_transit_notification(
+            "A00001", "OUTSIDE", "moon", outside, NOW, 100))
+        self.assertTrue(transit.emit_transit_notification(
+            "A00002", "BOUNDARY", "moon", boundary, NOW, 100))
+
+    def test_boundary_event_qualifies_after_existing_stability_period(self):
+        transport = FakeTransport()
+        notifier = telegram.TelegramNotifier(
+            transport, stability_seconds=5.0)
+        transit.telegram_notifier = notifier
+        initial = (51, 21, 88, 6.5, 10, 100, 300.0,
+                   0, 88, 6.2, NOW)
+        stable = (51, 21, 88, 6.5, 10, 100, 295.0,
+                  0, 88, 6.2, NOW)
+        try:
+            self.assertFalse(transit.emit_transit_notification(
+                "A00003", "STABLE", "moon", initial, NOW, 100))
+            self.assertTrue(transit.emit_transit_notification(
+                "A00003", "STABLE", "moon", stable,
+                NOW + datetime.timedelta(seconds=5), 100))
+            self.assertTrue(transport.sent.wait(1))
+        finally:
+            notifier.close()
 
     def test_disabled_notification_path_does_not_change_prediction_result(self):
         old_geometry = (

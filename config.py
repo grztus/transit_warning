@@ -42,6 +42,7 @@ class InstallationConfig:
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     telegram_alert_separation_deg: float = 2.0
+    telegram_alert_horizon_seconds: float = 300.0
     telegram_alert_stability_seconds: float = 5.0
     dashboard_enabled: bool = False
     dashboard_host: str = "127.0.0.1"
@@ -254,6 +255,9 @@ def load_installation_config(
     telegram_alert_separation_deg = _optional_finite_float(
         values, "TELEGRAM_ALERT_SEPARATION_DEG", 2.0, errors,
         minimum=0.0, maximum=180.0)
+    telegram_alert_horizon_seconds = _optional_finite_float(
+        values, "TELEGRAM_ALERT_HORIZON_SECONDS", 300.0, errors,
+        minimum=0.0, maximum=900.0)
     telegram_alert_stability_seconds = _optional_nonnegative_float(
         values, "TELEGRAM_ALERT_STABILITY_SECONDS", 5.0, errors,
         maximum=900.0)
@@ -313,6 +317,7 @@ def load_installation_config(
         telegram_bot_token=telegram_bot_token,
         telegram_chat_id=telegram_chat_id,
         telegram_alert_separation_deg=telegram_alert_separation_deg,
+        telegram_alert_horizon_seconds=telegram_alert_horizon_seconds,
         telegram_alert_stability_seconds=telegram_alert_stability_seconds,
         dashboard_enabled=dashboard_enabled,
         dashboard_host=dashboard_host,

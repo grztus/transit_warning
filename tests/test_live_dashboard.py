@@ -253,6 +253,14 @@ class DashboardRuntimeTests(unittest.TestCase):
         self.assertIn("setInterval(refresh,3000)", html)
         self.assertIn("document.querySelectorAll('[data-utc]')", html)
 
+    def test_candidate_countdown_and_identity_share_compact_mobile_row(self):
+        html = dashboard.DASHBOARD_HTML
+        self.assertIn(".candidate-heading{display:flex", html)
+        self.assertIn("gap:.65rem", html)
+        self.assertIn('class="candidate-heading"><div class="countdown"', html)
+        self.assertIn("<h2>${esc(c.callsign||c.icao)}</h2></div>", html)
+        self.assertIn("overflow-wrap:anywhere", html)
+
     def test_mobile_sep_uses_backend_class_and_time_is_seconds_only(self):
         html = dashboard.DASHBOARD_HTML
         self.assertIn("sepClass(c.separation_class)", html)

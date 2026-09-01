@@ -593,6 +593,7 @@ mlat_beast_enabled = False
 mlat_beast_host = None
 mlat_beast_port = None
 telegram_alert_separation_deg = 2.0
+telegram_alert_horizon_seconds = 300.0
 telegram_alert_stability_seconds = 5.0
 fleet_geometric_altitude_enabled = False
 fleet_geometric_altitude_estimator = None
@@ -608,7 +609,8 @@ def apply_installation_config(configuration: InstallationConfig):
     global mlat_host, mlat_port, beast_host, beast_port
     global raw_adsb_host, raw_adsb_port, mlat_beast_enabled
     global mlat_beast_host, mlat_beast_port, port_status
-    global telegram_alert_separation_deg, telegram_alert_stability_seconds
+    global telegram_alert_separation_deg, telegram_alert_horizon_seconds
+    global telegram_alert_stability_seconds
     global tmux_sep_green_max_deg, tmux_sep_yellow_max_deg
     global tmux_sep_visible_max_deg, dashboard_sep_green_max_deg
     global dashboard_sep_yellow_max_deg, dashboard_sep_visible_max_deg
@@ -645,6 +647,8 @@ def apply_installation_config(configuration: InstallationConfig):
     mlat_beast_port = configuration.mlat_beast_port
     telegram_alert_separation_deg = (
         configuration.telegram_alert_separation_deg)
+    telegram_alert_horizon_seconds = (
+        configuration.telegram_alert_horizon_seconds)
     telegram_alert_stability_seconds = (
         configuration.telegram_alert_stability_seconds)
     tmux_sep_green_max_deg = configuration.tmux_sep_green_max_deg
@@ -2012,7 +2016,7 @@ def emit_transit_notification(icao, callsign, celestial_body,
             vertical_transit_separation(transit_result[3], transit_result[9])
             if separation_deg is None else float(separation_deg))
         time_to_event = float(transit_result[6])
-        if not (0 < time_to_event <= 900
+        if not (0 < time_to_event <= telegram_alert_horizon_seconds
                 and separation < telegram_alert_separation_deg):
             telegram_notifier.cancel(icao, body)
             return False
