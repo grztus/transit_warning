@@ -9,7 +9,13 @@ import pytz
 
 import transit_warning as transit
 from config import InstallationConfig
-from observer_position import ObserverPosition, StaticObserverPositionProvider
+from observer_position import (
+    ObserverContext,
+    ObserverPosition,
+    RuntimeObserverPositionProvider,
+    StaticObserverPositionProvider,
+)
+from live_dashboard import MobileGpsState
 
 
 NOW = datetime.datetime(2026, 8, 30, 12, 0, tzinfo=pytz.utc)
@@ -79,6 +85,40 @@ class ObserverPositionTests(unittest.TestCase):
             (50.1, 20.1), 10000.0)
         self.assertEqual(first, second)
 
+    def test_mobile_policy_uses_static_elevation_and_last_known_fix(self):
+        mobile = MobileGpsState(enabled=True, fresh_seconds=15)
+        provider = RuntimeObserverPositionProvider(
+            ObserverPosition(50.0, 20.0, 200.0), mode="MOBILE",
+            fresh_seconds=15, fallback_enabled=False)
+        provider.attach_mobile_state(mobile)
+        self.assertEqual("MOBILE_NO_FIX", provider.resolve(NOW).effective_source)
+        mobile.update({
+            "latitude": 51.0, "longitude": 21.0, "accuracy": 4.0,
+            "altitude": 999.0, "altitudeAccuracy": 10.0,
+            "timestamp": 1.0,
+        }, NOW)
+        fresh = provider.resolve(NOW)
+        self.assertEqual("MOBILE_FRESH", fresh.effective_source)
+        self.assertEqual(200.0, fresh.position.elevation_m)
+        stale = provider.resolve(NOW + datetime.timedelta(seconds=16))
+        self.assertEqual("MOBILE_LAST_KNOWN", stale.effective_source)
+        self.assertEqual(fresh.position, stale.position)
+
+    def test_mobile_fallback_and_automatic_recovery(self):
+        mobile = MobileGpsState(enabled=True, fresh_seconds=15)
+        provider = RuntimeObserverPositionProvider(
+            ObserverPosition(50.0, 20.0, 200.0), mode="MOBILE",
+            fresh_seconds=15, fallback_enabled=True)
+        provider.attach_mobile_state(mobile)
+        self.assertEqual("STATIC_FALLBACK", provider.resolve(NOW).effective_source)
+        mobile.update({
+            "latitude": 51.0, "longitude": 21.0, "accuracy": 4.0,
+            "altitude": None, "altitudeAccuracy": None, "timestamp": 1.0,
+        }, NOW)
+        self.assertEqual("MOBILE_FRESH", provider.resolve(NOW).effective_source)
+        self.assertEqual("STATIC_FALLBACK", provider.resolve(
+            NOW + datetime.timedelta(seconds=16)).effective_source)
+
     def test_snapshot_uses_explicit_prediction_observer(self):
         manager = Mock()
         old_manager = transit.transit_snapshot_manager
@@ -108,14 +148,43 @@ class ObserverPositionTests(unittest.TestCase):
             transit.transit_snapshot_manager = old_manager
             transit.moon_predicted_transit_utc.pop("ABC123", None)
 
+    def test_mobile_snapshot_records_source_without_mobile_coordinates(self):
+        manager = Mock()
+        old_manager = transit.transit_snapshot_manager
+        transit.transit_snapshot_manager = manager
+        explicit = ObserverPosition(49.0, 19.0, 300.0)
+        context = ObserverContext(
+            explicit, "MOBILE", "MOBILE_FRESH", 2.0, 5.0, False, False, 4)
+        result = (49.1, 19.1, 100.0, 20.1, 10.0, 20.0,
+                  10.0, 0, 100.0, 20.0, NOW)
+        solver_input = {"aircraft_altitude_m": 10000.0,
+                        "groundspeed": 800.0, "track": 180.0,
+                        "aircraft_lat": 49.1, "aircraft_lon": 19.1}
+        transit.moon_predicted_transit_utc["ABC123"] = (
+            NOW + datetime.timedelta(seconds=10))
+        try:
+            with patch.object(transit, "build_frozen_prediction_state",
+                              return_value={}):
+                transit.capture_transit_prediction(
+                    "ABC123", "TEST", "moon", result, NOW, solver_input,
+                    explicit, context)
+            payload = manager.consider_prediction.call_args.args[0]
+            self.assertEqual("MOBILE_FRESH", payload[
+                "observer_context"]["effective_source"])
+            self.assertNotIn("lat", payload["observer"])
+            self.assertNotIn("lon", payload["observer"])
+        finally:
+            transit.transit_snapshot_manager = old_manager
+            transit.moon_predicted_transit_utc.pop("ABC123", None)
+
     def test_dashboard_and_telegram_payloads_do_not_gain_observer_fields(self):
         dashboard_source = Path("live_dashboard.py").read_text(encoding="utf-8")
         telegram_source = Path("telegram_notifications.py").read_text(
             encoding="utf-8")
-        for source in (dashboard_source, telegram_source):
-            encoded = json.dumps(source).lower()
-            self.assertNotIn("observer_position", encoded)
-            self.assertNotIn("latitude_deg", encoded)
+        encoded_telegram = json.dumps(telegram_source).lower()
+        self.assertNotIn("observer_position", encoded_telegram)
+        self.assertNotIn("latitude_deg", encoded_telegram)
+        self.assertNotIn("latitude_deg", json.dumps(dashboard_source).lower())
 
 
 if __name__ == "__main__":

@@ -51,6 +51,10 @@ class InstallationConfig:
     dashboard_history_dir: str = "recordings/dashboard_history"
     dashboard_mobile_gps_enabled: bool = False
     dashboard_mobile_gps_fresh_seconds: float = 15.0
+    observer_mode: str = "STATIC"
+    mobile_gps_stale_warning_seconds: float = 30.0
+    mobile_gps_critical_warning_seconds: float = 300.0
+    mobile_gps_static_fallback_enabled: bool = False
     tmux_sep_green_max_deg: float = 3.0
     tmux_sep_yellow_max_deg: float = 5.0
     tmux_sep_visible_max_deg: float = 7.0
@@ -277,6 +281,26 @@ def load_installation_config(
     dashboard_mobile_gps_fresh_seconds = _optional_finite_float(
         values, "DASHBOARD_MOBILE_GPS_FRESH_SECONDS", 15.0, errors,
         minimum=0.0, maximum=3600.0)
+    observer_mode = str(values.get("OBSERVER_MODE", "STATIC")).strip().upper()
+    if observer_mode not in ("STATIC", "MOBILE"):
+        errors.append("OBSERVER_MODE must be STATIC or MOBILE")
+    mobile_gps_stale_warning_seconds = _optional_finite_float(
+        values, "MOBILE_GPS_STALE_WARNING_SECONDS", 30.0, errors,
+        minimum=0.0, maximum=86400.0)
+    mobile_gps_critical_warning_seconds = _optional_finite_float(
+        values, "MOBILE_GPS_CRITICAL_WARNING_SECONDS", 300.0, errors,
+        minimum=0.0, maximum=86400.0)
+    mobile_gps_static_fallback_enabled = _boolean(
+        values, "MOBILE_GPS_STATIC_FALLBACK_ENABLED", False, errors)
+    if (mobile_gps_stale_warning_seconds is not None
+            and mobile_gps_critical_warning_seconds is not None
+            and mobile_gps_critical_warning_seconds
+            <= mobile_gps_stale_warning_seconds):
+        errors.append("MOBILE_GPS_CRITICAL_WARNING_SECONDS must be greater than MOBILE_GPS_STALE_WARNING_SECONDS")
+    if observer_mode == "MOBILE" and (
+            dashboard_enabled is False
+            or dashboard_mobile_gps_enabled is False):
+        errors.append("DASHBOARD_ENABLED and DASHBOARD_MOBILE_GPS_ENABLED must be true when OBSERVER_MODE=MOBILE")
     tmux_thresholds = _presentation_thresholds(values, "TMUX", errors)
     dashboard_thresholds = _presentation_thresholds(
         values, "DASHBOARD", errors)
@@ -334,6 +358,12 @@ def load_installation_config(
         dashboard_mobile_gps_enabled=dashboard_mobile_gps_enabled,
         dashboard_mobile_gps_fresh_seconds=(
             dashboard_mobile_gps_fresh_seconds),
+        observer_mode=observer_mode,
+        mobile_gps_stale_warning_seconds=mobile_gps_stale_warning_seconds,
+        mobile_gps_critical_warning_seconds=(
+            mobile_gps_critical_warning_seconds),
+        mobile_gps_static_fallback_enabled=(
+            mobile_gps_static_fallback_enabled),
         tmux_sep_green_max_deg=tmux_thresholds[0],
         tmux_sep_yellow_max_deg=tmux_thresholds[1],
         tmux_sep_visible_max_deg=tmux_thresholds[2],

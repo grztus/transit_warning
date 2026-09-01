@@ -211,6 +211,11 @@ class DashboardState:
             changed = self.withdraw(icao, body, now_utc) or changed
         return changed
 
+    def invalidate_live(self):
+        """Discard observer-dependent live candidates without history output."""
+        with self._lock:
+            self._live = {"SUN": {}, "MOON": {}}
+
     def tick(self, now_utc):
         with self._lock:
             self._generated_at_utc = now_utc
@@ -343,6 +348,9 @@ class DisabledDashboard:
     def tick(self, now_utc):
         return None
 
+    def invalidate_live(self):
+        return None
+
     def close(self):
         return None
 
@@ -369,6 +377,9 @@ class DashboardRuntime:
     def tick(self, now_utc):
         return self.state.tick(now_utc)
 
+    def invalidate_live(self):
+        return self.state.invalidate_live()
+
     def close(self):
         if self.server is not None:
             self.server.shutdown()
@@ -379,7 +390,29 @@ class DashboardRuntime:
             self.state.history_store.close()
 
 
-def _handler_factory(state, now_utc, mobile_gps_state):
+def _handler_factory(state, now_utc, mobile_gps_state,
+                     observer_position_provider=None,
+                     stale_warning_seconds=30.0,
+                     critical_warning_seconds=300.0):
+    def observer_diagnostics():
+        if observer_position_provider is None:
+            return {"requested_mode": "STATIC", "effective_source": "STATIC"}
+        context = observer_position_provider.resolve(now_utc())
+        result = {
+            "requested_mode": context.requested_mode,
+            "effective_source": context.effective_source,
+            "fallback_enabled": context.fallback_enabled,
+            "fallback_active": context.fallback_active,
+            "mobile_age_seconds": context.mobile_age_seconds,
+            "mobile_accuracy_m": context.mobile_accuracy_m,
+        }
+        age = context.mobile_age_seconds
+        result["gps_health"] = (
+            "NO_FIX" if age is None else
+            "CRITICAL" if age > critical_warning_seconds else
+            "STALE" if age > stale_warning_seconds else "ACTIVE")
+        return result
+
     class DashboardHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             parsed = urlsplit(self.path)
@@ -406,6 +439,8 @@ def _handler_factory(state, now_utc, mobile_gps_state):
                     disposition="attachment; filename=transit_history.csv")
             elif path == "/api/mobile-gps":
                 self._send_json(mobile_gps_state.diagnostics(now_utc()))
+            elif path == "/api/observer":
+                self._send_json(observer_diagnostics())
             elif path in ("/", "/index.html"):
                 self._send("text/html; charset=utf-8",
                            DASHBOARD_HTML.encode("utf-8"))
@@ -413,7 +448,35 @@ def _handler_factory(state, now_utc, mobile_gps_state):
                 self.send_error(404)
 
         def do_POST(self):
-            if urlsplit(self.path).path != "/api/mobile-gps":
+            path = urlsplit(self.path).path
+            if path == "/api/observer":
+                if observer_position_provider is None:
+                    self._send_json({"error": "Observer control unavailable"}, status=403)
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < length <= MAX_MOBILE_GPS_REQUEST_BYTES:
+                        raise ValueError
+                    payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                    if set(payload) - {"mode", "fallback_enabled"}:
+                        raise ValueError
+                    if "mode" in payload:
+                        if (str(payload["mode"]).upper() == "MOBILE"
+                                and not mobile_gps_state.enabled):
+                            self._send_json(
+                                {"error": "Mobile GPS is disabled"}, status=403)
+                            return
+                        observer_position_provider.set_mode(payload["mode"], now_utc())
+                    if "fallback_enabled" in payload:
+                        if not isinstance(payload["fallback_enabled"], bool):
+                            raise ValueError
+                        observer_position_provider.set_fallback_enabled(
+                            payload["fallback_enabled"], now_utc())
+                    self._send_json(observer_diagnostics())
+                except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+                    self._send_json({"error": "Invalid observer control payload"}, status=400)
+                return
+            if path != "/api/mobile-gps":
                 self.send_error(404)
                 return
             if not mobile_gps_state.enabled:
@@ -431,6 +494,8 @@ def _handler_factory(state, now_utc, mobile_gps_state):
                     raise ValueError
                 payload = json.loads(self.rfile.read(length).decode("utf-8"))
                 diagnostics = mobile_gps_state.update(payload, now_utc())
+                if observer_position_provider is not None:
+                    observer_position_provider.resolve(now_utc())
             except (UnicodeDecodeError, json.JSONDecodeError,
                     TypeError, ValueError):
                 self._send_json(
@@ -503,7 +568,10 @@ def start_dashboard(enabled, host, port, now_utc, error_handler=None,
                     history_enabled=True,
                     history_dir="recordings/dashboard_history",
                     mobile_gps_enabled=False,
-                    mobile_gps_fresh_seconds=DEFAULT_MOBILE_GPS_FRESH_SECONDS):
+                    mobile_gps_fresh_seconds=DEFAULT_MOBILE_GPS_FRESH_SECONDS,
+                    observer_position_provider=None,
+                    mobile_gps_stale_warning_seconds=30.0,
+                    mobile_gps_critical_warning_seconds=300.0):
     if not enabled:
         return DisabledDashboard()
     errors = error_handler or (lambda message: None)
@@ -518,11 +586,16 @@ def start_dashboard(enabled, host, port, now_utc, error_handler=None,
     mobile_gps_state = MobileGpsState(
         enabled=mobile_gps_enabled,
         fresh_seconds=mobile_gps_fresh_seconds)
+    if observer_position_provider is not None:
+        observer_position_provider.attach_mobile_state(mobile_gps_state)
     try:
         state.tick(now_utc())
         server = server_factory(
             (host, port), _handler_factory(
-                state, now_utc, mobile_gps_state))
+                state, now_utc, mobile_gps_state,
+                observer_position_provider,
+                mobile_gps_stale_warning_seconds,
+                mobile_gps_critical_warning_seconds))
         thread = threading.Thread(
             target=server.serve_forever, name="transit-dashboard", daemon=True)
         thread.start()
@@ -551,11 +624,12 @@ h1,h2,p{margin:4px 0}.candidate-heading{display:flex;align-items:baseline;gap:.6
 .sep{font-weight:750}.primary .sep{font-size:1.45rem;margin:7px 0}.sep.GREEN{color:#55d982}.sep.YELLOW{color:#f0c34d}.sep.RED{color:#ff6b6b}
 .history-controls{display:flex;flex-wrap:wrap;gap:7px;margin:8px 0 12px}.history-controls input,.history-controls select{min-width:0;padding:8px;border:1px solid #3a4558;border-radius:7px;background:#11161e;color:#eef}.history-controls input[type=date]{flex:1 1 135px}.history-controls input[type=search]{flex:2 1 150px}.history-controls select{flex:1 1 80px}.history-actions{display:flex;gap:8px;margin-top:10px}.event{margin-top:8px}.event .sep{font-size:1.05rem}
 .health{margin-left:auto;font-size:.8rem}.dot{display:inline-block;width:.65rem;height:.65rem;border-radius:50%;margin-right:.35rem}.active .dot{background:#36c66b}.stale .dot{background:#e0a62f}.disconnected .dot{background:#e45454}
-.mobile-gps{display:flex;align-items:center;flex-wrap:wrap;gap:.45rem .75rem;margin:0 0 12px;padding:8px 10px;border:1px solid #303949;border-radius:9px;font-size:.82rem}.mobile-gps strong{font-size:.85rem}.mobile-gps button{padding:6px 10px}.gps-fields{display:flex;flex-wrap:wrap;gap:.35rem .8rem}.gps-active{color:#55d982}.gps-stale{color:#f0c34d}.gps-error{color:#ff6b6b}
+.mobile-gps{display:flex;align-items:center;flex-wrap:wrap;gap:.45rem .75rem;margin:0 0 12px;padding:8px 10px;border:1px solid #303949;border-radius:9px;font-size:.82rem}.mobile-gps strong{font-size:.85rem}.mobile-gps button{padding:6px 10px}.gps-fields,.observer-fields{display:flex;flex-wrap:wrap;gap:.35rem .8rem}.gps-active,.observer-ok{color:#55d982}.gps-stale,.observer-warn{color:#f0c34d}.gps-error,.observer-error{color:#ff6b6b}
 @media(max-width:650px){.grid{grid-template-columns:1fr}}
 </style></head><body>
 <nav><button id="live-tab" class="active">LIVE</button><button id="history-tab">HISTORY</button><span id="health" class="health disconnected"><span class="dot"></span><span class="label">DISCONNECTED</span></span></nav>
 <section class="mobile-gps"><strong>MOBILE GPS</strong><button id="gps-start">Start GPS</button><button id="gps-stop" disabled>Stop GPS</button><span id="gps-fields" class="gps-fields"><span>Status: OFF</span></span></section>
+<section class="mobile-gps"><strong>OBSERVER</strong><button id="observer-static">STATIC</button><button id="observer-mobile">MOBILE</button><label><input id="observer-fallback" type="checkbox"> static fallback</label><span id="observer-fields" class="observer-fields"></span></section>
 <main id="live" class="grid"><section class="panel"><h1>☀️ SUN</h1><div id="sun"></div></section>
 <section class="panel"><h1>🌙 MOON</h1><div id="moon"></div></section></main>
 <main id="history" class="hidden"><section class="panel"><h1>HISTORY</h1><div class="history-controls"><input id="history-date" type="date" aria-label="UTC date"><input id="history-search" type="search" placeholder="Callsign" aria-label="Callsign search"><select id="history-body" aria-label="Celestial body"><option value="ALL">ALL</option><option value="SUN">SUN</option><option value="MOON">MOON</option></select></div><div id="events"></div><div class="history-actions"><button id="load-more" class="hidden">LOAD MORE</button><button id="export-csv">EXPORT CSV</button></div></section></main>
@@ -567,6 +641,8 @@ function countdown(utc){let s=Math.max(0,Math.floor((Date.parse(utc)-Date.now())
 function eventTime(utc){return String(utc||'').slice(11,19)+' UTC'}
 function sepClass(value){return ['GREEN','YELLOW','RED'].includes(value)?value:''}
 function renderGps(data,statusOverride=null){let status=statusOverride||(gpsEnabled?data.status:'OFF'),root=document.getElementById('gps-fields'),parts=[`<span class="gps-${status.toLowerCase()}">Status: ${esc(status)}</span>`];if(gpsEnabled&&data.accuracy_m!=null){parts.push(`<span>Accuracy: ${Math.round(data.accuracy_m)} m</span>`,`<span>Altitude: ${data.altitude_available?'available':'unavailable'}</span>`,`<span>Alt accuracy: ${data.altitude_accuracy_m==null?'unavailable':Math.round(data.altitude_accuracy_m)+' m'}</span>`,`<span>Age: ${Math.round(data.age_seconds)} s</span>`)}root.innerHTML=parts.join('');document.getElementById('gps-start').disabled=gpsEnabled||!gpsAvailable;document.getElementById('gps-stop').disabled=!gpsEnabled}
+function renderObserver(data){let health=data.gps_health||'ACTIVE',cls=(data.effective_source==='MOBILE_FRESH'||data.effective_source==='STATIC')?'observer-ok':health==='STALE'?'observer-warn':'observer-error',age=data.mobile_age_seconds==null?'—':Math.round(data.mobile_age_seconds)+' s';document.getElementById('observer-fields').innerHTML=`<span class="${cls}">OBSERVER: ${esc(data.requested_mode)}</span><span class="${cls}">SOLVER: ${esc(data.effective_source)}</span><span class="${cls}">GPS: ${esc(health)}</span><span class="${cls}">AGE: ${age}</span>`;document.getElementById('observer-static').classList.toggle('active',data.requested_mode==='STATIC');document.getElementById('observer-mobile').classList.toggle('active',data.requested_mode==='MOBILE');document.getElementById('observer-mobile').disabled=!gpsAvailable;document.getElementById('observer-fallback').checked=Boolean(data.fallback_enabled)}
+async function observerRequest(payload=null){let options={cache:'no-store'};if(payload){options.method='POST';options.headers={'Content-Type':'application/json'};options.body=JSON.stringify(payload)}let response=await fetch('/api/observer',options),data=await response.json();if(!response.ok)throw Error(data.error||'Observer request failed');renderObserver(data)}
 async function gpsRequest(method,payload){let options={method,headers:{'Content-Type':'application/json'}};if(payload)options.body=JSON.stringify(payload);let response=await fetch('/api/mobile-gps',options),data=await response.json();if(!response.ok)throw Error(data.error||'GPS request failed');return data}
 async function submitGps(position){if(!gpsEnabled)return;let c=position.coords;try{let data=await gpsRequest('POST',{latitude:c.latitude,longitude:c.longitude,accuracy:c.accuracy,altitude:c.altitude,altitudeAccuracy:c.altitudeAccuracy,timestamp:position.timestamp});renderGps(data)}catch(e){renderGps({},'ERROR')}}
 function gpsError(){if(gpsEnabled)renderGps({},'ERROR')}
@@ -583,6 +659,7 @@ function render(){renderBody('sun');renderBody('moon')}
 async function refresh(){let controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),2500);try{let response=await fetch('/api/state',{cache:'no-store',signal:controller.signal});if(!response.ok)throw Error('HTTP');state=await response.json();failedPolls=0;render();renderHealth()}catch(e){failedPolls++;renderHealth()}finally{clearTimeout(timeout)}}
 setInterval(()=>{document.querySelectorAll('[data-utc]').forEach(x=>x.textContent=countdown(x.dataset.utc));renderHealth()},1000);setInterval(refresh,3000);refresh();
 setInterval(refreshGpsStatus,3000);loadGpsAvailability();document.getElementById('gps-start').onclick=startGps;document.getElementById('gps-stop').onclick=stopGps;
+setInterval(()=>observerRequest().catch(()=>{}),3000);observerRequest().catch(()=>{});document.getElementById('observer-static').onclick=()=>observerRequest({mode:'STATIC'});document.getElementById('observer-mobile').onclick=()=>observerRequest({mode:'MOBILE'});document.getElementById('observer-fallback').onchange=e=>observerRequest({fallback_enabled:e.target.checked});
 document.getElementById('live-tab').onclick=()=>{document.getElementById('live').classList.remove('hidden');document.getElementById('history').classList.add('hidden')};
 document.getElementById('history-tab').onclick=()=>{document.getElementById('history').classList.remove('hidden');document.getElementById('live').classList.add('hidden');loadHistory(true)};
 for(let id of ['history-date','history-search','history-body'])document.getElementById(id).onchange=()=>loadHistory(true);

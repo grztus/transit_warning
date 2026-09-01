@@ -70,6 +70,10 @@ class InstallationConfigTests(unittest.TestCase):
         self.assertFalse(result.mlat_beast_enabled)
         self.assertEqual(result.mlat_beast_host, result.mlat_host)
         self.assertEqual(result.mlat_beast_port, 30105)
+        self.assertEqual("STATIC", result.observer_mode)
+        self.assertEqual(30.0, result.mobile_gps_stale_warning_seconds)
+        self.assertEqual(300.0, result.mobile_gps_critical_warning_seconds)
+        self.assertFalse(result.mobile_gps_static_fallback_enabled)
         self.assertEqual(
             (3.0, 5.0, 7.0),
             (result.tmux_sep_green_max_deg,
@@ -99,6 +103,22 @@ class InstallationConfigTests(unittest.TestCase):
             result.dashboard_sep_green_max_deg,
             result.dashboard_sep_yellow_max_deg,
             result.dashboard_sep_visible_max_deg))
+
+    def test_mobile_observer_configuration_and_warning_order(self):
+        result = self.load({
+            **REQUIRED, "DASHBOARD_ENABLED": "true",
+            "DASHBOARD_MOBILE_GPS_ENABLED": "true",
+            "OBSERVER_MODE": "mobile",
+            "MOBILE_GPS_STALE_WARNING_SECONDS": "20",
+            "MOBILE_GPS_CRITICAL_WARNING_SECONDS": "120",
+            "MOBILE_GPS_STATIC_FALLBACK_ENABLED": "true",
+        })
+        self.assertEqual("MOBILE", result.observer_mode)
+        self.assertTrue(result.mobile_gps_static_fallback_enabled)
+        with self.assertRaisesRegex(ConfigurationError, "must be greater"):
+            self.load({**REQUIRED,
+                       "MOBILE_GPS_STALE_WARNING_SECONDS": "30",
+                       "MOBILE_GPS_CRITICAL_WARNING_SECONDS": "30"})
 
     def test_rejects_invalid_presentation_thresholds(self):
         cases = (

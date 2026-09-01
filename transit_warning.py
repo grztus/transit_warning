@@ -92,7 +92,11 @@ from environment import (
 )
 from metar import fetch_awc_metar
 from mlat_beast_track import decode_mlat_beast_tc19, truncation_bin_consistent
-from observer_position import ObserverPosition, StaticObserverPositionProvider
+from observer_position import (
+    ObserverContext,
+    ObserverPosition,
+    RuntimeObserverPositionProvider,
+)
 from fleet_geometric_altitude import (
     FleetGeometricAltitudeEstimator,
     PgmGeoidProvider,
@@ -617,12 +621,19 @@ def apply_installation_config(configuration: InstallationConfig):
     global fleet_geometric_altitude_enabled
     global fleet_geometric_altitude_estimator
     global geometric_altitude_selection_enabled
-    observer_position_provider = StaticObserverPositionProvider(
+    observer_position_provider = RuntimeObserverPositionProvider(
         ObserverPosition(
             latitude_deg=configuration.observer_lat,
             longitude_deg=configuration.observer_lon,
             elevation_m=configuration.observer_elevation_m,
-        ))
+        ),
+        mode=("STATIC" if isinstance(clock, ReplayClock)
+              else getattr(configuration, "observer_mode", "STATIC")),
+        fresh_seconds=getattr(
+            configuration, "dashboard_mobile_gps_fresh_seconds", 15.0),
+        fallback_enabled=getattr(
+            configuration, "mobile_gps_static_fallback_enabled", False),
+    )
     observer_position = observer_position_provider.current()
     my_lat = observer_position.latitude_deg
     my_lon = observer_position.longitude_deg
@@ -681,7 +692,21 @@ def current_observer_position():
     """Return the immutable observer context configured for this process."""
     if observer_position_provider is None:
         raise RuntimeError("observer position is not configured")
-    return observer_position_provider.current()
+    try:
+        now_utc = clock.now_utc()
+    except RuntimeError:
+        now_utc = None
+    return observer_position_provider.current(now_utc)
+
+
+def current_observer_context():
+    if observer_position_provider is None:
+        raise RuntimeError("observer position is not configured")
+    try:
+        now_utc = clock.now_utc()
+    except RuntimeError:
+        now_utc = None
+    return observer_position_provider.resolve(now_utc)
 
 
 def ephem_observer_for_position(observer_position):
@@ -1876,7 +1901,7 @@ def get_vertical_transit_diagnostic(icao, celestial_body):
 
 def _capture_transit_prediction(icao, callsign, celestial_body,
                                 transit_result, now_utc, solver_input,
-                                observer_position):
+                                observer_position, observer_context=None):
     """Pass an already solved prediction to the optional validation layer."""
     if transit_snapshot_manager is None or not transit_result:
         return
@@ -1955,6 +1980,20 @@ def _capture_transit_prediction(icao, callsign, celestial_body,
             icao, now_utc),
         "frozen_prediction_state": frozen_prediction_state,
     }
+    if observer_context is not None:
+        snapshot_prediction["observer_context"] = {
+            "requested_mode": observer_context.requested_mode,
+            "effective_source": observer_context.effective_source,
+            "mobile_age_seconds": observer_context.mobile_age_seconds,
+            "mobile_accuracy_m": observer_context.mobile_accuracy_m,
+            "fallback_enabled": observer_context.fallback_enabled,
+            "fallback_active": observer_context.fallback_active,
+            "epoch": observer_context.epoch,
+        }
+        if observer_context.requested_mode == "MOBILE":
+            snapshot_prediction["observer"] = {
+                "elevation_m": observer_position.elevation_m,
+            }
     if altitude_selection is not None:
         snapshot_prediction["geometric_altitude_selection"] = {
             "enabled": True,
@@ -1985,7 +2024,7 @@ def _capture_transit_prediction(icao, callsign, celestial_body,
 
 def capture_transit_prediction(icao, callsign, celestial_body,
                                transit_result, now_utc, solver_input,
-                               observer_position=None):
+                               observer_position=None, observer_context=None):
     """Keep every TC29G failure outside the aircraft input path."""
     try:
         if observer_position is None:
@@ -1993,7 +2032,7 @@ def capture_transit_prediction(icao, callsign, celestial_body,
                 float(my_lat), float(my_lon), float(my_elevation_const))
         _capture_transit_prediction(
             icao, callsign, celestial_body, transit_result, now_utc,
-            solver_input, observer_position)
+            solver_input, observer_position, observer_context)
     except Exception:
         pass
 
@@ -2167,6 +2206,31 @@ def clear_transit_prediction_state(icao, entry, celestial_body,
     cancel_pending_transit_notification(icao, celestial_body)
     try:
         dashboard_runtime.withdraw(icao, celestial_body, clock.now_utc())
+    except Exception:
+        pass
+
+
+@synchronized_plane_dict
+def invalidate_observer_dependent_state(observer_context=None):
+    """Remove live predictions computed for a previous observer epoch."""
+    for icao, entry in plane_dict.items():
+        clear_transit_prediction(entry, 18)
+        clear_transit_prediction(entry, 23)
+        cancel_pending_transit_notification(icao)
+    sun_prediction_last_valid.clear()
+    moon_prediction_last_valid.clear()
+    sun_predicted_transit_utc.clear()
+    moon_predicted_transit_utc.clear()
+    vertical_transit_diagnostics.clear()
+    geometric_altitude_selections.clear()
+    transit_solver_diagnostics.clear()
+    try:
+        dashboard_runtime.invalidate_live()
+    except Exception:
+        pass
+    try:
+        if transit_snapshot_manager is not None:
+            transit_snapshot_manager.invalidate_active_predictions()
     except Exception:
         pass
 
@@ -2997,18 +3061,22 @@ def get_metar_press():
 
 # Funkcja do generowania tabeli wyjściowej / Function to generate output table
 @synchronized_plane_dict
-def tabela(output=None, full=False, force=False):
+def tabela(output=None, full=False, force=False, observer_position=None):
     global last_t, sun_body_angular_diameter_arcsec
     global moon_body_angular_diameter_arcsec
     global sun_body_evaluated_at_utc, moon_body_evaluated_at_utc
     output = sys.stdout if output is None else output
     emit = lambda *args: print(*args, file=output)
-    gatech.date = clock.ephem_now()  # Aktualizuj datę w ephemeris / Update date in ephemeris
-    vm, vs = ephem.Moon(gatech), ephem.Sun(gatech)  # Pobierz dane o Księżycu i Słońcu / Get data about the Moon and the Sun
-    vm.compute(gatech)  # Oblicz pozycję Księżyca / Compute Moon position
-    vs.compute(gatech)  # Oblicz pozycję Słońca / Compute Sun position
+    body_observer = gatech
+    if (observer_position is not None
+            and observer_position != observer_position_provider.static_position):
+        body_observer = ephem_observer_for_position(observer_position)
+    body_observer.date = clock.ephem_now()  # Update ephemeris time
+    vm, vs = ephem.Moon(body_observer), ephem.Sun(body_observer)
+    vm.compute(body_observer)
+    vs.compute(body_observer)
     try:
-        body_evaluated_at_utc = ephem.Date(gatech.date).datetime().replace(
+        body_evaluated_at_utc = ephem.Date(body_observer.date).datetime().replace(
             tzinfo=pytz.utc)
     except (TypeError, ValueError):
         body_evaluated_at_utc = clock.now_utc()
@@ -3154,6 +3222,16 @@ def tabela(output=None, full=False, force=False):
             emit(status_line)
 
     return sun_alt, sun_az, moon_alt, moon_az
+
+
+def tabela_for_observer(observer_position):
+    """Render with one observer while retaining simple legacy test doubles."""
+    try:
+        return tabela(observer_position=observer_position)
+    except TypeError as error:
+        if "observer_position" not in str(error):
+            raise
+        return tabela()
 
 
 def request_table_snapshot(signum=None, frame=None):
@@ -3527,7 +3605,13 @@ def process_line(line, port):
 
     # Capture one immutable observer for this complete processing/prediction
     # operation so no calculation can observe a partially changed context.
-    observer_position = current_observer_position()
+    observer_context = current_observer_context()
+    observer_position = observer_context.position
+    observer_prediction_available = observer_position is not None
+    # Keep ingesting valid aircraft state while MOBILE has no fix.  Static
+    # geometry here is transient bookkeeping only; prediction is withheld.
+    if observer_position is None:
+        observer_position = observer_position_provider.static_position
     observer_coordinates = observer_position.coordinates
 
     parts = line.split(",")
@@ -3744,16 +3828,28 @@ def process_line(line, port):
             effective_motion_state(icao, motion_now), motion_now)
         aircraft_motion_freshness_status[icao] = motion_freshness
 
-    if (mtype in ["3", "4"] and (
+    if (observer_prediction_available and mtype in ["3", "4"] and (
             icao in plane_dict and plane_dict[icao][2]
             and plane_dict[icao][11] and is_float_try(plane_dict[icao][4]))):
         flight = plane_dict[icao][1]
         plane_lat = plane_dict[icao][2]
         plane_lon = plane_dict[icao][3]
         elevation = plane_dict[icao][4]
-        distance = plane_dict[icao][5]
-        azimuth = plane_dict[icao][6]
-        altitude = plane_dict[icao][7]
+        # Re-evaluate observer-relative values from the same frozen context.
+        # This is numerically identical in STATIC mode and prevents an MSG,4
+        # from reusing geometry captured before an observer-source change.
+        distance = round(haversine(
+            observer_coordinates, (plane_lat, plane_lon)), 1)
+        if distance == 0:
+            distance = 0.01
+        angular_position = angular_position_from_observer(
+            observer_coordinates, observer_position.elevation_m,
+            (plane_lat, plane_lon), elevation, distance_km=distance)
+        azimuth = angular_position.azimuth_deg
+        altitude = round(angular_position.altitude_angle_deg, 1)
+        plane_dict[icao][5] = distance
+        plane_dict[icao][6] = azimuth
+        plane_dict[icao][7] = altitude
         effective_track = effective_track_parameter(
             icao, plane_dict[icao][11], clock.now_utc())
         track = effective_track.value if effective_track is not None else 0.0
@@ -3783,7 +3879,8 @@ def process_line(line, port):
                 dashboard_runtime.withdraw_aircraft(icao, clock.now_utc())
             except Exception:
                 pass
-            sun_alt, sun_az, moon_alt, moon_az = tabela()
+            sun_alt, sun_az, moon_alt, moon_az = tabela_for_observer(
+                observer_position)
             clean_dict()
             clean_transit_dict()
             return
@@ -3851,7 +3948,8 @@ def process_line(line, port):
                     icao, "moon", prediction_now, final_time2x)
                 capture_transit_prediction(
                     icao, flight, "moon", tst_int1, prediction_now,
-                    snapshot_solver_input, observer_position)
+                    snapshot_solver_input, observer_position,
+                    observer_context)
             else:
                 clear_transit_prediction_state(
                     icao, plane_dict[icao], "moon", 23)
@@ -3894,7 +3992,8 @@ def process_line(line, port):
                     icao, "sun", prediction_now, final_time2x)
                 capture_transit_prediction(
                     icao, flight, "sun", tst_int2, prediction_now,
-                    snapshot_solver_input, observer_position)
+                    snapshot_solver_input, observer_position,
+                    observer_context)
             else:
                 clear_transit_prediction_state(
                     icao, plane_dict[icao], "sun", 18)
@@ -3905,7 +4004,8 @@ def process_line(line, port):
             else:
                 expire_transit_prediction_after_grace(
                     icao, plane_dict[icao], "sun", 18, prediction_now)
-    sun_alt, sun_az, moon_alt, moon_az = tabela()
+    sun_alt, sun_az, moon_alt, moon_az = tabela_for_observer(
+        observer_position)
     clean_dict()
     clean_transit_dict()
 
@@ -3952,7 +4052,14 @@ def main():
         mobile_gps_enabled=configuration.dashboard_mobile_gps_enabled,
         mobile_gps_fresh_seconds=(
             configuration.dashboard_mobile_gps_fresh_seconds),
+        observer_position_provider=observer_position_provider,
+        mobile_gps_stale_warning_seconds=(
+            getattr(configuration, "mobile_gps_stale_warning_seconds", 30.0)),
+        mobile_gps_critical_warning_seconds=(
+            getattr(configuration, "mobile_gps_critical_warning_seconds", 300.0)),
     )
+    observer_position_provider.set_change_handler(
+        invalidate_observer_dependent_state)
     install_table_snapshot_signal_handler()
     stop_event.clear()
     with shutdown_lock:

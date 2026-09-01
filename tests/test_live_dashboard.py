@@ -332,6 +332,28 @@ class DashboardRuntimeTests(unittest.TestCase):
         self.assertNotIn("latitude", result)
         self.assertNotIn("longitude", result)
 
+    def test_observer_control_is_private_and_reports_effective_source(self):
+        from observer_position import ObserverPosition, RuntimeObserverPositionProvider
+        provider = RuntimeObserverPositionProvider(
+            ObserverPosition(50.0, 20.0, 200.0), mode="MOBILE",
+            fallback_enabled=False)
+        runtime = dashboard.start_dashboard(
+            True, "127.0.0.1", 0, lambda: NOW,
+            mobile_gps_enabled=True, observer_position_provider=provider)
+        try:
+            runtime.mobile_gps_state.update(MobileGpsStateTests.VALID, NOW)
+            port = runtime.server.server_address[1]
+            with urllib.request.urlopen(
+                    "http://127.0.0.1:{}/api/observer".format(port),
+                    timeout=2) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        finally:
+            runtime.close()
+        self.assertEqual("MOBILE_FRESH", result["effective_source"])
+        encoded = json.dumps(result).lower()
+        self.assertNotIn("latitude", encoded)
+        self.assertNotIn("longitude", encoded)
+
     def test_mobile_gps_endpoint_rejects_invalid_and_disabled_updates(self):
         for enabled, payload, expected_status in (
                 (True, {**MobileGpsStateTests.VALID, "latitude": 91}, 400),

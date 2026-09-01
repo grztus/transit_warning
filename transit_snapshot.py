@@ -217,6 +217,11 @@ class TransitSnapshotManager:
             self._fail(error)
             return False
 
+    def invalidate_active_predictions(self):
+        """Discard predictions tied to an observer context that changed."""
+        with self._lock:
+            self._active.clear()
+
     def cleanup(self, now_utc):
         try:
             with self._lock:

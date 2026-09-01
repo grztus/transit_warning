@@ -46,6 +46,9 @@ Configure these fields:
 - `OBSERVER_LAT` — observer latitude in decimal degrees
 - `OBSERVER_LON` — observer longitude in decimal degrees
 - `OBSERVER_ELEVATION_M` — observer/antenna elevation in metres above sea level
+- `OBSERVER_MODE` — requested solver observer (`STATIC` or `MOBILE`; default `STATIC`)
+- `MOBILE_GPS_STALE_WARNING_SECONDS` / `MOBILE_GPS_CRITICAL_WARNING_SECONDS` — dashboard age warning thresholds (defaults 30/300 seconds)
+- `MOBILE_GPS_STATIC_FALLBACK_ENABLED` — opt-in fallback to static coordinates after the mobile fix exceeds the existing GPS freshness limit
 - `TRANSITION_ALTITUDE_FT` — local transition altitude as a positive integer in feet
 - `ADSB_HOST` — ADS-B source IP address or hostname
 - `ADSB_PORT` — ADS-B TCP port; normally `30003`
@@ -224,7 +227,14 @@ server-receipt freshness window and defaults to 15 seconds. The dashboard shows
 only accuracy, altitude availability, altitude accuracy, age, and status. It
 never returns or displays the coordinates.
 
-**Mobile GPS is diagnostic-only and is not used by the prediction solver.** The
+With `OBSERVER_MODE=MOBILE`, a phone fix is used by the prediction solver while
+the configured static elevation remains authoritative; phone altitude remains
+diagnostic-only. Without a fix, predictions are withheld unless explicit static
+fallback is enabled. A stale fix remains the selected observer indefinitely when
+fallback is disabled. The dashboard never displays or persists mobile coordinates.
+
+In the default `OBSERVER_MODE=STATIC`, mobile GPS remains diagnostic-only and is
+not used by the prediction solver. The
 latest position exists only in dashboard process memory: it is not added to
 history, CSV exports, snapshots, Telegram, recordings, logs, or replay.
 
