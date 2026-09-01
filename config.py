@@ -54,6 +54,8 @@ class InstallationConfig:
     dashboard_sep_green_max_deg: float = 3.0
     dashboard_sep_yellow_max_deg: float = 5.0
     dashboard_sep_visible_max_deg: float = 7.0
+    fleet_geometric_altitude_enabled: bool = False
+    fleet_geoid_pgm_path: str = ""
 
 
 def _required(values, name, errors):
@@ -266,6 +268,10 @@ def load_installation_config(
     tmux_thresholds = _presentation_thresholds(values, "TMUX", errors)
     dashboard_thresholds = _presentation_thresholds(
         values, "DASHBOARD", errors)
+    fleet_geometric_altitude_enabled = _boolean(
+        values, "FLEET_GEOMETRIC_ALTITUDE_ENABLED", False, errors)
+    fleet_geoid_pgm_path = str(values.get(
+        "FLEET_GEOID_PGM_PATH", "")).strip()
     if telegram_notifications_enabled:
         if not telegram_bot_token:
             errors.append(
@@ -316,4 +322,6 @@ def load_installation_config(
         dashboard_sep_green_max_deg=dashboard_thresholds[0],
         dashboard_sep_yellow_max_deg=dashboard_thresholds[1],
         dashboard_sep_visible_max_deg=dashboard_thresholds[2],
+        fleet_geometric_altitude_enabled=fleet_geometric_altitude_enabled,
+        fleet_geoid_pgm_path=fleet_geoid_pgm_path,
     )

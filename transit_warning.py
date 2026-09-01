@@ -93,6 +93,10 @@ from environment import (
 from metar import fetch_awc_metar
 from mlat_beast_track import decode_mlat_beast_tc19, truncation_bin_consistent
 from observer_position import ObserverPosition, StaticObserverPositionProvider
+from fleet_geometric_altitude import (
+    FleetGeometricAltitudeEstimator,
+    PgmGeoidProvider,
+)
 from recording import RecordingStatus, SessionRecorder, archive_session
 from raw_adsb_track import (
     decode_raw_tc19_altitude,
@@ -583,6 +587,8 @@ mlat_beast_host = None
 mlat_beast_port = None
 telegram_alert_separation_deg = 2.0
 telegram_alert_stability_seconds = 5.0
+fleet_geometric_altitude_enabled = False
+fleet_geometric_altitude_estimator = None
 
 
 def apply_installation_config(configuration: InstallationConfig):
@@ -597,6 +603,8 @@ def apply_installation_config(configuration: InstallationConfig):
     global tmux_sep_green_max_deg, tmux_sep_yellow_max_deg
     global tmux_sep_visible_max_deg, dashboard_sep_green_max_deg
     global dashboard_sep_yellow_max_deg, dashboard_sep_visible_max_deg
+    global fleet_geometric_altitude_enabled
+    global fleet_geometric_altitude_estimator
     observer_position_provider = StaticObserverPositionProvider(
         ObserverPosition(
             latitude_deg=configuration.observer_lat,
@@ -635,6 +643,15 @@ def apply_installation_config(configuration: InstallationConfig):
     dashboard_sep_green_max_deg = configuration.dashboard_sep_green_max_deg
     dashboard_sep_yellow_max_deg = configuration.dashboard_sep_yellow_max_deg
     dashboard_sep_visible_max_deg = configuration.dashboard_sep_visible_max_deg
+    fleet_geometric_altitude_enabled = (
+        configuration.fleet_geometric_altitude_enabled)
+    fleet_geometric_altitude_estimator = None
+    if fleet_geometric_altitude_enabled:
+        geoid_provider = PgmGeoidProvider.discover(
+            configuration.fleet_geoid_pgm_path)
+        if geoid_provider is not None:
+            fleet_geometric_altitude_estimator = (
+                FleetGeometricAltitudeEstimator(geoid_provider))
     gatech = ephem_observer_for_position(observer_position)
     port_status = {adsb_port: False, mlat_port: False}
 
@@ -787,11 +804,105 @@ def update_gnss_altitude_diagnostic(decoded, updated_at_utc):
             vertical_rate_source=str(decoded.vertical_rate_source),
             receiver_timestamp_hex=decoded.receiver_timestamp_hex,
         )
+    _update_fleet_geometric_altitude_sample(decoded, updated_at_utc)
 
 
 def _latest_pressure_altitude_measurement(icao):
     candidates = list(altitude_sources.get(icao, {}).values())
     return max(candidates, key=lambda item: item.timestamp_utc) if candidates else None
+
+
+def _update_fleet_geometric_altitude_sample(decoded, updated_at_utc):
+    """Feed genuine, aligned TC19 observations to the diagnostic estimator."""
+    estimator = fleet_geometric_altitude_estimator
+    if estimator is None or not decoded.available:
+        return
+    try:
+        with plane_dict_lock:
+            version = raw_adsb_versions.get(decoded.icao)
+            measurement = _latest_pressure_altitude_measurement(decoded.icao)
+            motion = aircraft_motion_states.get(decoded.icao)
+            position = motion.position if motion is not None else None
+            if version is None or measurement is None or position is None:
+                return
+            estimator.add_observation(
+                icao=decoded.icao,
+                timestamp_utc=updated_at_utc,
+                latitude=position.latitude,
+                longitude=position.longitude,
+                pressure_altitude_ft=measurement.altitude_baro_ft,
+                gnss_baro_difference_ft=decoded.gnss_minus_baro_ft,
+                production_reference_altitude_m=(
+                    measurement.altitude_corrected_m),
+                adsb_version=version.adsb_version,
+                datum=version.datum,
+                provenance="RAW_ADSB_TC19",
+                pressure_altitude_age_seconds=abs(
+                    (updated_at_utc - measurement.timestamp_utc).total_seconds()),
+                position_age_seconds=abs(
+                    (updated_at_utc - position.updated_at_utc).total_seconds()),
+            )
+    except Exception:
+        # Diagnostic-only and deliberately fail-open.
+        return
+
+
+def fleet_geometric_altitude_snapshot_diagnostics(icao, now_utc):
+    """Return optional aggregate altitude diagnostics without affecting flight state."""
+    estimator = fleet_geometric_altitude_estimator
+    if not fleet_geometric_altitude_enabled or estimator is None:
+        return None
+    try:
+        with plane_dict_lock:
+            measurement = _latest_pressure_altitude_measurement(icao)
+            motion = aircraft_motion_states.get(icao)
+            position = motion.position if motion is not None else None
+            if measurement is None or position is None:
+                return {"available": False, "source": "FLEET_GEOMETRIC"}
+            estimate = estimator.estimate(
+                pressure_altitude_ft=measurement.altitude_baro_ft,
+                aircraft_position=(position.latitude, position.longitude),
+                timestamp_utc=now_utc,
+                production_reference_altitude_m=(
+                    measurement.altitude_corrected_m),
+                exclude_icao=icao,
+            )
+            if estimate is None:
+                return {"available": False, "source": "FLEET_GEOMETRIC"}
+            result = {
+                "available": True,
+                "estimated_altitude_m": estimate.altitude_m,
+                "correction_m": estimate.correction_m,
+                "uncertainty_m": estimate.uncertainty_m,
+                "confidence": estimate.confidence.value,
+                "sample_count": estimate.sample_count,
+                "aircraft_count": estimate.aircraft_count,
+                "vertical_span_ft": list(estimate.vertical_span_ft),
+                "age_span_seconds": [
+                    estimate.age_min_seconds, estimate.age_max_seconds],
+                "spatial_span_km": [
+                    estimate.spatial_min_km, estimate.spatial_max_km],
+                "weighted_residual_rms_m": (
+                    estimate.weighted_residual_rms_m),
+                "strongest_contributor_weight_fraction": (
+                    estimate.strongest_contributor_weight_fraction),
+                "generated_at_utc": _snapshot_utc_text(
+                    estimate.generated_at_utc),
+                "source": estimate.source,
+            }
+            own = gnss_altitude_snapshot_diagnostics(icao, now_utc)
+            own_hae = own.get("implied_gnss_hae_m")
+            if own_hae is not None:
+                geoid_m = estimator.geoid_height_m(
+                    position.latitude, position.longitude)
+                own_geometric_m = float(own_hae) - geoid_m
+                result["own_gnss_altitude_m"] = own_geometric_m
+                result["fleet_minus_own_gnss_m"] = (
+                    estimate.altitude_m
+                    - own_geometric_m)
+            return result
+    except Exception:
+        return {"available": False, "source": "FLEET_GEOMETRIC"}
 
 
 def gnss_altitude_snapshot_diagnostics(icao, now_utc):
@@ -1679,7 +1790,7 @@ def _capture_transit_prediction(icao, callsign, celestial_body,
     frozen_prediction_state = build_frozen_prediction_state(
         icao, celestial_body, transit_result, now_utc, solver_input,
         diagnostic, solver_diagnostic, pressure)
-    transit_snapshot_manager.consider_prediction({
+    snapshot_prediction = {
         "recorded_at_utc": now_utc,
         "prediction_base_utc": _snapshot_utc_text(now_utc),
         "predicted_transit_utc": predicted_utc,
@@ -1718,7 +1829,13 @@ def _capture_transit_prediction(icao, callsign, celestial_body,
         "gnss_altitude_diagnostics": gnss_altitude_snapshot_diagnostics(
             icao, now_utc),
         "frozen_prediction_state": frozen_prediction_state,
-    })
+    }
+    fleet_diagnostics = fleet_geometric_altitude_snapshot_diagnostics(
+        icao, now_utc)
+    if fleet_diagnostics is not None:
+        snapshot_prediction["fleet_geometric_altitude_diagnostics"] = (
+            fleet_diagnostics)
+    transit_snapshot_manager.consider_prediction(snapshot_prediction)
 
 
 def capture_transit_prediction(icao, callsign, celestial_body,

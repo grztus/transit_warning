@@ -64,6 +64,8 @@ class InstallationConfigTests(unittest.TestCase):
         self.assertEqual(result.beast_port, 30005)
         self.assertEqual(result.raw_adsb_host, "127.0.0.1")
         self.assertEqual(result.raw_adsb_port, 30002)
+        self.assertFalse(result.fleet_geometric_altitude_enabled)
+        self.assertEqual(result.fleet_geoid_pgm_path, "")
         self.assertFalse(result.mlat_beast_enabled)
         self.assertEqual(result.mlat_beast_host, result.mlat_host)
         self.assertEqual(result.mlat_beast_port, 30105)
@@ -132,6 +134,25 @@ class InstallationConfigTests(unittest.TestCase):
 
         self.assertEqual(result.raw_adsb_host, "receiver.example")
         self.assertEqual(result.raw_adsb_port, 32002)
+
+    def test_accepts_optional_fleet_geometric_altitude_configuration(self):
+        result = self.load({
+            **REQUIRED,
+            "FLEET_GEOMETRIC_ALTITUDE_ENABLED": "true",
+            "FLEET_GEOID_PGM_PATH": "C:/geoid/egm96-5.pgm",
+        })
+
+        self.assertTrue(result.fleet_geometric_altitude_enabled)
+        self.assertEqual(
+            result.fleet_geoid_pgm_path, "C:/geoid/egm96-5.pgm")
+
+        with self.assertRaisesRegex(
+                ConfigurationError,
+                "FLEET_GEOMETRIC_ALTITUDE_ENABLED must be true or false"):
+            self.load({
+                **REQUIRED,
+                "FLEET_GEOMETRIC_ALTITUDE_ENABLED": "sometimes",
+            })
 
     def test_rejects_invalid_optional_raw_source(self):
         with self.assertRaises(ConfigurationError) as caught:

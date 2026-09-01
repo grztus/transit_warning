@@ -54,6 +54,10 @@ Configure these fields:
 - `RAW_ADSB_HOST` — optional RAW Mode-S/ADS-B source hostname; normally the
   same receiver as `ADSB_HOST`
 - `RAW_ADSB_PORT` — optional RAW source port; normally `30002`
+- `FLEET_GEOMETRIC_ALTITUDE_ENABLED` — enables the diagnostic-only fleet
+  geometric-altitude estimator (default `false`)
+- `FLEET_GEOID_PGM_PATH` — optional local GeographicLib EGM96 PGM path;
+  leave empty to use standard platform locations
 - `BEAST_HOST` — Beast/Mode-S source IP address or hostname (default `192.168.56.1`)
 - `BEAST_PORT` — Beast TCP port used for TC29 intent; normally `30005`
 - `MLAT_HOST` — MLAT source IP address or hostname
@@ -82,6 +86,14 @@ MLAT updates continue to report exactly the same coarse track; any coarse-track
 change invalidates the hold until another RAW update arrives. The terminal
 shows one decimal place while fresh or coarse-confirmed RAW precision is
 active; prediction retains the full decoded precision.
+
+The optional fleet geometric-altitude estimator compares qualified ADS-B v2
+TC19 GNSS/barometric differences from other aircraft with the current QNH
+altitude basis. It excludes the target aircraft, uses continuous altitude,
+distance, and age weights (no fixed geographic sectors), and records only
+additive snapshot diagnostics. Its result does not affect production altitude,
+transit geometry, alerts, or classifications in this release. A local EGM96
+geoid grid is required; without one the diagnostic remains unavailable.
 
 System environment variables override `.env`. The private `.env` file and the
 `recordings/` directory are ignored by Git.
