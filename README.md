@@ -161,8 +161,8 @@ observer location/GPS updates are intentionally not implemented.
 
 A later checkpoint may add a compact graphic that reuses the offline visualizer
 concepts: the Sun/Moon disk, predicted aircraft trajectory, direction of motion,
-and near-miss or crossing geometry. Checkpoint 2 does not implement trajectory
-graphics, GPS, mobile observer, incoming commands, or location handling.
+and near-miss or crossing geometry. The dashboard does not implement trajectory
+graphics, a mobile observer, incoming commands, or location-based prediction.
 
 ### Live dashboard
 
@@ -177,6 +177,8 @@ DASHBOARD_HOST=127.0.0.1
 DASHBOARD_PORT=8765
 DASHBOARD_HISTORY_ENABLED=true
 DASHBOARD_HISTORY_DIR=recordings/dashboard_history
+DASHBOARD_MOBILE_GPS_ENABLED=false
+DASHBOARD_MOBILE_GPS_FRESH_SECONDS=15
 TMUX_SEP_GREEN_MAX_DEG=3
 TMUX_SEP_YELLOW_MAX_DEG=5
 TMUX_SEP_VISIBLE_MAX_DEG=7
@@ -211,6 +213,20 @@ JSONL files under `DASHBOARD_HISTORY_DIR`; the 100-record in-memory list remains
 only a recent hot cache. History can be filtered by UTC date, callsign, and body,
 loaded in bounded pages, and exported as CSV. Checkpoint 2 intentionally has no
 authentication, so LAN binding should only be used on a trusted private network.
+
+The optional Phase 1 mobile GPS diagnostic is enabled with
+`DASHBOARD_MOBILE_GPS_ENABLED=true`. The user must press **Start GPS** after each
+page load; the browser then uses high-accuracy geolocation monitoring and sends
+updates to the same dashboard origin. Browser geolocation requires a secure
+context, such as the existing private Tailscale Serve HTTPS deployment (or
+localhost for development). `DASHBOARD_MOBILE_GPS_FRESH_SECONDS` controls the
+server-receipt freshness window and defaults to 15 seconds. The dashboard shows
+only accuracy, altitude availability, altitude accuracy, age, and status. It
+never returns or displays the coordinates.
+
+**Mobile GPS is diagnostic-only and is not used by the prediction solver.** The
+latest position exists only in dashboard process memory: it is not added to
+history, CSV exports, snapshots, Telegram, recordings, logs, or replay.
 
 The application validates the installation configuration before creating the
 observer or starting the TCP threads. In RealClock mode it always records the

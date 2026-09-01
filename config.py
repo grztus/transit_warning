@@ -49,6 +49,8 @@ class InstallationConfig:
     dashboard_port: int = 8765
     dashboard_history_enabled: bool = True
     dashboard_history_dir: str = "recordings/dashboard_history"
+    dashboard_mobile_gps_enabled: bool = False
+    dashboard_mobile_gps_fresh_seconds: float = 15.0
     tmux_sep_green_max_deg: float = 3.0
     tmux_sep_yellow_max_deg: float = 5.0
     tmux_sep_visible_max_deg: float = 7.0
@@ -270,6 +272,11 @@ def load_installation_config(
         "DASHBOARD_HISTORY_DIR", "recordings/dashboard_history")).strip()
     if not dashboard_history_dir:
         errors.append("DASHBOARD_HISTORY_DIR must not be empty")
+    dashboard_mobile_gps_enabled = _boolean(
+        values, "DASHBOARD_MOBILE_GPS_ENABLED", False, errors)
+    dashboard_mobile_gps_fresh_seconds = _optional_finite_float(
+        values, "DASHBOARD_MOBILE_GPS_FRESH_SECONDS", 15.0, errors,
+        minimum=0.0, maximum=3600.0)
     tmux_thresholds = _presentation_thresholds(values, "TMUX", errors)
     dashboard_thresholds = _presentation_thresholds(
         values, "DASHBOARD", errors)
@@ -324,6 +331,9 @@ def load_installation_config(
         dashboard_port=dashboard_port,
         dashboard_history_enabled=dashboard_history_enabled,
         dashboard_history_dir=dashboard_history_dir,
+        dashboard_mobile_gps_enabled=dashboard_mobile_gps_enabled,
+        dashboard_mobile_gps_fresh_seconds=(
+            dashboard_mobile_gps_fresh_seconds),
         tmux_sep_green_max_deg=tmux_thresholds[0],
         tmux_sep_yellow_max_deg=tmux_thresholds[1],
         tmux_sep_visible_max_deg=tmux_thresholds[2],

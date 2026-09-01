@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import urllib.error
 import urllib.request
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -201,6 +202,71 @@ class DashboardStateTests(unittest.TestCase):
             "sun"]["candidates"][0]["separation_class"])
 
 
+class MobileGpsStateTests(unittest.TestCase):
+    VALID = {
+        "latitude": 50.123,
+        "longitude": 20.456,
+        "accuracy": 6.0,
+        "altitude": 210.5,
+        "altitudeAccuracy": 10.0,
+        "timestamp": 1788187200123.0,
+    }
+
+    def test_valid_update_retains_position_only_in_dedicated_state(self):
+        state = dashboard.MobileGpsState(enabled=True, fresh_seconds=15)
+        diagnostics = state.update(self.VALID, NOW)
+        position = state.latest_position()
+        self.assertEqual(self.VALID["latitude"], position.latitude)
+        self.assertEqual(self.VALID["longitude"], position.longitude)
+        self.assertEqual("ACTIVE", diagnostics["status"])
+        self.assertEqual(6.0, diagnostics["accuracy_m"])
+        self.assertTrue(diagnostics["altitude_available"])
+        self.assertNotIn("latitude", diagnostics)
+        self.assertNotIn("longitude", diagnostics)
+
+    def test_missing_optional_altitude_fields_are_valid(self):
+        state = dashboard.MobileGpsState(enabled=True)
+        payload = dict(self.VALID)
+        payload.pop("altitude")
+        payload.pop("altitudeAccuracy")
+        diagnostics = state.update(payload, NOW)
+        self.assertFalse(diagnostics["altitude_available"])
+        self.assertIsNone(diagnostics["altitude_accuracy_m"])
+
+    def test_invalid_coordinates_nonfinite_and_malformed_values_are_rejected(self):
+        cases = (
+            {"latitude": 91}, {"longitude": -181},
+            {"latitude": float("nan")}, {"longitude": float("inf")},
+            {"accuracy": "6"}, {"accuracy": -1},
+            {"timestamp": None}, {"altitudeAccuracy": -1},
+        )
+        for replacement in cases:
+            with self.subTest(replacement=replacement):
+                state = dashboard.MobileGpsState(enabled=True)
+                with self.assertRaisesRegex(ValueError, "Invalid"):
+                    state.update({**self.VALID, **replacement}, NOW)
+
+    def test_freshness_uses_server_receive_time(self):
+        state = dashboard.MobileGpsState(enabled=True, fresh_seconds=15)
+        state.update(self.VALID, NOW)
+        self.assertEqual("ACTIVE", state.diagnostics(
+            NOW + datetime.timedelta(seconds=15))["status"])
+        stale = state.diagnostics(NOW + datetime.timedelta(seconds=15.001))
+        self.assertEqual("STALE", stale["status"])
+        self.assertAlmostEqual(15.001, stale["age_seconds"])
+        state.clear()
+        self.assertEqual("OFF", state.diagnostics(NOW)["status"])
+
+    def test_disabled_state_rejects_updates_and_remains_empty(self):
+        state = dashboard.MobileGpsState(enabled=False)
+        with self.assertRaises(PermissionError):
+            state.update(self.VALID, NOW)
+        self.assertIsNone(state.latest_position())
+        self.assertEqual(
+            {"available": False, "status": "OFF"},
+            state.diagnostics(NOW))
+
+
 class DashboardRuntimeTests(unittest.TestCase):
     def test_disabled_creates_no_server(self):
         server_factory = Mock()
@@ -247,6 +313,71 @@ class DashboardRuntimeTests(unittest.TestCase):
         self.assertNotIn("observer", encoded)
         self.assertNotIn("token", encoded)
 
+    def test_mobile_gps_endpoint_accepts_update_without_returning_coordinates(self):
+        runtime = dashboard.start_dashboard(
+            True, "127.0.0.1", 0, lambda: NOW,
+            mobile_gps_enabled=True)
+        payload = json.dumps(MobileGpsStateTests.VALID).encode("utf-8")
+        try:
+            port = runtime.server.server_address[1]
+            request = urllib.request.Request(
+                "http://127.0.0.1:{}/api/mobile-gps".format(port),
+                data=payload, headers={"Content-Type": "application/json"},
+                method="POST")
+            with urllib.request.urlopen(request, timeout=2) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        finally:
+            runtime.close()
+        self.assertEqual("ACTIVE", result["status"])
+        self.assertNotIn("latitude", result)
+        self.assertNotIn("longitude", result)
+
+    def test_mobile_gps_endpoint_rejects_invalid_and_disabled_updates(self):
+        for enabled, payload, expected_status in (
+                (True, {**MobileGpsStateTests.VALID, "latitude": 91}, 400),
+                (True, {**MobileGpsStateTests.VALID, "accuracy": "bad"}, 400),
+                (False, MobileGpsStateTests.VALID, 403)):
+            with self.subTest(enabled=enabled, expected=expected_status):
+                runtime = dashboard.start_dashboard(
+                    True, "127.0.0.1", 0, lambda: NOW,
+                    mobile_gps_enabled=enabled)
+                try:
+                    port = runtime.server.server_address[1]
+                    request = urllib.request.Request(
+                        "http://127.0.0.1:{}/api/mobile-gps".format(port),
+                        data=json.dumps(payload).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST")
+                    with self.assertRaises(urllib.error.HTTPError) as caught:
+                        urllib.request.urlopen(request, timeout=2)
+                    self.assertEqual(expected_status, caught.exception.code)
+                finally:
+                    runtime.close()
+
+    def test_mobile_coordinates_never_enter_normal_state_history_or_export(self):
+        runtime = dashboard.start_dashboard(
+            True, "127.0.0.1", 0, lambda: NOW,
+            mobile_gps_enabled=True, history_enabled=False)
+        private_text = "50.123456789"
+        payload = {
+            **MobileGpsStateTests.VALID,
+            "latitude": float(private_text),
+            "longitude": 20.987654321,
+        }
+        try:
+            runtime.mobile_gps_state.update(payload, NOW)
+            runtime.publish(candidate(seconds=1))
+            runtime.tick(NOW + datetime.timedelta(seconds=2))
+            normal_state = json.dumps(runtime.state.snapshot(NOW))
+            history = json.dumps(runtime.state.query_history())
+            export = runtime.state.export_history_csv().decode("utf-8")
+        finally:
+            runtime.close()
+        for output in (normal_state, history, export):
+            self.assertNotIn(private_text, output)
+            self.assertNotIn("latitude", output.lower())
+            self.assertNotIn("longitude", output.lower())
+
     def test_browser_countdown_uses_absolute_utc_without_one_second_polling(self):
         html = dashboard.DASHBOARD_HTML
         self.assertIn("Date.parse(utc)-Date.now()", html)
@@ -260,6 +391,16 @@ class DashboardRuntimeTests(unittest.TestCase):
         self.assertIn('class="candidate-heading"><div class="countdown"', html)
         self.assertIn("<h2>${esc(c.callsign||c.icao)}</h2></div>", html)
         self.assertIn("overflow-wrap:anywhere", html)
+
+    def test_mobile_gps_ui_requires_explicit_high_accuracy_watch(self):
+        html = dashboard.DASHBOARD_HTML
+        self.assertIn("MOBILE GPS", html)
+        self.assertIn("Start GPS", html)
+        self.assertIn("Stop GPS", html)
+        self.assertIn("navigator.geolocation.watchPosition", html)
+        self.assertIn("enableHighAccuracy:true", html)
+        self.assertIn("gpsEnabled=false", html)
+        self.assertNotIn("localStorage", html)
 
     def test_mobile_sep_uses_backend_class_and_time_is_seconds_only(self):
         html = dashboard.DASHBOARD_HTML
@@ -402,6 +543,26 @@ class DashboardConfigTests(unittest.TestCase):
         self.assertTrue(default.dashboard_history_enabled)
         self.assertEqual("recordings/dashboard_history",
                          default.dashboard_history_dir)
+        self.assertFalse(default.dashboard_mobile_gps_enabled)
+        self.assertEqual(15.0, default.dashboard_mobile_gps_fresh_seconds)
+
+    def test_mobile_gps_configuration_is_optional_and_validated(self):
+        configured = self.load({
+            **self.BASE,
+            "DASHBOARD_MOBILE_GPS_ENABLED": "true",
+            "DASHBOARD_MOBILE_GPS_FRESH_SECONDS": "30",
+        })
+        self.assertTrue(configured.dashboard_mobile_gps_enabled)
+        self.assertEqual(30.0, configured.dashboard_mobile_gps_fresh_seconds)
+        for invalid in ("0", "-1", "3601", "nan", "bad"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(
+                        ConfigurationError,
+                        "DASHBOARD_MOBILE_GPS_FRESH_SECONDS"):
+                    self.load({
+                        **self.BASE,
+                        "DASHBOARD_MOBILE_GPS_FRESH_SECONDS": invalid,
+                    })
 
     def test_invalid_dashboard_configuration(self):
         with self.assertRaises(ConfigurationError):
@@ -496,6 +657,27 @@ class ProductionIntegrationTests(unittest.TestCase):
                     (51.0, 21.0), (51.5, 21.5), 200, 800,
                     10986.668, 10, 180)
                 transit.dashboard_runtime = dashboard.DisabledDashboard()
+                after = transit.transit_pred(
+                    (51.0, 21.0), (51.5, 21.5), 200, 800,
+                    10986.668, 10, 180)
+        finally:
+            (transit.my_lat, transit.my_lon,
+             transit.my_elevation_const) = old_geometry
+        self.assertEqual(before, after)
+
+    def test_mobile_gps_diagnostics_do_not_change_prediction_result(self):
+        old_geometry = (transit.my_lat, transit.my_lon,
+                        transit.my_elevation_const)
+        transit.my_lat, transit.my_lon, transit.my_elevation_const = (
+            51.0, 21.0, 200.0)
+        fixed_clock = SimpleNamespace(now_utc=lambda: NOW)
+        try:
+            with patch.object(transit, "clock", fixed_clock):
+                before = transit.transit_pred(
+                    (51.0, 21.0), (51.5, 21.5), 200, 800,
+                    10986.668, 10, 180)
+                mobile = dashboard.MobileGpsState(enabled=True)
+                mobile.update(MobileGpsStateTests.VALID, NOW)
                 after = transit.transit_pred(
                     (51.0, 21.0), (51.5, 21.5), 200, 800,
                     10986.668, 10, 180)
