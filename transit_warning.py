@@ -97,6 +97,12 @@ from fleet_geometric_altitude import (
     FleetGeometricAltitudeEstimator,
     PgmGeoidProvider,
 )
+from geometric_altitude_selection import (
+    GeometricAltitudeSelector,
+    GeometricAltitudeSource,
+    OwnGnssGeometricInput,
+    SelectedGeometricAltitude,
+)
 from recording import RecordingStatus, SessionRecorder, archive_session
 from raw_adsb_track import (
     decode_raw_tc19_altitude,
@@ -277,6 +283,7 @@ sun_predicted_transit_utc = {}
 moon_predicted_transit_utc = {}
 transit_solver_diagnostics = {}
 vertical_transit_diagnostics = {}
+geometric_altitude_selections = {}
 plane_dict_lock = threading.RLock()
 plane_deque = deque()
 
@@ -589,6 +596,8 @@ telegram_alert_separation_deg = 2.0
 telegram_alert_stability_seconds = 5.0
 fleet_geometric_altitude_enabled = False
 fleet_geometric_altitude_estimator = None
+geometric_altitude_selection_enabled = False
+geometric_altitude_selector = GeometricAltitudeSelector()
 
 
 def apply_installation_config(configuration: InstallationConfig):
@@ -605,6 +614,7 @@ def apply_installation_config(configuration: InstallationConfig):
     global dashboard_sep_yellow_max_deg, dashboard_sep_visible_max_deg
     global fleet_geometric_altitude_enabled
     global fleet_geometric_altitude_estimator
+    global geometric_altitude_selection_enabled
     observer_position_provider = StaticObserverPositionProvider(
         ObserverPosition(
             latitude_deg=configuration.observer_lat,
@@ -645,13 +655,20 @@ def apply_installation_config(configuration: InstallationConfig):
     dashboard_sep_visible_max_deg = configuration.dashboard_sep_visible_max_deg
     fleet_geometric_altitude_enabled = (
         configuration.fleet_geometric_altitude_enabled)
+    geometric_altitude_selection_enabled = (
+        configuration.geometric_altitude_selection_enabled)
     fleet_geometric_altitude_estimator = None
-    if fleet_geometric_altitude_enabled:
+    if (fleet_geometric_altitude_enabled
+            or geometric_altitude_selection_enabled):
         geoid_provider = PgmGeoidProvider.discover(
             configuration.fleet_geoid_pgm_path)
         if geoid_provider is not None:
             fleet_geometric_altitude_estimator = (
                 FleetGeometricAltitudeEstimator(geoid_provider))
+        elif geometric_altitude_selection_enabled:
+            sys.stderr.write(
+                "Geometric altitude selection: geoid data unavailable; "
+                "using BARO_QNH\n")
     gatech = ephem_observer_for_position(observer_position)
     port_status = {adsb_port: False, mlat_port: False}
 
@@ -813,7 +830,7 @@ def _latest_pressure_altitude_measurement(icao):
 
 
 def _update_fleet_geometric_altitude_sample(decoded, updated_at_utc):
-    """Feed genuine, aligned TC19 observations to the diagnostic estimator."""
+    """Feed genuine, aligned TC19 observations to the shared estimator."""
     estimator = fleet_geometric_altitude_estimator
     if estimator is None or not decoded.available:
         return
@@ -1683,6 +1700,98 @@ def predict_vertical_state_at_time(
         now_utc, dt_seconds, qnh_hpa, policy)
 
 
+def _baro_geometric_altitude_selection(altitude_m, reason=None):
+    return SelectedGeometricAltitude(
+        altitude_m=float(altitude_m),
+        source=GeometricAltitudeSource.BARO_QNH,
+        correction_m=0.0,
+        uncertainty_m=None,
+        confidence=None,
+        own_gnss_available=False,
+        own_gnss_altitude_m=None,
+        fleet_available=False,
+        fleet_altitude_m=None,
+        fleet_confidence=None,
+        fleet_uncertainty_m=None,
+        fallback_reason=reason,
+    )
+
+
+def select_geometric_altitude_for_prediction(
+        icao, barometric_prediction, now_utc):
+    """Select the event-time LOS altitude after unchanged 2E/2F logic."""
+    baro_m = float(barometric_prediction.predicted_altitude_m)
+    if not geometric_altitude_selection_enabled:
+        return _baro_geometric_altitude_selection(baro_m, "disabled")
+    estimator = fleet_geometric_altitude_estimator
+    if estimator is None:
+        return _baro_geometric_altitude_selection(
+            baro_m, "geoid_unavailable")
+    own_input = None
+    own_reason = None
+    fleet_estimate = None
+    try:
+        with plane_dict_lock:
+            state = gnss_altitude_states.get(icao)
+            version = raw_adsb_versions.get(icao)
+            measurement = _latest_pressure_altitude_measurement(icao)
+            motion = aircraft_motion_states.get(icao)
+            position = motion.position if motion is not None else None
+            if state is None:
+                own_reason = "no_tc19"
+            elif not state.available:
+                own_reason = "tc19_unavailable"
+            elif max(0.0, (now_utc - state.updated_at_utc).total_seconds()) \
+                    > MOTION_FRESH_PARAMETER_SECONDS:
+                own_reason = "tc19_stale"
+            elif measurement is None:
+                own_reason = "pressure_altitude_unavailable"
+            elif (max(0.0, (now_utc - measurement.timestamp_utc)
+                      .total_seconds()) > MOTION_FRESH_PARAMETER_SECONDS
+                  or abs((state.updated_at_utc - measurement.timestamp_utc)
+                         .total_seconds()) > MOTION_FRESH_PARAMETER_SECONDS):
+                own_reason = "pressure_altitude_stale"
+            elif version is None or version.datum != "WGS84_HAE":
+                own_reason = "datum_unknown"
+            elif position is None:
+                own_reason = "position_unavailable"
+            elif max(0.0, (now_utc - position.updated_at_utc).total_seconds()) \
+                    > MOTION_FRESH_PARAMETER_SECONDS:
+                own_reason = "position_stale"
+            else:
+                predicted_pressure_ft = (
+                    float(measurement.altitude_baro_ft)
+                    + float(barometric_prediction.altitude_delta_m) / 0.3048)
+                own_input = OwnGnssGeometricInput(
+                    predicted_pressure_altitude_ft=predicted_pressure_ft,
+                    gnss_minus_baro_ft=float(state.gnss_minus_baro_ft),
+                    geoid_undulation_m=estimator.geoid_height_m(
+                        position.latitude, position.longitude),
+                )
+            if own_input is None and measurement is not None and position is not None:
+                predicted_pressure_ft = (
+                    float(measurement.altitude_baro_ft)
+                    + float(barometric_prediction.altitude_delta_m) / 0.3048)
+                fleet_estimate = estimator.estimate(
+                    pressure_altitude_ft=predicted_pressure_ft,
+                    aircraft_position=(position.latitude, position.longitude),
+                    timestamp_utc=now_utc,
+                    production_reference_altitude_m=baro_m,
+                    exclude_icao=icao,
+                )
+        return geometric_altitude_selector.select(
+            baro_m,
+            own_gnss=own_input,
+            fleet_estimate=fleet_estimate,
+            own_unavailable_reason=own_reason,
+            fleet_unavailable_reason=(
+                "fleet_unavailable" if fleet_estimate is None else None),
+        )
+    except Exception:
+        return _baro_geometric_altitude_selection(
+            baro_m, "geometric_selection_error")
+
+
 def apply_vertical_prediction_to_transit_result(
         icao, celestial_body, transit_result, current_altitude_m, now_utc,
         observer_position=None):
@@ -1704,16 +1813,19 @@ def apply_vertical_prediction_to_transit_result(
     )
     prediction_2e = vertical_state.prediction_before_clamp
     prediction = vertical_state.prediction
+    selected_altitude = select_geometric_altitude_for_prediction(
+        icao, prediction, now_utc)
     intent_details = vertical_state.intent_details
     before = vertical_transit_separation(
         transit_result[3], transit_result[9])
     updated = list(transit_result)
-    if prediction.mode == VerticalPredictionMode.DYNAMIC_VALID:
+    if (prediction.mode == VerticalPredictionMode.DYNAMIC_VALID
+            or geometric_altitude_selection_enabled):
         h2x_km = float(transit_result[4])
         if h2x_km == 0:
             h2x_km = 0.001
         updated[3] = degrees(atan(
-            (prediction.predicted_altitude_m - observer_position.elevation_m)
+            (selected_altitude.altitude_m - observer_position.elevation_m)
             / (h2x_km * 1000)))
     after = vertical_transit_separation(updated[3], updated[9])
     altitude_before_clamp = float(transit_result[3])
@@ -1732,6 +1844,11 @@ def apply_vertical_prediction_to_transit_result(
             separation_after=after,
             **intent_details,
         ))
+    if geometric_altitude_selection_enabled:
+        geometric_altitude_selections[(icao, celestial_body)] = (
+            selected_altitude)
+    else:
+        geometric_altitude_selections.pop((icao, celestial_body), None)
     return tuple(updated)
 
 
@@ -1784,8 +1901,12 @@ def _capture_transit_prediction(icao, callsign, celestial_body,
     predicted_utc = _prediction_timestamps(celestial_body)[1].get(icao)
     if predicted_utc is None:
         return
+    altitude_selection = geometric_altitude_selections.get(
+        (icao, celestial_body))
     aircraft_altitude_m = (
-        diagnostic.prediction.predicted_altitude_m
+        altitude_selection.altitude_m
+        if altitude_selection is not None
+        else diagnostic.prediction.predicted_altitude_m
         if diagnostic is not None else solver_input["aircraft_altitude_m"])
     frozen_prediction_state = build_frozen_prediction_state(
         icao, celestial_body, transit_result, now_utc, solver_input,
@@ -1830,6 +1951,26 @@ def _capture_transit_prediction(icao, callsign, celestial_body,
             icao, now_utc),
         "frozen_prediction_state": frozen_prediction_state,
     }
+    if altitude_selection is not None:
+        snapshot_prediction["geometric_altitude_selection"] = {
+            "enabled": True,
+            "selected_source": altitude_selection.source.value,
+            "selected_altitude_m": altitude_selection.altitude_m,
+            "production_baro_altitude_m": (
+                diagnostic.prediction.predicted_altitude_m
+                if diagnostic is not None else None),
+            "correction_m": altitude_selection.correction_m,
+            "uncertainty_m": altitude_selection.uncertainty_m,
+            "confidence": altitude_selection.confidence,
+            "own_gnss_available": altitude_selection.own_gnss_available,
+            "own_gnss_altitude_m": altitude_selection.own_gnss_altitude_m,
+            "fleet_available": altitude_selection.fleet_available,
+            "fleet_altitude_m": altitude_selection.fleet_altitude_m,
+            "fleet_confidence": altitude_selection.fleet_confidence,
+            "fleet_uncertainty_m": (
+                altitude_selection.fleet_uncertainty_m),
+            "fallback_reason": altitude_selection.fallback_reason,
+        }
     fleet_diagnostics = fleet_geometric_altitude_snapshot_diagnostics(
         icao, now_utc)
     if fleet_diagnostics is not None:
@@ -2018,6 +2159,7 @@ def clear_transit_prediction_state(icao, entry, celestial_body,
     last_valid.pop(icao, None)
     predicted_times.pop(icao, None)
     vertical_transit_diagnostics.pop((icao, celestial_body), None)
+    geometric_altitude_selections.pop((icao, celestial_body), None)
     cancel_pending_transit_notification(icao, celestial_body)
     try:
         dashboard_runtime.withdraw(icao, celestial_body, clock.now_utc())
@@ -2078,6 +2220,8 @@ def clean_dict():
         transit_solver_diagnostics.pop((icao, "moon"), None)
         vertical_transit_diagnostics.pop((icao, "sun"), None)
         vertical_transit_diagnostics.pop((icao, "moon"), None)
+        geometric_altitude_selections.pop((icao, "sun"), None)
+        geometric_altitude_selections.pop((icao, "moon"), None)
         drop_transit_snapshot_buffer(icao)
 
 # Funkcja do obliczania odległości między punktami (haversine) / Function to calculate distance between points (haversine)
@@ -3078,6 +3222,8 @@ def clean_transit_dict():
         transit_solver_diagnostics.pop((icao, "moon"), None)
         vertical_transit_diagnostics.pop((icao, "sun"), None)
         vertical_transit_diagnostics.pop((icao, "moon"), None)
+        geometric_altitude_selections.pop((icao, "sun"), None)
+        geometric_altitude_selections.pop((icao, "moon"), None)
         drop_transit_snapshot_buffer(icao)
 
 # Function to manage sockets blocked in readline() during controlled shutdown.

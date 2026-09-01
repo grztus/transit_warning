@@ -54,8 +54,10 @@ Configure these fields:
 - `RAW_ADSB_HOST` — optional RAW Mode-S/ADS-B source hostname; normally the
   same receiver as `ADSB_HOST`
 - `RAW_ADSB_PORT` — optional RAW source port; normally `30002`
-- `FLEET_GEOMETRIC_ALTITUDE_ENABLED` — enables the diagnostic-only fleet
-  geometric-altitude estimator (default `false`)
+- `GEOMETRIC_ALTITUDE_SELECTION_ENABLED` — opts production geometry into the
+  geometric-altitude hierarchy described below (default `false`)
+- `FLEET_GEOMETRIC_ALTITUDE_ENABLED` — enables additive fleet
+  geometric-altitude snapshot diagnostics (default `false`)
 - `FLEET_GEOID_PGM_PATH` — optional local GeographicLib EGM96 PGM path;
   leave empty to use standard platform locations
 - `BEAST_HOST` — Beast/Mode-S source IP address or hostname (default `192.168.56.1`)
@@ -89,11 +91,23 @@ active; prediction retains the full decoded precision.
 
 The optional fleet geometric-altitude estimator compares qualified ADS-B v2
 TC19 GNSS/barometric differences from other aircraft with the current QNH
-altitude basis. It excludes the target aircraft, uses continuous altitude,
-distance, and age weights (no fixed geographic sectors), and records only
-additive snapshot diagnostics. Its result does not affect production altitude,
-transit geometry, alerts, or classifications in this release. A local EGM96
-geoid grid is required; without one the diagnostic remains unavailable.
+altitude basis. It excludes the target aircraft and uses continuous altitude,
+distance, and age weights without fixed geographic sectors.
+
+When `GEOMETRIC_ALTITUDE_SELECTION_ENABLED=true`, aircraft line-of-sight
+geometry uses this hierarchy:
+
+1. `OWN_GNSS_GEOMETRIC` — fresh, aligned TC19 GNSS-minus-pressure-altitude
+   with TC31 identifying WGS84 HAE, converted through the local geoid grid.
+2. `FLEET_GEOMETRIC` — an estimate from other aircraft, accepted only with
+   `HIGH` or `MEDIUM` confidence.
+3. `BARO_QNH` — the existing safe fallback.
+
+The QNH, vertical-rate, and TC29 intent model remains authoritative for
+vertical motion. TC19 is applied to predicted pressure altitude, never added
+to an already QNH-corrected altitude. WGS84 ellipsoidal height is not used
+without geoid conversion. If the local EGM96 grid is unavailable, production
+falls back to `BARO_QNH`. An atmospheric-model source is deferred.
 
 System environment variables override `.env`. The private `.env` file and the
 `recordings/` directory are ignored by Git.

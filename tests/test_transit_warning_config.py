@@ -75,6 +75,21 @@ class ApplicationConfigurationTests(unittest.TestCase):
 
         fetch.assert_called_once_with(TEST_CONFIG.metar_station)
 
+    def test_production_altitude_selection_initializes_shared_estimator(self):
+        config = InstallationConfig(**{
+            **TEST_CONFIG.__dict__,
+            "geometric_altitude_selection_enabled": True,
+            "fleet_geometric_altitude_enabled": False,
+        })
+        geoid = Mock()
+        with patch.object(transit.PgmGeoidProvider, "discover",
+                          return_value=geoid):
+            transit.apply_installation_config(config)
+        self.assertTrue(transit.geometric_altitude_selection_enabled)
+        self.assertIs(
+            geoid,
+            transit.fleet_geometric_altitude_estimator.geoid_provider)
+
     def test_main_starts_independent_configured_sources(self):
         threads = [Mock(), Mock(), Mock(), Mock()]
         thread_factory = Mock(side_effect=threads)

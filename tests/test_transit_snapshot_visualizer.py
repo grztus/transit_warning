@@ -111,6 +111,20 @@ def ephem_version():
 
 
 class SnapshotVisualizerTests(unittest.TestCase):
+    def test_geometric_selection_adds_recorded_correction_after_vertical_model(self):
+        document = snapshot_fixture()
+        prediction = document["trigger_prediction"]
+        prediction["geometric_altitude_selection"] = {
+            "enabled": True,
+            "selected_source": "OWN_GNSS_GEOMETRIC",
+            "selected_altitude_m": 10100.0,
+            "production_baro_altitude_m": 10000.0,
+            "correction_m": 100.0,
+        }
+        samples = visualizer.reconstruct_samples(
+            document, prediction, before=0.0, after=0.0, step=0.1)
+        self.assertEqual(10100.0, samples[0].altitude_m)
+
     def test_schema_v3_is_accepted_and_legacy_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "snapshot.json"

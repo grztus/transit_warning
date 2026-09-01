@@ -283,6 +283,9 @@ def reconstruct_samples(document, prediction, before=15.0, after=15.0,
     horizontal = prediction["frozen_prediction_state"]["horizontal"]
     intersection = prediction["intersection"]
     vertical, altitude, motion, intent, policy = vertical_inputs(prediction)
+    altitude_selection = prediction.get("geometric_altitude_selection") or {}
+    geometric_correction_m = float(
+        altitude_selection.get("correction_m") or 0.0)
     base = parse_utc(vertical["evaluated_at_utc"])
     samples = []
     for offset in sample_offsets(before, after, step):
@@ -295,17 +298,20 @@ def reconstruct_samples(document, prediction, before=15.0, after=15.0,
         vertical_state = predict_vertical_state_at_time(
             altitude.value, motion, intent, base, time2x + offset,
             vertical["application_qnh_hpa"], policy)
+        selected_altitude_m = (
+            vertical_state.prediction.predicted_altitude_m
+            + geometric_correction_m)
         angular = angular_position_from_observer(
             (float(observer["lat"]), float(observer["lon"])),
             float(observer["elevation_m"]), (latitude, longitude),
-            vertical_state.prediction.predicted_altitude_m)
+            selected_altitude_m)
         body = body_position_at_utc(body_name, sample_utc, observer)
         x, y = tangent_plane_offset(
             angular.azimuth_deg, angular.altitude_angle_deg,
             body.azimuth_deg, body.altitude_deg)
         samples.append(TrajectorySample(
             offset, sample_utc, latitude, longitude,
-            vertical_state.prediction.predicted_altitude_m,
+            selected_altitude_m,
             angular.azimuth_deg, angular.altitude_angle_deg,
             body.azimuth_deg, body.altitude_deg, x, y,
             math.hypot(x, y)))
@@ -354,8 +360,11 @@ def validate_t0(document, prediction, samples):
           intersection["body_altitude_deg"], BODY_TOLERANCE_DEG)
     check("body azimuth", t0_sample.body_azimuth_deg,
           intersection["body_azimuth_deg"], BODY_TOLERANCE_DEG)
+    altitude_selection = prediction.get("geometric_altitude_selection") or {}
+    expected_altitude_m = altitude_selection.get(
+        "selected_altitude_m", decision["predicted_altitude_m"])
     check("aircraft altitude", t0_sample.altitude_m,
-          decision["predicted_altitude_m"], ALTITUDE_TOLERANCE_M)
+          expected_altitude_m, ALTITUDE_TOLERANCE_M)
     check("aircraft azimuth", t0_sample.aircraft_azimuth_deg,
           intersection["azimuth_from_observer_deg"], ANGULAR_TOLERANCE_DEG)
     check("aircraft altitude angle", t0_sample.aircraft_altitude_deg,

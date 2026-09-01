@@ -65,6 +65,7 @@ class InstallationConfigTests(unittest.TestCase):
         self.assertEqual(result.raw_adsb_host, "127.0.0.1")
         self.assertEqual(result.raw_adsb_port, 30002)
         self.assertFalse(result.fleet_geometric_altitude_enabled)
+        self.assertFalse(result.geometric_altitude_selection_enabled)
         self.assertEqual(result.fleet_geoid_pgm_path, "")
         self.assertFalse(result.mlat_beast_enabled)
         self.assertEqual(result.mlat_beast_host, result.mlat_host)
@@ -152,6 +153,20 @@ class InstallationConfigTests(unittest.TestCase):
             self.load({
                 **REQUIRED,
                 "FLEET_GEOMETRIC_ALTITUDE_ENABLED": "sometimes",
+            })
+
+    def test_accepts_production_geometric_altitude_selection_flag(self):
+        result = self.load({
+            **REQUIRED,
+            "GEOMETRIC_ALTITUDE_SELECTION_ENABLED": "true",
+        })
+        self.assertTrue(result.geometric_altitude_selection_enabled)
+        with self.assertRaisesRegex(
+                ConfigurationError,
+                "GEOMETRIC_ALTITUDE_SELECTION_ENABLED must be true or false"):
+            self.load({
+                **REQUIRED,
+                "GEOMETRIC_ALTITUDE_SELECTION_ENABLED": "sometimes",
             })
 
     def test_rejects_invalid_optional_raw_source(self):

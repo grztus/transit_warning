@@ -1,4 +1,4 @@
-"""Diagnostic fleet estimate of geometric aircraft altitude.
+"""Bounded fleet estimate of geometric aircraft altitude.
 
 This module is deliberately independent of transit prediction.  It turns
 qualified, datum-aware ADS-B altitude observations into a bounded rolling
@@ -208,7 +208,7 @@ def haversine_km(first, second):
 
 
 class FleetGeometricAltitudeEstimator:
-    """Bounded, deterministic and diagnostic-only fleet estimator."""
+    """Bounded deterministic estimator shared by diagnostics and selection."""
 
     source = "FLEET_GEOMETRIC"
 
