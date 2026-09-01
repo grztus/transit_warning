@@ -416,13 +416,45 @@ class DashboardRuntimeTests(unittest.TestCase):
 
     def test_mobile_gps_ui_requires_explicit_high_accuracy_watch(self):
         html = dashboard.DASHBOARD_HTML
-        self.assertIn("MOBILE GPS", html)
+        self.assertIn('class="observer-panel"', html)
         self.assertIn("Start GPS", html)
         self.assertIn("Stop GPS", html)
         self.assertIn("navigator.geolocation.watchPosition", html)
         self.assertIn("enableHighAccuracy:true", html)
         self.assertIn("gpsEnabled=false", html)
         self.assertNotIn("localStorage", html)
+
+    def test_observer_ui_is_one_compact_extensible_control(self):
+        html = dashboard.DASHBOARD_HTML
+        self.assertEqual(1, html.count('class="observer-panel"'))
+        self.assertIn('class="observer-modes"', html)
+        self.assertIn('>OBSERVER</strong>', html)
+        self.assertIn('> fallback</label>', html)
+        self.assertIn('title="Fallback to STATIC when mobile GPS becomes stale"',
+                      html)
+        self.assertNotIn("static fallback", html)
+        self.assertIn("padding:6px 8px", html)
+
+    def test_observer_status_uses_compact_order_and_labels(self):
+        html = dashboard.DASHBOARD_HTML
+        javascript = html.split("<script>", 1)[1]
+        self.assertIn("MOBILE_LAST_KNOWN:'MOBILE LAST KNOWN'", javascript)
+        self.assertIn("STATIC_FALLBACK:'STATIC FALLBACK'", javascript)
+        self.assertIn("MOBILE_NO_FIX:'NO POSITION'", javascript)
+        self.assertIn("parts=[`<span>${esc(requested)}</span>`", javascript)
+        self.assertIn('`<span class="arrow">→</span>`', javascript)
+        self.assertIn("GPS: ${esc(gpsLabel)}", javascript)
+        self.assertIn("AGE: ${formatAge", javascript)
+        self.assertIn("if(requested==='MOBILE')", javascript)
+        self.assertIn("value<60?`${value} s`", javascript)
+
+    def test_gps_controls_are_contextual_and_compact(self):
+        html = dashboard.DASHBOARD_HTML
+        self.assertIn('id="gps-start" class="gps-secondary hidden"', html)
+        self.assertIn('id="gps-stop" class="gps-secondary hidden"', html)
+        self.assertIn("requested!=='MOBILE'||gpsEnabled||!gpsAvailable",
+                      html)
+        self.assertIn("classList.toggle('hidden',!gpsEnabled)", html)
 
     def test_mobile_sep_uses_backend_class_and_time_is_seconds_only(self):
         html = dashboard.DASHBOARD_HTML
