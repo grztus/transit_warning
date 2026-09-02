@@ -44,6 +44,7 @@ class DashboardCandidate:
     distance_km: float | None
     last_prediction_update_utc: datetime.datetime
     telegram_range: bool
+    transit_distance_km: float | None = None
 
 
 @dataclass(frozen=True)
@@ -327,7 +328,8 @@ class DashboardState:
         )
         result = []
         for item in items:
-            candidate = self._candidate_dict(item["candidate"])
+            candidate = self._candidate_dict(
+                item["candidate"], include_live_fields=True)
             candidate["is_new_late_candidate"] = bool(
                 item["late_new_event"]
                 and now_utc is not None
@@ -335,8 +337,10 @@ class DashboardState:
             result.append(candidate)
         return result
 
-    def _candidate_dict(self, candidate):
+    def _candidate_dict(self, candidate, include_live_fields=False):
         result = asdict(candidate)
+        if not include_live_fields:
+            result.pop("transit_distance_km", None)
         result["predicted_event_utc"] = utc_text(
             candidate.predicted_event_utc)
         result["last_prediction_update_utc"] = utc_text(
@@ -649,8 +653,8 @@ DASHBOARD_HTML = r"""<!doctype html>
 body{margin:0;padding:12px;max-width:1100px;margin:auto}nav{display:flex;gap:8px;align-items:center;margin-bottom:12px}
 button{padding:10px 18px;border:0;border-radius:8px;background:#273040;color:#fff}
 button.active{background:#526b95}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.panel,.event{background:#191e27;border-radius:12px;padding:14px}.primary{border:1px solid #627ca9}
-h1,h2,p{margin:4px 0}.candidate-heading{display:flex;align-items:baseline;gap:.65rem;min-width:0}.candidate-heading h2{min-width:0;overflow-wrap:anywhere}.countdown{font-size:2rem;font-variant-numeric:tabular-nums;flex:0 0 auto}
+.panel,.event{background:#191e27;border-radius:12px;padding:14px}.primary{border:1px solid #627ca9}.body-icon{display:inline-block;width:1.15em;text-align:center}.moon-icon{color:#e6edf7;text-shadow:0 0 .25rem rgba(190,210,235,.45)}
+h1,h2,p{margin:4px 0}.candidate-heading{display:flex;align-items:baseline;gap:.65rem;min-width:0}.candidate-heading h2{min-width:0;overflow-wrap:anywhere}.countdown{font-size:2rem;font-variant-numeric:tabular-nums;flex:0 0 auto}.transit-geometry{white-space:nowrap}
 .new-badge{display:inline-flex;align-items:center;align-self:center;padding:.12rem .38rem;border-radius:.35rem;background:#d8263e;color:#fff;font-size:.68rem;font-weight:850;line-height:1;letter-spacing:.04em;animation:new-pulse .85s ease-in-out infinite alternate;flex:0 0 auto}@keyframes new-pulse{from{opacity:.45;box-shadow:0 0 0 rgba(255,55,75,0)}to{opacity:1;box-shadow:0 0 .55rem rgba(255,55,75,.8)}}@media(prefers-reduced-motion:reduce){.new-badge{animation:none;opacity:1}}
 .candidate{border-top:1px solid #333;padding:10px 0}.muted{color:#9ba7ba}.hidden{display:none}
 .sep{font-weight:750}.primary .sep{font-size:1.45rem;margin:7px 0}.sep.GREEN{color:#55d982}.sep.YELLOW{color:#f0c34d}.sep.RED{color:#ff6b6b}
@@ -661,8 +665,8 @@ h1,h2,p{margin:4px 0}.candidate-heading{display:flex;align-items:baseline;gap:.6
 </style></head><body>
 <nav><button id="live-tab" class="active">LIVE</button><button id="history-tab">HISTORY</button><span id="health" class="health disconnected"><span class="dot"></span><span class="label">DISCONNECTED</span></span></nav>
 <section class="observer-panel"><div class="observer-controls"><strong>OBSERVER</strong><span class="observer-modes"><button id="observer-static">STATIC</button><button id="observer-mobile">MOBILE</button></span><label title="Fallback to STATIC when mobile GPS becomes stale"><input id="observer-fallback" type="checkbox"> fallback</label><button id="gps-start" class="gps-secondary hidden">Start GPS</button><button id="gps-stop" class="gps-secondary hidden">Stop GPS</button></div><div id="observer-fields" class="observer-status"><span>STATIC</span><span class="arrow">→</span><span class="observer-ok">STATIC</span></div></section>
-<main id="live" class="grid"><section class="panel"><h1>☀️ SUN</h1><div id="sun"></div></section>
-<section class="panel"><h1>🌙 MOON</h1><div id="moon"></div></section></main>
+<main id="live" class="grid"><section class="panel"><h1><span class="body-icon">☀️</span> SUN</h1><div id="sun"></div></section>
+<section class="panel"><h1><span class="body-icon moon-icon">☾</span> MOON</h1><div id="moon"></div></section></main>
 <main id="history" class="hidden"><section class="panel"><h1>HISTORY</h1><div class="history-controls"><input id="history-date" type="date" aria-label="UTC date"><input id="history-search" type="search" placeholder="Callsign" aria-label="Callsign search"><select id="history-body" aria-label="Celestial body"><option value="ALL">ALL</option><option value="SUN">SUN</option><option value="MOON">MOON</option></select></div><div id="events"></div><div class="history-actions"><button id="load-more" class="hidden">LOAD MORE</button><button id="export-csv">EXPORT CSV</button></div></section></main>
 <script>
 let state=null,failedPolls=0,historyRecords=[],historyOffset=0,historyHasMore=false,gpsWatchId=null,gpsEnabled=false,gpsAvailable=false,observerData=null,gpsUiOverride=null;const STALE_AFTER_MS=10000,DISCONNECT_AFTER_FAILURES=2,HISTORY_PAGE_SIZE=25;const esc=s=>String(s??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -683,7 +687,7 @@ async function stopGps(){if(gpsWatchId!==null&&navigator.geolocation)navigator.g
 async function refreshGpsStatus(){if(!gpsEnabled)return;try{renderGps(await gpsRequest('GET'))}catch(e){renderGps({},'ERROR')}}
 async function loadGpsAvailability(){try{let data=await gpsRequest('GET');gpsAvailable=Boolean(data.available);renderObserver(observerData)}catch(e){renderGps({},'ERROR')}}
 function renderBody(name){let list=state?.[name]?.candidates||[],root=document.getElementById(name);if(!list.length){root.innerHTML='<p class="muted">No candidates</p>';return}
-root.innerHTML=list.slice(0,3).map((c,i)=>`<article class="candidate ${i?'':'primary'}"><div class="candidate-heading"><div class="countdown" data-utc="${esc(c.predicted_event_utc)}">${countdown(c.predicted_event_utc)}</div><h2>${esc(c.callsign||c.icao)}</h2>${c.is_new_late_candidate?'<span class="new-badge">NEW</span>':''}</div><p class="sep ${sepClass(c.separation_class)}">SEP ${c.separation_deg.toFixed(2)}°</p><p>${esc(c.state)}</p>${i?'':`<p>AZ ${c.body_azimuth_deg.toFixed(1)}° · ALT ${c.body_elevation_deg.toFixed(1)}°</p><p>Aircraft ALT ${c.aircraft_elevation_deg.toFixed(1)}° · ${c.distance_km?.toFixed(0)??'—'} km</p><p class="muted">${eventTime(c.predicted_event_utc)}</p>`}</article>`).join('')}
+root.innerHTML=list.slice(0,3).map((c,i)=>`<article class="candidate ${i?'':'primary'}"><div class="candidate-heading"><div class="countdown" data-utc="${esc(c.predicted_event_utc)}">${countdown(c.predicted_event_utc)}</div><h2>${esc(c.callsign||c.icao)}</h2>${c.is_new_late_candidate?'<span class="new-badge">NEW</span>':''}</div><p class="sep ${sepClass(c.separation_class)}">SEP ${c.separation_deg.toFixed(2)}°</p><p>${esc(c.state)}</p>${i?'':`<p class="transit-geometry">AZ ${c.body_azimuth_deg.toFixed(1)}° · ALT ${c.body_elevation_deg.toFixed(1)}° · ${c.transit_distance_km?.toFixed(0)??'—'} km</p><p class="muted">${eventTime(c.predicted_event_utc)}</p>`}</article>`).join('')}
 function renderHistory(){document.getElementById('events').innerHTML=historyRecords.map(x=>`<article class="event"><b>${esc(x.callsign||x.icao)} · ${esc(x.body)} · ${esc(x.outcome)}</b><p>${esc(x.predicted_event_utc)}</p><p class="sep">Final SEP ${Number(x.final_separation_deg).toFixed(2)}°</p></article>`).join('')||'<p class="muted">No history events</p>';document.getElementById('load-more').classList.toggle('hidden',!historyHasMore)}
 function historyQuery(offset=0){let q=new URLSearchParams({offset:String(offset),limit:String(HISTORY_PAGE_SIZE),body:document.getElementById('history-body').value}),d=document.getElementById('history-date').value,s=document.getElementById('history-search').value.trim();if(d)q.set('date',d);if(s)q.set('callsign',s);return q}
 async function loadHistory(reset=true){let offset=reset?0:historyOffset,response=await fetch('/api/history?'+historyQuery(offset),{cache:'no-store'});if(!response.ok)return;let page=await response.json();historyRecords=reset?page.records:historyRecords.concat(page.records);historyOffset=page.next_offset??historyRecords.length;historyHasMore=page.has_more;renderHistory()}

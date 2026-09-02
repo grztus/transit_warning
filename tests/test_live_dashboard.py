@@ -19,14 +19,15 @@ NOW = datetime.datetime(2026, 8, 31, 12, 0, tzinfo=UTC)
 
 
 def candidate(icao="A00001", body="SUN", seconds=120,
-              separation=1.5, update=None):
+              separation=1.5, update=None, transit_distance=None):
     return dashboard.DashboardCandidate(
         body=body, icao=icao, callsign="FLT" + icao[-1],
         predicted_event_utc=NOW + datetime.timedelta(seconds=seconds),
         separation_deg=separation, body_azimuth_deg=120.0,
         body_elevation_deg=20.0, aircraft_elevation_deg=21.5,
         distance_km=100.0, last_prediction_update_utc=update or NOW,
-        telegram_range=separation < 2.0)
+        telegram_range=separation < 2.0,
+        transit_distance_km=transit_distance)
 
 
 class DashboardStateTests(unittest.TestCase):
@@ -269,6 +270,15 @@ class DashboardStateTests(unittest.TestCase):
             NOW + datetime.timedelta(seconds=11))["recent_events"][0]
         self.assertNotIn("is_new_late_candidate", history)
 
+    def test_transit_distance_is_live_only(self):
+        self.state.publish(candidate(seconds=10, transit_distance=42.4))
+        live = self.state.snapshot(NOW)["sun"]["candidates"][0]
+        self.assertEqual(42.4, live["transit_distance_km"])
+        self.state.tick(NOW + datetime.timedelta(seconds=11))
+        history = self.state.snapshot(
+            NOW + datetime.timedelta(seconds=11))["recent_events"][0]
+        self.assertNotIn("transit_distance_km", history)
+
 
 class MobileGpsStateTests(unittest.TestCase):
     VALID = {
@@ -481,6 +491,23 @@ class DashboardRuntimeTests(unittest.TestCase):
         self.assertIn('class="candidate-heading"><div class="countdown"', html)
         self.assertIn("<h2>${esc(c.callsign||c.icao)}</h2>", html)
         self.assertIn("overflow-wrap:anywhere", html)
+
+    def test_live_geometry_row_uses_predicted_transit_distance(self):
+        html = dashboard.DASHBOARD_HTML
+        live_renderer = html.split("function renderBody", 1)[1].split(
+            "function renderHistory", 1)[0]
+        self.assertIn('class="transit-geometry">AZ ', live_renderer)
+        self.assertIn("ALT ${c.body_elevation_deg.toFixed(1)}° · ",
+                      live_renderer)
+        self.assertIn("c.transit_distance_km?.toFixed(0)", live_renderer)
+        self.assertNotIn("Aircraft ALT", live_renderer)
+        self.assertNotIn("c.distance_km?.toFixed(0)", live_renderer)
+
+    def test_moon_has_monochrome_identity_distinct_from_sun(self):
+        html = dashboard.DASHBOARD_HTML
+        self.assertIn('class="body-icon">☀️</span> SUN', html)
+        self.assertIn('class="body-icon moon-icon">☾</span> MOON', html)
+        self.assertIn(".moon-icon{color:#e6edf7", html)
 
     def test_late_new_badge_is_live_only_and_respects_reduced_motion(self):
         html = dashboard.DASHBOARD_HTML
@@ -763,6 +790,31 @@ class ProductionIntegrationTests(unittest.TestCase):
         result = (51, 21, 88, 6.5, 10, 100, 120, 0, 88, 6.0, NOW)
         self.assertFalse(transit.publish_dashboard_prediction(
             "A00001", "FLT1", "sun", result, NOW, 100))
+
+    def test_dashboard_uses_t0_slant_range_not_current_aircraft_range(self):
+        result = (51.2, 21.3, 88, 6.5, 42.0, 100, 120,
+                  0, 88, 6.0, NOW)
+        observer = SimpleNamespace(
+            coordinates=(51.0, 21.0), elevation_m=200.0)
+        diagnostic = SimpleNamespace(
+            prediction=SimpleNamespace(predicted_altitude_m=7000.0))
+        with patch.dict(
+                transit.vertical_transit_diagnostics,
+                {("A00001", "sun"): diagnostic}, clear=False), \
+                patch.object(
+                    transit, "aircraft_slant_distance_from_observer",
+                    return_value=42.4) as geometry:
+            self.assertTrue(transit.publish_dashboard_prediction(
+                "A00001", "FLT1", "sun", result, NOW, 999.0,
+                observer_position=observer))
+        item = transit.dashboard_runtime.state.snapshot(NOW)[
+            "sun"]["candidates"][0]
+        self.assertEqual(999.0, item["distance_km"])
+        self.assertEqual(42.4, item["transit_distance_km"])
+        geometry.assert_called_once_with(
+            observer.coordinates, observer.elevation_m,
+            (result[0], result[1]), 7000.0,
+            horizontal_distance_km=result[4])
 
     def test_telegram_trigger_signal_marks_existing_dashboard_event(self):
         result = (51, 21, 88, 6.5, 10, 100, 600, 0, 88, 6.0, NOW)

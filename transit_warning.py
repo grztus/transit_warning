@@ -157,6 +157,7 @@ from transit_prediction_model import (
     great_circle_forward_bearing_at_point,
     predict_transit_altitude as shared_predict_transit_altitude,
     predict_vertical_state_at_time as shared_predict_vertical_state,
+    slant_distance_km_from_observer,
     solve_great_circle_intersection,
 )
 
@@ -750,6 +751,33 @@ def aircraft_angular_position_from_observer(
     return angular_position_from_observer(
         observer_position, observer_hae_m, target_position, target_hae_m,
         distance_km=distance_km)
+
+
+def aircraft_slant_distance_from_observer(
+        observer_position, observer_orthometric_elevation_m,
+        target_position, target_orthometric_altitude_m,
+        horizontal_distance_km):
+    """Return T0 endpoint range using the active production height datum."""
+    provider = aircraft_los_geoid_provider
+    if provider is None:
+        return math.hypot(
+            float(horizontal_distance_km),
+            (float(target_orthometric_altitude_m)
+             - float(observer_orthometric_elevation_m)) / 1000.0)
+    try:
+        observer_hae_m = (
+            float(observer_orthometric_elevation_m)
+            + provider.undulation_m(*observer_position))
+        target_hae_m = (
+            float(target_orthometric_altitude_m)
+            + provider.undulation_m(*target_position))
+    except (OSError, TypeError, ValueError):
+        return math.hypot(
+            float(horizontal_distance_km),
+            (float(target_orthometric_altitude_m)
+             - float(observer_orthometric_elevation_m)) / 1000.0)
+    return slant_distance_km_from_observer(
+        observer_position, observer_hae_m, target_position, target_hae_m)
 
 
 def correct_pressure_altitude(pressure_altitude_ft, qnh_hpa):
@@ -2128,7 +2156,8 @@ def cancel_pending_transit_notification(icao, celestial_body=None):
 
 def publish_dashboard_prediction(icao, callsign, celestial_body,
                                  transit_result, now_utc, distance_km,
-                                 separation_deg=None):
+                                 separation_deg=None,
+                                 observer_position=None):
     """Publish existing production output without recomputing geometry."""
     try:
         separation = (
@@ -2140,6 +2169,23 @@ def publish_dashboard_prediction(icao, callsign, celestial_body,
                 and separation < dashboard_sep_visible_max_deg):
             dashboard_runtime.withdraw(icao, body, now_utc)
             return False
+        transit_distance_km = None
+        if observer_position is not None:
+            diagnostic = vertical_transit_diagnostics.get((icao, body.lower()))
+            altitude_selection = geometric_altitude_selections.get(
+                (icao, body.lower()))
+            target_altitude_m = (
+                altitude_selection.altitude_m
+                if altitude_selection is not None
+                else diagnostic.prediction.predicted_altitude_m
+                if diagnostic is not None else None)
+            if target_altitude_m is not None:
+                transit_distance_km = aircraft_slant_distance_from_observer(
+                    observer_position.coordinates,
+                    observer_position.elevation_m,
+                    (float(transit_result[0]), float(transit_result[1])),
+                    target_altitude_m,
+                    horizontal_distance_km=float(transit_result[4]))
         return dashboard_runtime.publish(DashboardCandidate(
             body=body,
             icao=icao,
@@ -2153,6 +2199,7 @@ def publish_dashboard_prediction(icao, callsign, celestial_body,
             distance_km=float(distance_km),
             last_prediction_update_utc=now_utc,
             telegram_range=(separation < telegram_alert_separation_deg),
+            transit_distance_km=transit_distance_km,
         ))
     except Exception:
         return False
@@ -3969,7 +4016,7 @@ def process_line(line, port):
                     plane_dict[icao][24], plane_dict[icao][23])
                 publish_dashboard_prediction(
                     icao, flight, "moon", tst_int1, prediction_now,
-                    distance, separation_deg)
+                    distance, separation_deg, observer_position)
                 if -transit_separation_sound_alert < separation_deg < transit_separation_sound_alert:
                     gong()
                 notification_triggered = emit_transit_notification(
@@ -4013,7 +4060,7 @@ def process_line(line, port):
                     plane_dict[icao][19], plane_dict[icao][18])
                 publish_dashboard_prediction(
                     icao, flight, "sun", tst_int2, prediction_now,
-                    distance, separation_deg2)
+                    distance, separation_deg2, observer_position)
                 if -transit_separation_sound_alert < separation_deg2 < transit_separation_sound_alert:
                     gong()
                 notification_triggered = emit_transit_notification(

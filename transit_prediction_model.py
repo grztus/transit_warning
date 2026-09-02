@@ -157,6 +157,18 @@ def _wgs84_ecef(position, ellipsoidal_height_m):
     )
 
 
+def slant_distance_km_from_observer(
+        observer_position, observer_ellipsoidal_height_m, target_position,
+        target_ellipsoidal_height_m):
+    """Return straight-line endpoint distance without changing LOS geometry."""
+    observer_ecef = _wgs84_ecef(
+        observer_position, observer_ellipsoidal_height_m)
+    target_ecef = _wgs84_ecef(target_position, target_ellipsoidal_height_m)
+    return math.sqrt(sum(
+        (target - observer) ** 2
+        for target, observer in zip(target_ecef, observer_ecef))) / 1000.0
+
+
 def angular_position_from_observer(
         observer_position, observer_ellipsoidal_height_m, target_position,
         target_ellipsoidal_height_m, distance_km=None):

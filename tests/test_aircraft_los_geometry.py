@@ -10,6 +10,7 @@ from geometric_altitude_selection import (
 from transit_prediction_model import (
     angular_position_from_observer,
     legacy_flat_angular_position_from_observer,
+    slant_distance_km_from_observer,
 )
 
 
@@ -19,6 +20,11 @@ class Wgs84EcefEnuGeometryTests(unittest.TestCase):
             (0.0, 0.0), 0.0, (0.0, 1.0), 0.0)
         self.assertEqual(result.azimuth_deg, 90.0)
         self.assertAlmostEqual(result.altitude_angle_deg, -0.5, places=10)
+        expected_chord_km = 2.0 * 6378.137 * math.sin(
+            math.radians(1.0) / 2.0)
+        self.assertAlmostEqual(slant_distance_km_from_observer(
+            (0.0, 0.0), 0.0, (0.0, 1.0), 0.0),
+            expected_chord_km, places=9)
 
     def test_equal_height_target_is_below_local_horizontal(self):
         result = angular_position_from_observer(
