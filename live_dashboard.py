@@ -22,6 +22,7 @@ WITHDRAW_HISTORY_GRACE_SECONDS = 3.0
 DEFAULT_SEP_GREEN_MAX_DEG = 3.0
 DEFAULT_SEP_YELLOW_MAX_DEG = 5.0
 DEFAULT_SEP_VISIBLE_MAX_DEG = 7.0
+DEFAULT_NEW_TRANSIT_THRESHOLD_SECONDS = 60.0
 DEFAULT_MOBILE_GPS_FRESH_SECONDS = 15.0
 MAX_MOBILE_GPS_REQUEST_BYTES = 4096
 
@@ -146,12 +147,18 @@ class DashboardState:
                  sep_green_max_deg=DEFAULT_SEP_GREEN_MAX_DEG,
                  sep_yellow_max_deg=DEFAULT_SEP_YELLOW_MAX_DEG,
                  sep_visible_max_deg=DEFAULT_SEP_VISIBLE_MAX_DEG,
-                 history_store=None):
+                 history_store=None, new_transit_indicator_enabled=True,
+                 new_transit_threshold_seconds=(
+                     DEFAULT_NEW_TRANSIT_THRESHOLD_SECONDS)):
         self.history_limit = int(history_limit)
         self.sep_green_max_deg = float(sep_green_max_deg)
         self.sep_yellow_max_deg = float(sep_yellow_max_deg)
         self.sep_visible_max_deg = float(sep_visible_max_deg)
         self.history_store = history_store
+        self.new_transit_indicator_enabled = bool(
+            new_transit_indicator_enabled)
+        self.new_transit_threshold_seconds = float(
+            new_transit_threshold_seconds)
         self._live = {"SUN": {}, "MOON": {}}
         self._history = []
         self._generated_at_utc = None
@@ -164,6 +171,9 @@ class DashboardState:
             return False
         with self._lock:
             existing = self._live[body].get(key)
+            first_time_to_event = (
+                candidate.predicted_event_utc
+                - candidate.last_prediction_update_utc).total_seconds()
             first_separation = (
                 existing["first_separation_deg"] if existing is not None
                 else candidate.separation_deg)
@@ -181,6 +191,11 @@ class DashboardState:
                 "history_worthy": (
                     existing["history_worthy"] if existing is not None
                     else False),
+                "late_new_event": (
+                    existing["late_new_event"] if existing is not None
+                    else (self.new_transit_indicator_enabled
+                          and 0.0 <= first_time_to_event
+                          <= self.new_transit_threshold_seconds)),
             }
         return True
 
@@ -285,12 +300,15 @@ class DashboardState:
     def snapshot(self, now_utc=None):
         with self._lock:
             generated_at = self._generated_at_utc or now_utc
+            snapshot_now = now_utc or generated_at
             result = {
                 "generated_at_utc": (
                     utc_text(generated_at) if generated_at is not None
                     else None),
-                "sun": {"candidates": self._body_snapshot_locked("SUN")},
-                "moon": {"candidates": self._body_snapshot_locked("MOON")},
+                "sun": {"candidates": self._body_snapshot_locked(
+                    "SUN", snapshot_now)},
+                "moon": {"candidates": self._body_snapshot_locked(
+                    "MOON", snapshot_now)},
                 "recent_events": deepcopy(self._history),
                 "presentation": {
                     "sep_green_max_deg": self.sep_green_max_deg,
@@ -300,14 +318,22 @@ class DashboardState:
             }
         return result
 
-    def _body_snapshot_locked(self, body):
+    def _body_snapshot_locked(self, body, now_utc):
         items = sorted(
             self._live[body].values(),
             key=lambda item: (
                 item["candidate"].predicted_event_utc,
                 item["candidate"].icao),
         )
-        return [self._candidate_dict(item["candidate"]) for item in items]
+        result = []
+        for item in items:
+            candidate = self._candidate_dict(item["candidate"])
+            candidate["is_new_late_candidate"] = bool(
+                item["late_new_event"]
+                and now_utc is not None
+                and item["candidate"].predicted_event_utc > now_utc)
+            result.append(candidate)
+        return result
 
     def _candidate_dict(self, candidate):
         result = asdict(candidate)
@@ -571,7 +597,10 @@ def start_dashboard(enabled, host, port, now_utc, error_handler=None,
                     mobile_gps_fresh_seconds=DEFAULT_MOBILE_GPS_FRESH_SECONDS,
                     observer_position_provider=None,
                     mobile_gps_stale_warning_seconds=30.0,
-                    mobile_gps_critical_warning_seconds=300.0):
+                    mobile_gps_critical_warning_seconds=300.0,
+                    new_transit_indicator_enabled=True,
+                    new_transit_threshold_seconds=(
+                        DEFAULT_NEW_TRANSIT_THRESHOLD_SECONDS)):
     if not enabled:
         return DisabledDashboard()
     errors = error_handler or (lambda message: None)
@@ -582,7 +611,9 @@ def start_dashboard(enabled, host, port, now_utc, error_handler=None,
         sep_green_max_deg=sep_green_max_deg,
         sep_yellow_max_deg=sep_yellow_max_deg,
         sep_visible_max_deg=sep_visible_max_deg,
-        history_store=history_store)
+        history_store=history_store,
+        new_transit_indicator_enabled=new_transit_indicator_enabled,
+        new_transit_threshold_seconds=new_transit_threshold_seconds)
     mobile_gps_state = MobileGpsState(
         enabled=mobile_gps_enabled,
         fresh_seconds=mobile_gps_fresh_seconds)
@@ -620,6 +651,7 @@ button{padding:10px 18px;border:0;border-radius:8px;background:#273040;color:#ff
 button.active{background:#526b95}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .panel,.event{background:#191e27;border-radius:12px;padding:14px}.primary{border:1px solid #627ca9}
 h1,h2,p{margin:4px 0}.candidate-heading{display:flex;align-items:baseline;gap:.65rem;min-width:0}.candidate-heading h2{min-width:0;overflow-wrap:anywhere}.countdown{font-size:2rem;font-variant-numeric:tabular-nums;flex:0 0 auto}
+.new-badge{display:inline-flex;align-items:center;align-self:center;padding:.12rem .38rem;border-radius:.35rem;background:#d8263e;color:#fff;font-size:.68rem;font-weight:850;line-height:1;letter-spacing:.04em;animation:new-pulse .85s ease-in-out infinite alternate;flex:0 0 auto}@keyframes new-pulse{from{opacity:.45;box-shadow:0 0 0 rgba(255,55,75,0)}to{opacity:1;box-shadow:0 0 .55rem rgba(255,55,75,.8)}}@media(prefers-reduced-motion:reduce){.new-badge{animation:none;opacity:1}}
 .candidate{border-top:1px solid #333;padding:10px 0}.muted{color:#9ba7ba}.hidden{display:none}
 .sep{font-weight:750}.primary .sep{font-size:1.45rem;margin:7px 0}.sep.GREEN{color:#55d982}.sep.YELLOW{color:#f0c34d}.sep.RED{color:#ff6b6b}
 .history-controls{display:flex;flex-wrap:wrap;gap:7px;margin:8px 0 12px}.history-controls input,.history-controls select{min-width:0;padding:8px;border:1px solid #3a4558;border-radius:7px;background:#11161e;color:#eef}.history-controls input[type=date]{flex:1 1 135px}.history-controls input[type=search]{flex:2 1 150px}.history-controls select{flex:1 1 80px}.history-actions{display:flex;gap:8px;margin-top:10px}.event{margin-top:8px}.event .sep{font-size:1.05rem}
@@ -651,7 +683,7 @@ async function stopGps(){if(gpsWatchId!==null&&navigator.geolocation)navigator.g
 async function refreshGpsStatus(){if(!gpsEnabled)return;try{renderGps(await gpsRequest('GET'))}catch(e){renderGps({},'ERROR')}}
 async function loadGpsAvailability(){try{let data=await gpsRequest('GET');gpsAvailable=Boolean(data.available);renderObserver(observerData)}catch(e){renderGps({},'ERROR')}}
 function renderBody(name){let list=state?.[name]?.candidates||[],root=document.getElementById(name);if(!list.length){root.innerHTML='<p class="muted">No candidates</p>';return}
-root.innerHTML=list.slice(0,3).map((c,i)=>`<article class="candidate ${i?'':'primary'}"><div class="candidate-heading"><div class="countdown" data-utc="${esc(c.predicted_event_utc)}">${countdown(c.predicted_event_utc)}</div><h2>${esc(c.callsign||c.icao)}</h2></div><p class="sep ${sepClass(c.separation_class)}">SEP ${c.separation_deg.toFixed(2)}°</p><p>${esc(c.state)}</p>${i?'':`<p>AZ ${c.body_azimuth_deg.toFixed(1)}° · ALT ${c.body_elevation_deg.toFixed(1)}°</p><p>Aircraft ALT ${c.aircraft_elevation_deg.toFixed(1)}° · ${c.distance_km?.toFixed(0)??'—'} km</p><p class="muted">${eventTime(c.predicted_event_utc)}</p>`}</article>`).join('')}
+root.innerHTML=list.slice(0,3).map((c,i)=>`<article class="candidate ${i?'':'primary'}"><div class="candidate-heading"><div class="countdown" data-utc="${esc(c.predicted_event_utc)}">${countdown(c.predicted_event_utc)}</div><h2>${esc(c.callsign||c.icao)}</h2>${c.is_new_late_candidate?'<span class="new-badge">NEW</span>':''}</div><p class="sep ${sepClass(c.separation_class)}">SEP ${c.separation_deg.toFixed(2)}°</p><p>${esc(c.state)}</p>${i?'':`<p>AZ ${c.body_azimuth_deg.toFixed(1)}° · ALT ${c.body_elevation_deg.toFixed(1)}°</p><p>Aircraft ALT ${c.aircraft_elevation_deg.toFixed(1)}° · ${c.distance_km?.toFixed(0)??'—'} km</p><p class="muted">${eventTime(c.predicted_event_utc)}</p>`}</article>`).join('')}
 function renderHistory(){document.getElementById('events').innerHTML=historyRecords.map(x=>`<article class="event"><b>${esc(x.callsign||x.icao)} · ${esc(x.body)} · ${esc(x.outcome)}</b><p>${esc(x.predicted_event_utc)}</p><p class="sep">Final SEP ${Number(x.final_separation_deg).toFixed(2)}°</p></article>`).join('')||'<p class="muted">No history events</p>';document.getElementById('load-more').classList.toggle('hidden',!historyHasMore)}
 function historyQuery(offset=0){let q=new URLSearchParams({offset:String(offset),limit:String(HISTORY_PAGE_SIZE),body:document.getElementById('history-body').value}),d=document.getElementById('history-date').value,s=document.getElementById('history-search').value.trim();if(d)q.set('date',d);if(s)q.set('callsign',s);return q}
 async function loadHistory(reset=true){let offset=reset?0:historyOffset,response=await fetch('/api/history?'+historyQuery(offset),{cache:'no-store'});if(!response.ok)return;let page=await response.json();historyRecords=reset?page.records:historyRecords.concat(page.records);historyOffset=page.next_offset??historyRecords.length;historyHasMore=page.has_more;renderHistory()}

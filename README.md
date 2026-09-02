@@ -189,6 +189,13 @@ near-event-withdrawn, and Telegram-triggered events are history-worthy; early
 insignificant transients are discarded. Persistent-history failure is fail-open,
 and `/api/state` never scans history files.
 
+With `NEW_TRANSIT_INDICATOR_ENABLED=true`, a compact pulsing `NEW` badge marks
+an event only when it first enters LIVE within
+`NEW_TRANSIT_THRESHOLD_SECONDS` of its predicted T0 (60 seconds by default).
+An event discovered earlier does not become NEW merely because its countdown
+later crosses the threshold. The backend owns this state across browser reloads;
+the badge ends at T0 and is never written to HISTORY.
+
 The server defaults to disabled and localhost. Remote access should use a
 trusted private transport such as Tailscale Serve/tailnet HTTPS. Do not use
 public Funnel exposure without an appropriate security model. The dashboard
@@ -378,6 +385,8 @@ Dashboard/observer:
 | `MOBILE_GPS_STALE_WARNING_SECONDS` | `30` | Orange age warning |
 | `MOBILE_GPS_CRITICAL_WARNING_SECONDS` | `300` | Red age warning |
 | `DASHBOARD_SEP_GREEN_MAX_DEG`, `DASHBOARD_SEP_YELLOW_MAX_DEG`, `DASHBOARD_SEP_VISIBLE_MAX_DEG` | `3`, `5`, `7` | Dashboard colors/visibility |
+| `NEW_TRANSIT_INDICATOR_ENABLED` | `true` | Mark late-discovered LIVE events |
+| `NEW_TRANSIT_THRESHOLD_SECONDS` | `60` | Maximum time before T0 at first LIVE appearance |
 
 System environment overrides `.env`. MOBILE startup requires dashboard and GPS
 enabled. Critical age must exceed warning age; presentation thresholds require

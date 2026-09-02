@@ -4094,6 +4094,10 @@ def main():
             getattr(configuration, "mobile_gps_stale_warning_seconds", 30.0)),
         mobile_gps_critical_warning_seconds=(
             getattr(configuration, "mobile_gps_critical_warning_seconds", 300.0)),
+        new_transit_indicator_enabled=(
+            configuration.new_transit_indicator_enabled),
+        new_transit_threshold_seconds=(
+            configuration.new_transit_threshold_seconds),
     )
     observer_position_provider.set_change_handler(
         invalidate_observer_dependent_state)

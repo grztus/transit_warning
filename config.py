@@ -61,6 +61,8 @@ class InstallationConfig:
     dashboard_sep_green_max_deg: float = 3.0
     dashboard_sep_yellow_max_deg: float = 5.0
     dashboard_sep_visible_max_deg: float = 7.0
+    new_transit_indicator_enabled: bool = True
+    new_transit_threshold_seconds: float = 60.0
     fleet_geometric_altitude_enabled: bool = False
     geometric_altitude_selection_enabled: bool = False
     fleet_geoid_pgm_path: str = ""
@@ -304,6 +306,11 @@ def load_installation_config(
     tmux_thresholds = _presentation_thresholds(values, "TMUX", errors)
     dashboard_thresholds = _presentation_thresholds(
         values, "DASHBOARD", errors)
+    new_transit_indicator_enabled = _boolean(
+        values, "NEW_TRANSIT_INDICATOR_ENABLED", True, errors)
+    new_transit_threshold_seconds = _optional_nonnegative_float(
+        values, "NEW_TRANSIT_THRESHOLD_SECONDS", 60.0, errors,
+        maximum=900.0)
     fleet_geometric_altitude_enabled = _boolean(
         values, "FLEET_GEOMETRIC_ALTITUDE_ENABLED", False, errors)
     geometric_altitude_selection_enabled = _boolean(
@@ -370,6 +377,8 @@ def load_installation_config(
         dashboard_sep_green_max_deg=dashboard_thresholds[0],
         dashboard_sep_yellow_max_deg=dashboard_thresholds[1],
         dashboard_sep_visible_max_deg=dashboard_thresholds[2],
+        new_transit_indicator_enabled=new_transit_indicator_enabled,
+        new_transit_threshold_seconds=new_transit_threshold_seconds,
         fleet_geometric_altitude_enabled=fleet_geometric_altitude_enabled,
         geometric_altitude_selection_enabled=(
             geometric_altitude_selection_enabled),

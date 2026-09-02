@@ -201,6 +201,74 @@ class DashboardStateTests(unittest.TestCase):
         self.assertEqual("YELLOW", state.snapshot(NOW)[
             "sun"]["candidates"][0]["separation_class"])
 
+    def test_late_new_indicator_threshold_boundaries(self):
+        for index, (seconds, expected) in enumerate((
+                (120, False), (61, False), (60, True), (59, True),
+                (1, True), (0, False), (-1, False))):
+            with self.subTest(seconds=seconds):
+                state = dashboard.DashboardState()
+                state.publish(candidate(
+                    "N{:05d}".format(index), seconds=seconds))
+                item = state.snapshot(NOW)["sun"]["candidates"][0]
+                self.assertEqual(expected, item["is_new_late_candidate"])
+
+    def test_late_classification_is_fixed_at_first_live_appearance(self):
+        event_t0 = NOW + datetime.timedelta(seconds=180)
+        state = dashboard.DashboardState()
+        state.publish(candidate(
+            "LATE01", seconds=180,
+            update=NOW + datetime.timedelta(seconds=137)))
+        late = state.snapshot(
+            NOW + datetime.timedelta(seconds=137))["sun"]["candidates"][0]
+        self.assertTrue(late["is_new_late_candidate"])
+        state.publish(candidate(
+            "LATE01", seconds=180, separation=0.2,
+            update=NOW + datetime.timedelta(seconds=150)))
+        self.assertTrue(state.snapshot(
+            NOW + datetime.timedelta(seconds=150))[
+                "sun"]["candidates"][0]["is_new_late_candidate"])
+        self.assertFalse(state.snapshot(event_t0)[
+            "sun"]["candidates"][0]["is_new_late_candidate"])
+
+        known = dashboard.DashboardState()
+        known.publish(candidate("KNOWN1", seconds=180))
+        known.publish(candidate(
+            "KNOWN1", seconds=180, separation=0.1,
+            update=NOW + datetime.timedelta(seconds=137)))
+        self.assertFalse(known.snapshot(
+            NOW + datetime.timedelta(seconds=137))[
+                "sun"]["candidates"][0]["is_new_late_candidate"])
+
+    def test_new_state_survives_api_snapshots_and_is_body_specific(self):
+        self.state.publish(candidate("DUAL01", "SUN", seconds=43))
+        self.state.publish(candidate("DUAL01", "MOON", seconds=120))
+        first = self.state.snapshot(NOW)
+        second = self.state.snapshot(NOW + datetime.timedelta(seconds=5))
+        self.assertTrue(first["sun"]["candidates"][0][
+            "is_new_late_candidate"])
+        self.assertTrue(second["sun"]["candidates"][0][
+            "is_new_late_candidate"])
+        self.assertFalse(first["moon"]["candidates"][0][
+            "is_new_late_candidate"])
+
+    def test_new_indicator_can_be_disabled_or_use_custom_threshold(self):
+        disabled = dashboard.DashboardState(
+            new_transit_indicator_enabled=False)
+        disabled.publish(candidate(seconds=10))
+        self.assertFalse(disabled.snapshot(NOW)["sun"]["candidates"][0][
+            "is_new_late_candidate"])
+        custom = dashboard.DashboardState(new_transit_threshold_seconds=90)
+        custom.publish(candidate(seconds=90))
+        self.assertTrue(custom.snapshot(NOW)["sun"]["candidates"][0][
+            "is_new_late_candidate"])
+
+    def test_new_annotation_is_live_only(self):
+        self.state.publish(candidate(seconds=10))
+        self.state.tick(NOW + datetime.timedelta(seconds=11))
+        history = self.state.snapshot(
+            NOW + datetime.timedelta(seconds=11))["recent_events"][0]
+        self.assertNotIn("is_new_late_candidate", history)
+
 
 class MobileGpsStateTests(unittest.TestCase):
     VALID = {
@@ -411,8 +479,18 @@ class DashboardRuntimeTests(unittest.TestCase):
         self.assertIn(".candidate-heading{display:flex", html)
         self.assertIn("gap:.65rem", html)
         self.assertIn('class="candidate-heading"><div class="countdown"', html)
-        self.assertIn("<h2>${esc(c.callsign||c.icao)}</h2></div>", html)
+        self.assertIn("<h2>${esc(c.callsign||c.icao)}</h2>", html)
         self.assertIn("overflow-wrap:anywhere", html)
+
+    def test_late_new_badge_is_live_only_and_respects_reduced_motion(self):
+        html = dashboard.DASHBOARD_HTML
+        self.assertIn("c.is_new_late_candidate?", html)
+        self.assertIn('class="new-badge">NEW</span>', html)
+        self.assertIn("@keyframes new-pulse", html)
+        self.assertIn("@media(prefers-reduced-motion:reduce)", html)
+        history_renderer = html.split("function renderHistory", 1)[1].split(
+            "function historyQuery", 1)[0]
+        self.assertNotIn("new-badge", history_renderer)
 
     def test_mobile_gps_ui_requires_explicit_high_accuracy_watch(self):
         html = dashboard.DASHBOARD_HTML
@@ -599,6 +677,24 @@ class DashboardConfigTests(unittest.TestCase):
                          default.dashboard_history_dir)
         self.assertFalse(default.dashboard_mobile_gps_enabled)
         self.assertEqual(15.0, default.dashboard_mobile_gps_fresh_seconds)
+        self.assertTrue(default.new_transit_indicator_enabled)
+        self.assertEqual(60.0, default.new_transit_threshold_seconds)
+
+    def test_new_indicator_configuration_is_optional_and_validated(self):
+        configured = self.load({
+            **self.BASE,
+            "NEW_TRANSIT_INDICATOR_ENABLED": "false",
+            "NEW_TRANSIT_THRESHOLD_SECONDS": "90",
+        })
+        self.assertFalse(configured.new_transit_indicator_enabled)
+        self.assertEqual(90.0, configured.new_transit_threshold_seconds)
+        for invalid in ("-1", "901", "nan", "bad"):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                    ConfigurationError, "NEW_TRANSIT_THRESHOLD_SECONDS"):
+                self.load({
+                    **self.BASE,
+                    "NEW_TRANSIT_THRESHOLD_SECONDS": invalid,
+                })
 
     def test_mobile_gps_configuration_is_optional_and_validated(self):
         configured = self.load({
