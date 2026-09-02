@@ -151,6 +151,7 @@ from transit_prediction_model import (
     VerticalPredictionResult,
     VerticalStateAtTime,
     angular_position_from_observer,
+    legacy_flat_angular_position_from_observer,
     clamp_vertical_prediction_to_intent_state as shared_clamp_vertical,
     current_vertical_prediction_policy,
     great_circle_forward_bearing_at_point,
@@ -601,6 +602,8 @@ telegram_alert_horizon_seconds = 300.0
 telegram_alert_stability_seconds = 5.0
 fleet_geometric_altitude_enabled = False
 fleet_geometric_altitude_estimator = None
+aircraft_los_geoid_provider = None
+aircraft_los_geometry_mode = "UNCONFIGURED"
 geometric_altitude_selection_enabled = False
 geometric_altitude_selector = GeometricAltitudeSelector()
 
@@ -620,6 +623,7 @@ def apply_installation_config(configuration: InstallationConfig):
     global dashboard_sep_yellow_max_deg, dashboard_sep_visible_max_deg
     global fleet_geometric_altitude_enabled
     global fleet_geometric_altitude_estimator
+    global aircraft_los_geoid_provider, aircraft_los_geometry_mode
     global geometric_altitude_selection_enabled
     observer_position_provider = RuntimeObserverPositionProvider(
         ObserverPosition(
@@ -673,17 +677,19 @@ def apply_installation_config(configuration: InstallationConfig):
     geometric_altitude_selection_enabled = (
         configuration.geometric_altitude_selection_enabled)
     fleet_geometric_altitude_estimator = None
-    if (fleet_geometric_altitude_enabled
-            or geometric_altitude_selection_enabled):
-        geoid_provider = PgmGeoidProvider.discover(
-            configuration.fleet_geoid_pgm_path)
-        if geoid_provider is not None:
+    aircraft_los_geoid_provider = PgmGeoidProvider.discover(
+        configuration.fleet_geoid_pgm_path)
+    if aircraft_los_geoid_provider is not None:
+        aircraft_los_geometry_mode = "WGS84_ECEF_ENU"
+        if (fleet_geometric_altitude_enabled
+                or geometric_altitude_selection_enabled):
             fleet_geometric_altitude_estimator = (
-                FleetGeometricAltitudeEstimator(geoid_provider))
-        elif geometric_altitude_selection_enabled:
-            sys.stderr.write(
-                "Geometric altitude selection: geoid data unavailable; "
-                "using BARO_QNH\n")
+                FleetGeometricAltitudeEstimator(aircraft_los_geoid_provider))
+    else:
+        aircraft_los_geometry_mode = "LEGACY_FLAT_GEOID_UNAVAILABLE"
+        sys.stderr.write(
+            "Aircraft LOS geometry: geoid data unavailable; "
+            "using explicit legacy flat fallback\n")
     gatech = ephem_observer_for_position(observer_position)
     port_status = {adsb_port: False, mlat_port: False}
 
@@ -717,6 +723,33 @@ def ephem_observer_for_position(observer_position):
     observer.elevation = float(observer_position.elevation_m)
     observer.pressure = 0
     return observer
+
+
+def aircraft_angular_position_from_observer(
+        observer_position, observer_orthometric_elevation_m,
+        target_position, target_orthometric_altitude_m, distance_km=None):
+    """Resolve MSL-like endpoint heights to HAE and compute aircraft LOS."""
+    provider = aircraft_los_geoid_provider
+    if provider is None:
+        return legacy_flat_angular_position_from_observer(
+            observer_position, observer_orthometric_elevation_m,
+            target_position, target_orthometric_altitude_m,
+            distance_km=distance_km)
+    try:
+        observer_hae_m = (
+            float(observer_orthometric_elevation_m)
+            + provider.undulation_m(*observer_position))
+        target_hae_m = (
+            float(target_orthometric_altitude_m)
+            + provider.undulation_m(*target_position))
+    except (OSError, TypeError, ValueError):
+        return legacy_flat_angular_position_from_observer(
+            observer_position, observer_orthometric_elevation_m,
+            target_position, target_orthometric_altitude_m,
+            distance_km=distance_km)
+    return angular_position_from_observer(
+        observer_position, observer_hae_m, target_position, target_hae_m,
+        distance_km=distance_km)
 
 
 def correct_pressure_altitude(pressure_altitude_ft, qnh_hpa):
@@ -1848,21 +1881,24 @@ def apply_vertical_prediction_to_transit_result(
     before = vertical_transit_separation(
         transit_result[3], transit_result[9])
     updated = list(transit_result)
+    h2x_km = float(transit_result[4])
+    if h2x_km == 0:
+        h2x_km = 0.001
     if (prediction.mode == VerticalPredictionMode.DYNAMIC_VALID
             or geometric_altitude_selection_enabled):
-        h2x_km = float(transit_result[4])
-        if h2x_km == 0:
-            h2x_km = 0.001
-        updated[3] = degrees(atan(
-            (selected_altitude.altitude_m - observer_position.elevation_m)
-            / (h2x_km * 1000)))
+        selected_angular_position = aircraft_angular_position_from_observer(
+            observer_position.coordinates, observer_position.elevation_m,
+            (float(transit_result[0]), float(transit_result[1])),
+            selected_altitude.altitude_m, distance_km=h2x_km)
+        updated[3] = selected_angular_position.altitude_angle_deg
     after = vertical_transit_separation(updated[3], updated[9])
     altitude_before_clamp = float(transit_result[3])
     if prediction_2e.mode == VerticalPredictionMode.DYNAMIC_VALID:
-        h2x_km = float(transit_result[4]) or 0.001
-        altitude_before_clamp = degrees(atan(
-            (prediction_2e.predicted_altitude_m - observer_position.elevation_m)
-            / (h2x_km * 1000)))
+        altitude_before_clamp = aircraft_angular_position_from_observer(
+            observer_position.coordinates, observer_position.elevation_m,
+            (float(transit_result[0]), float(transit_result[1])),
+            prediction_2e.predicted_altitude_m,
+            distance_km=h2x_km).altitude_angle_deg
     intent_details["separation_before_clamp"] = vertical_transit_separation(
         altitude_before_clamp, transit_result[9])
     vertical_transit_diagnostics[(icao, celestial_body)] = (
@@ -2335,7 +2371,8 @@ def transit_pred(obs2moon, plane_pos, track, velocity, elevation, moon_alt,
     moon_az = float(moon_az)
     intersection = solve_great_circle_intersection(
         observer_coordinates, plane_pos, track, velocity, elevation, moon_az,
-        observer_position.elevation_m)
+        observer_position.elevation_m,
+        angular_position_resolver=aircraft_angular_position_from_observer)
     if intersection is None:
         return 0
     moon_alt_B = 90.00 - moon_alt
@@ -3756,13 +3793,13 @@ def process_line(line, port):
             if distance == 0:
                 distance = 0.01
             angular_position = (
-                angular_position_from_observer(
+                aircraft_angular_position_from_observer(
                     observer_coordinates, observer_position.elevation_m,
                     (plane_lat, plane_lon), elevation,
                     distance_km=distance)
                 if elevation is not None else None)
             if angular_position is None:
-                azimuth = angular_position_from_observer(
+                azimuth = aircraft_angular_position_from_observer(
                     observer_coordinates, observer_position.elevation_m,
                     (plane_lat, plane_lon), observer_position.elevation_m,
                     distance_km=distance).azimuth_deg
@@ -3842,7 +3879,7 @@ def process_line(line, port):
             observer_coordinates, (plane_lat, plane_lon)), 1)
         if distance == 0:
             distance = 0.01
-        angular_position = angular_position_from_observer(
+        angular_position = aircraft_angular_position_from_observer(
             observer_coordinates, observer_position.elevation_m,
             (plane_lat, plane_lon), elevation, distance_km=distance)
         azimuth = angular_position.azimuth_deg

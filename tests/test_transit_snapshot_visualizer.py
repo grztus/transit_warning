@@ -7,7 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from transit_prediction_model import angular_position_from_observer
+from transit_prediction_model import (
+    legacy_flat_angular_position_from_observer as angular_position_from_observer,
+)
 from tools import transit_snapshot_visualizer as visualizer
 
 

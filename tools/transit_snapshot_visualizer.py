@@ -23,7 +23,7 @@ from transit_prediction_model import (
     VerticalIntentState,
     VerticalMotionState,
     VerticalPredictionPolicy,
-    angular_position_from_observer,
+    legacy_flat_angular_position_from_observer as angular_position_from_observer,
     horizontal_position_from_t0,
     predict_vertical_state_at_time,
 )

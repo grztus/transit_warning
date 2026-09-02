@@ -14,7 +14,8 @@ Telegram, dashboard, or recording does not stop the core ADS-B/MLAT receiver.
 - ADS-B and MLAT SBS TCP sources
 - `ephem`, `pytz`, `requests`, `python-dotenv`, `tzdata`, and `matplotlib`
   from `requirements.txt`
-- optional GeographicLib EGM96 PGM geoid data for geometric-altitude selection
+- recommended GeographicLib EGM96 PGM geoid data for datum-consistent aircraft
+  line-of-sight geometry and geometric-altitude selection
 
 `tzdata` supplies IANA timezone rules on platforms such as Windows. Matplotlib
 is used by the offline snapshot visualizer.
@@ -55,10 +56,16 @@ age at most 5 seconds, and position-to-track/groundspeed timestamp deltas at mos
 3 seconds. Older or incoherent input is treated conservatively.
 
 The horizontal model propagates constant track and groundspeed on a spherical
-great-circle path. The moving-body solver iterates against the changing Sun or
-Moon. Vertical prediction uses vertical-rate history and the existing LEVEL,
-DYNAMIC, DEGRADED, and ignored/stale policies. Fresh TC29 selected altitude may
-clamp extrapolation; it is intent, not measured altitude.
+great-circle path. The solved finite-distance aircraft line of sight is then
+computed with WGS84 geodetic-to-ECEF and observer-local ENU geometry. MSL-like
+observer and aircraft heights are converted to WGS84 ellipsoidal height with
+the local EGM96 undulation before that calculation. If geoid data are missing,
+the application reports the condition and fails open with the explicit legacy
+flat LOS fallback rather than silently treating MSL height as HAE. The
+moving-body solver iterates against the changing Sun or Moon. Vertical
+prediction uses vertical-rate history and the existing LEVEL, DYNAMIC,
+DEGRADED, and ignored/stale policies. Fresh TC29 selected altitude may clamp
+extrapolation; it is intent, not measured altitude.
 
 Internal solutions extend to 15 degrees vertical separation and approximately
 900 seconds. A three-second prediction grace absorbs brief input jitter.
@@ -127,7 +134,9 @@ contributors by age, horizontal distance, and altitude difference. Missing
 geoid data, stale/ambiguous input, insufficient contributors, or low confidence
 falls safely to `BARO_QNH`. `FLEET_GEOMETRIC_ALTITUDE_ENABLED` enables additive
 fleet diagnostics; `FLEET_GEOID_PGM_PATH` may identify a GeographicLib EGM96
-PGM, otherwise supported standard locations are searched.
+PGM, otherwise supported standard locations are searched. The same geoid grid
+also supplies the observer and target datum conversion for WGS84 ECEF/ENU LOS;
+phone altitude remains diagnostic-only.
 
 ## Running and terminal presentation
 

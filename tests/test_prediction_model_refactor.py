@@ -107,15 +107,21 @@ class HorizontalExtractionEquivalenceTests(unittest.TestCase):
         if expected is None:
             self.assertIsNone(actual)
             return
-        self.assertEqual(expected, (
-            actual.latitude_deg,
-            actual.longitude_deg,
-            actual.azimuth_from_observer_deg,
-            actual.aircraft_altitude_angle_deg,
-            actual.observer_distance_km,
-            actual.aircraft_distance_km,
-            actual.time_seconds,
-        ))
+        # The intersection, distances and timing remain the frozen spherical
+        # solution. Only finite-distance observer LOS is intentionally ECEF/ENU.
+        self.assertEqual(expected[0], actual.latitude_deg)
+        self.assertEqual(expected[1], actual.longitude_deg)
+        self.assertEqual(expected[4], actual.observer_distance_km)
+        self.assertEqual(expected[5], actual.aircraft_distance_km)
+        self.assertEqual(expected[6], actual.time_seconds)
+        angular = transit.angular_position_from_observer(
+            observer, transit.my_elevation_const,
+            (actual.latitude_deg, actual.longitude_deg), elevation,
+            distance_km=actual.observer_distance_km)
+        self.assertEqual(angular.azimuth_deg,
+                         actual.azimuth_from_observer_deg)
+        self.assertEqual(angular.altitude_angle_deg,
+                         actual.aircraft_altitude_angle_deg)
 
     def test_normal_short_and_long_intersections_are_exact(self):
         observer = (51.1, 21.1)

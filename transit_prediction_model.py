@@ -7,6 +7,10 @@ from enum import Enum
 
 
 EARTH_RADIUS_KM = 6371.0
+WGS84_SEMI_MAJOR_AXIS_M = 6378137.0
+WGS84_FLATTENING = 1.0 / 298.257223563
+WGS84_ECCENTRICITY_SQUARED = (
+    WGS84_FLATTENING * (2.0 - WGS84_FLATTENING))
 VERTICAL_RATE_LEVEL_THRESHOLD_FPM = 300.0
 VERTICAL_RATE_VALID_AGE_SECONDS = 2.0
 VERTICAL_RATE_IGNORE_AGE_SECONDS = 5.0
@@ -138,10 +142,74 @@ def _haversine_km(origin, destination):
         math.sqrt(a), math.sqrt(1 - a))
 
 
+def _wgs84_ecef(position, ellipsoidal_height_m):
+    """Convert geodetic WGS84 latitude/longitude/HAE to ECEF metres."""
+    latitude, longitude = map(math.radians, position)
+    sin_latitude = math.sin(latitude)
+    prime_vertical_radius = WGS84_SEMI_MAJOR_AXIS_M / math.sqrt(
+        1.0 - WGS84_ECCENTRICITY_SQUARED * sin_latitude ** 2)
+    horizontal = prime_vertical_radius + float(ellipsoidal_height_m)
+    return (
+        horizontal * math.cos(latitude) * math.cos(longitude),
+        horizontal * math.cos(latitude) * math.sin(longitude),
+        (prime_vertical_radius * (1.0 - WGS84_ECCENTRICITY_SQUARED)
+         + float(ellipsoidal_height_m)) * sin_latitude,
+    )
+
+
 def angular_position_from_observer(
+        observer_position, observer_ellipsoidal_height_m, target_position,
+        target_ellipsoidal_height_m, distance_km=None):
+    """Return production-rounded WGS84 ECEF/ENU aircraft LOS geometry."""
+    result = precise_angular_position_from_observer(
+        observer_position, observer_ellipsoidal_height_m, target_position,
+        target_ellipsoidal_height_m, distance_km=distance_km)
+    return AngularPosition(
+        distance_km=result.distance_km,
+        azimuth_deg=round(result.azimuth_deg, 1) % 360.0,
+        altitude_angle_deg=result.altitude_angle_deg,
+    )
+
+
+def precise_angular_position_from_observer(
+        observer_position, observer_ellipsoidal_height_m, target_position,
+        target_ellipsoidal_height_m, distance_km=None):
+    """Return unrounded WGS84 ECEF/ENU LOS for diagnostic sampling."""
+    observer_lat, observer_lon = observer_position
+    if distance_km is None:
+        distance_km = round(_haversine_km(
+            observer_position, target_position), 1)
+    observer_ecef = _wgs84_ecef(
+        observer_position, observer_ellipsoidal_height_m)
+    target_ecef = _wgs84_ecef(target_position, target_ellipsoidal_height_m)
+    delta_x, delta_y, delta_z = (
+        target - observer
+        for target, observer in zip(target_ecef, observer_ecef))
+    latitude = math.radians(observer_lat)
+    longitude = math.radians(observer_lon)
+    east = -math.sin(longitude) * delta_x + math.cos(longitude) * delta_y
+    north = (
+        -math.sin(latitude) * math.cos(longitude) * delta_x
+        - math.sin(latitude) * math.sin(longitude) * delta_y
+        + math.cos(latitude) * delta_z)
+    up = (
+        math.cos(latitude) * math.cos(longitude) * delta_x
+        + math.cos(latitude) * math.sin(longitude) * delta_y
+        + math.sin(latitude) * delta_z)
+    azimuth = math.degrees(math.atan2(east, north))
+    altitude_angle = math.degrees(math.atan2(
+        up, math.hypot(east, north)))
+    return AngularPosition(
+        distance_km=distance_km,
+        azimuth_deg=(azimuth + 360) % 360.0,
+        altitude_angle_deg=altitude_angle,
+    )
+
+
+def legacy_flat_angular_position_from_observer(
         observer_position, observer_elevation_m, target_position,
         target_altitude_m, distance_km=None):
-    """Return the production observer geometry without changing rounding."""
+    """Explicit fail-open geometry used only when geoid data are unavailable."""
     observer_lat, observer_lon = observer_position
     target_lat, target_lon = target_position
     if distance_km is None:
@@ -167,7 +235,7 @@ def angular_position_from_observer(
 
 def solve_great_circle_intersection(
         observer_position, plane_position, track, velocity, elevation,
-        body_azimuth, observer_elevation_m):
+        body_azimuth, observer_elevation_m, angular_position_resolver=None):
     """Return the existing production spherical intersection unchanged."""
     lat1, lon1 = observer_position
     lat2, lon2 = plane_position
@@ -221,7 +289,8 @@ def solve_great_circle_intersection(
         int(elevation)
     except ValueError:
         return None
-    angular_position = angular_position_from_observer(
+    resolver = angular_position_resolver or angular_position_from_observer
+    angular_position = resolver(
         observer_position, observer_elevation_m, (lat3, lon3), elevation,
         distance_km=dst_h2x)
     dst_p2x = round(_haversine_km(plane_position, (lat3, lon3)), 1)
