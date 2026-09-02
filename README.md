@@ -1,321 +1,293 @@
 # Transit Warning
 
-Transit Warning receives SBS/BaseStation aircraft data from ADS-B and MLAT TCP
-sources and predicts possible transits across the Sun and Moon for a configured
-observer location.
+Transit Warning consumes live aircraft surveillance data and predicts possible
+aircraft crossings of the Sun and Moon for an observer. It provides a terminal
+display, optional mobile dashboard, Telegram attention alerts, lossless session
+recording, deterministic SBS replay, and diagnostic transit snapshots.
 
-## Requirements
+Optional inputs and outputs are fail-open: loss of RAW ADS-B, MLAT Beast, METAR,
+Telegram, dashboard, or recording does not stop the core ADS-B/MLAT receiver.
+
+## Requirements and installation
 
 - Python 3.10 or newer
-- Access to ADS-B and MLAT TCP sources
-- Tkinter/Tk support in the Python installation
-- The packages listed in `requirements.txt`: `ephem`, `pytz`, `requests`,
-  `python-dotenv`, and `tzdata`
+- ADS-B and MLAT SBS TCP sources
+- `ephem`, `pytz`, `requests`, `python-dotenv`, `tzdata`, and `matplotlib`
+  from `requirements.txt`
+- optional GeographicLib EGM96 PGM geoid data for geometric-altitude selection
 
-`tzdata` provides IANA timezone data on systems such as Windows where it may not
-be available from the operating system. On Linux, Tkinter may need to be
-installed separately, for example with the `python3-tk` system package on
-Debian-based distributions.
-
-## Installation
-
-Clone the repository, enter its directory, and install the dependencies:
+`tzdata` supplies IANA timezone rules on platforms such as Windows. Matplotlib
+is used by the offline snapshot visualizer.
 
 ```console
 git clone <repository-url>
 cd transit_warning
 python -m pip install -r requirements.txt
-```
-
-Create a private `.env` file from the public template.
-
-Windows PowerShell:
-
-```powershell
-Copy-Item .env.example .env
-```
-
-Linux/macOS:
-
-```console
 cp .env.example .env
 ```
 
-Configure these fields:
+On PowerShell use `Copy-Item .env.example .env`. Keep `.env` private; it is
+ignored by Git.
 
-- `OBSERVER_LAT` — observer latitude in decimal degrees
-- `OBSERVER_LON` — observer longitude in decimal degrees
-- `OBSERVER_ELEVATION_M` — observer/antenna elevation in metres above sea level
-- `OBSERVER_MODE` — requested solver observer (`STATIC` or `MOBILE`; default `STATIC`)
-- `MOBILE_GPS_STALE_WARNING_SECONDS` / `MOBILE_GPS_CRITICAL_WARNING_SECONDS` — dashboard age warning thresholds (defaults 30/300 seconds)
-- `MOBILE_GPS_STATIC_FALLBACK_ENABLED` — opt-in fallback to static coordinates after the mobile fix exceeds the existing GPS freshness limit
-- `TRANSITION_ALTITUDE_FT` — local transition altitude as a positive integer in feet
-- `ADSB_HOST` — ADS-B source IP address or hostname
-- `ADSB_PORT` — ADS-B TCP port; normally `30003`
-- `ADSB_TIMESTAMP_TIMEZONE` — IANA timezone of the SBS/dump1090-fa source,
-  for example `Europe/Warsaw`
-- `RAW_ADSB_HOST` — optional RAW Mode-S/ADS-B source hostname; normally the
-  same receiver as `ADSB_HOST`
-- `RAW_ADSB_PORT` — optional RAW source port; normally `30002`
-- `GEOMETRIC_ALTITUDE_SELECTION_ENABLED` — opts production geometry into the
-  geometric-altitude hierarchy described below (default `false`)
-- `FLEET_GEOMETRIC_ALTITUDE_ENABLED` — enables additive fleet
-  geometric-altitude snapshot diagnostics (default `false`)
-- `FLEET_GEOID_PGM_PATH` — optional local GeographicLib EGM96 PGM path;
-  leave empty to use standard platform locations
-- `BEAST_HOST` — Beast/Mode-S source IP address or hostname (default `192.168.56.1`)
-- `BEAST_PORT` — Beast TCP port used for TC29 intent; normally `30005`
-- `MLAT_HOST` — MLAT source IP address or hostname
-- `MLAT_PORT` — MLAT TCP port; normally `30106`
-- `METAR_STATION` — four-letter ICAO station used to retrieve METAR data from
-  Aviation Weather Center, for example `EPRA`
+## Architecture and data sources
 
-Optional FlightAware MLAT Beast precision-track settings are
-`MLAT_BEAST_ENABLED` (disabled by default), `MLAT_BEAST_HOST` (defaults to
-`MLAT_HOST`), and `MLAT_BEAST_PORT` (normally `30105`).
+Motion parameters are timestamped independently, so a new message does not make
+unrelated position, altitude, track, or groundspeed values appear fresh. One
+immutable observer context is captured for every complete prediction operation.
 
-Optional outgoing Telegram alerts use `TELEGRAM_NOTIFICATIONS_ENABLED`
-(disabled by default), `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and
-`TELEGRAM_ALERT_SEPARATION_DEG` (default `2.0`) with
-`TELEGRAM_ALERT_HORIZON_SECONDS` (default `300`). Credentials belong only in
-the private `.env` file.
+| Input | Typical port | Role |
+|---|---:|---|
+| ADS-B SBS/BaseStation | 30003 | ADS-B position, barometric altitude, coarse track, groundspeed, vertical rate, callsign |
+| MLAT SBS-compatible | 30106 | MLAT position and coarse motion parameters |
+| RAW Mode-S/ADS-B text | 30002 | Fractional TC19 track, TC19 GNSS-minus-baro, TC31 version/datum |
+| FlightAware synthetic MLAT Beast | 30105 | Optional fractional MLAT TC19 track confirmed against 30106 |
+| Beast/Mode-S intent | 30005 | TC29 selected altitude and navigation QNH intent |
+| Aviation Weather Center METAR | HTTPS | Accepted QNH and observation time |
 
-`ADSB_TIMESTAMP_TIMEZONE` describes the timezone used by the host producing the
-naive SBS timestamps. It is not the timezone of the computer running Transit
-Warning. Conversion uses the date of each record and the applicable IANA
-daylight-saving rules.
+`ADSB_TIMESTAMP_TIMEZONE` is the IANA timezone used by the host generating naive
+30003 timestamps, not the Transit Warning computer timezone. Conversion uses
+the record date and historical DST rules. Current 30106 timestamps remain UTC.
 
-The RAW source is optional and fail-open. Fresh DF17 TC19 ground-velocity
-messages provide a fractional track for the matching aircraft only. After a
-RAW update becomes stale, its fractional track may be held while fresh SBS or
-MLAT updates continue to report exactly the same coarse track; any coarse-track
-change invalidates the hold until another RAW update arrives. The terminal
-shows one decimal place while fresh or coarse-confirmed RAW precision is
-active; prediction retains the full decoded precision.
+### Motion freshness and prediction
 
-The optional fleet geometric-altitude estimator compares qualified ADS-B v2
-TC19 GNSS/barometric differences from other aircraft with the current QNH
-altitude basis. It excludes the target aircraft and uses continuous altitude,
-distance, and age weights without fixed geographic sectors.
+Fully fresh motion currently requires position age at most 3 seconds, parameter
+age at most 5 seconds, and position-to-track/groundspeed timestamp deltas at most
+3 seconds. Older or incoherent input is treated conservatively.
 
-When `GEOMETRIC_ALTITUDE_SELECTION_ENABLED=true`, aircraft line-of-sight
-geometry uses this hierarchy:
+The horizontal model propagates constant track and groundspeed on a spherical
+great-circle path. The moving-body solver iterates against the changing Sun or
+Moon. Vertical prediction uses vertical-rate history and the existing LEVEL,
+DYNAMIC, DEGRADED, and ignored/stale policies. Fresh TC29 selected altitude may
+clamp extrapolation; it is intent, not measured altitude.
 
-1. `OWN_GNSS_GEOMETRIC` — fresh, aligned TC19 GNSS-minus-pressure-altitude
-   with TC31 identifying WGS84 HAE, converted through the local geoid grid.
-2. `FLEET_GEOMETRIC` — an estimate from other aircraft, accepted only with
-   `HIGH` or `MEDIUM` confidence.
-3. `BARO_QNH` — the existing safe fallback.
+Internal solutions extend to 15 degrees vertical separation and approximately
+900 seconds. A three-second prediction grace absorbs brief input jitter.
+Production `SEP` is the absolute vertical angular difference at the predicted
+horizontal crossing; the offline visualizer also computes sampled full 2-D
+sky-plane separation.
 
-The QNH, vertical-rate, and TC29 intent model remains authoritative for
-vertical motion. TC19 is applied to predicted pressure altitude, never added
-to an already QNH-corrected altitude. WGS84 ellipsoidal height is not used
-without geoid conversion. If the local EGM96 grid is unavailable, production
-falls back to `BARO_QNH`. An atmospheric-model source is deferred.
+Sun/Moon prediction uses topocentric geometric (airless) PyEphem coordinates
+with observer pressure explicitly zero. This preserves lunar parallax and keeps
+celestial direction consistent with geometric aircraft line of sight.
+Atmospheric refraction is not part of deterministic production geometry.
 
-System environment variables override `.env`. The private `.env` file and the
-`recordings/` directory are ignored by Git.
+## Precision track selection
 
-## Running
+Effective track priority is:
 
-Start normal RealClock operation with:
+1. eligible RAW ADS-B TC19 precision;
+2. for an MLAT-positioned aircraft, eligible confirmed MLAT Beast TC19 precision;
+3. timestamped SBS/MLAT coarse track;
+4. legacy fallback only when no timestamped track exists.
+
+Precision is fresh for 5 seconds. It can be held for at most 20 seconds while a
+fresh coarse track remains compatible. Circular difference up to 1.5 degrees is
+compatible; at least 3 degrees rejects immediately; intermediate disagreement
+invalidates after two distinct coarse updates.
+
+### RAW ADS-B 30002
+
+The RAW reader decodes fractional TC19 ground track for the matching ICAO.
+Schema-v3 snapshots retain effective/coarse provenance, timestamps, fresh/held
+state, and rejection diagnostics. Recording stores exact RAW lines plus a JSONL
+TC19/TC31 diagnostic journal.
+
+`--raw-diagnostics-replay` deterministically restores recorded TC19
+GNSS-minus-baro and TC31 version/datum events. It does **not** replay RAW
+fractional track from the raw stream.
+
+### MLAT Beast 30105
+
+Port 30105 supplies synthetic Beast precision; port 30106 remains the MLAT
+position/coarse-motion source. A 30105 track is eligible only for an
+MLAT-positioned aircraft after timing/truncation compatibility with fresh 30106.
+RAW ADS-B precision retains priority.
+
+Recording stores exact 30105 binary bytes and a receipt-time JSONL journal,
+declared in the manifest and verified in `streams.zip`. MLAT Beast deterministic
+replay is not implemented.
+
+## Geometric altitude selection
+
+SBS altitude is treated as pressure/barometric altitude, QNH-corrected in feet,
+then converted to metres. Vertical-rate prediction and TC29 intent remain in
+their barometric domain.
+
+When `GEOMETRIC_ALTITUDE_SELECTION_ENABLED=true`, line-of-sight geometry uses:
+
+1. `OWN_GNSS_GEOMETRIC`: fresh aligned TC19 plus TC31-qualified WGS84 HAE,
+   converted with EGM96;
+2. `FLEET_GEOMETRIC`: estimate from other qualified aircraft, accepted only at
+   `HIGH` or `MEDIUM` confidence;
+3. `BARO_QNH`: safe fallback.
+
+TC19 difference is applied to predicted pressure altitude, never to an already
+QNH-corrected altitude. The fleet estimator excludes the target and weights
+contributors by age, horizontal distance, and altitude difference. Missing
+geoid data, stale/ambiguous input, insufficient contributors, or low confidence
+falls safely to `BARO_QNH`. `FLEET_GEOMETRIC_ALTITUDE_ENABLED` enables additive
+fleet diagnostics; `FLEET_GEOID_PGM_PATH` may identify a GeographicLib EGM96
+PGM, otherwise supported standard locations are searched.
+
+## Running and terminal presentation
 
 ```console
 python transit_warning.py
 ```
 
-### Telegram notifications
+The terminal prioritizes visible Sun/Moon candidates. Its independent defaults
+are green below 3 degrees, yellow below 5, red below 7, and hidden from candidate
+presentation at 7 or above. Solver, Telegram, gong, and snapshot thresholds are
+separate. Ctrl+C performs controlled reader/recorder shutdown.
 
-Create a bot with Telegram's `@BotFather`, place its token in
-`TELEGRAM_BOT_TOKEN`, and send a message to the new bot. Obtain the target chat
-ID from the Bot API `getUpdates` response, then set:
+## Telegram notifications
+
+Telegram is an optional attention channel, not the live UI.
 
 ```dotenv
 TELEGRAM_NOTIFICATIONS_ENABLED=true
-TELEGRAM_BOT_TOKEN=123456:replace-with-your-token
-TELEGRAM_CHAT_ID=replace-with-your-chat-id
+TELEGRAM_BOT_TOKEN=<private-bot-token>
+TELEGRAM_CHAT_ID=<private-chat-id>
 TELEGRAM_ALERT_SEPARATION_DEG=2.0
 TELEGRAM_ALERT_HORIZON_SECONDS=300
 TELEGRAM_ALERT_STABILITY_SECONDS=5
 ```
 
-Test the outgoing connection without starting aircraft receivers or the normal
-prediction loop:
+An accepted event must have `0 < time2X <= horizon` and remain below the
+separation threshold for the stability interval. One notification is queued per
+active ICAO/body event; countdown/improvement updates are not sent. Leaving
+eligibility resets pending stabilization. Deduplication lasts through predicted
+transit plus 60 seconds. Network delivery runs in a bounded background queue and
+fails open.
 
 ```console
 python transit_warning.py --test-notification
 ```
 
-Telegram is an early attention/wake-up channel, not the live user interface.
-It sends one potential-transit alert per active aircraft and Sun/Moon event
-when the accepted prediction is within the configured five-minute horizon
-(300 seconds by default) and its separation remains continuously below the
-configured threshold
-(2.0° by default) for the stability interval (five seconds by default). A brief
-prediction that leaves the eligible range resets the timer. Set the stability
-interval to `0` to retain immediate-send behavior. Subsequent countdown and
-improving-separation updates are intentionally not sent. Alerts are predictions,
-not guarantees of a photographic transit.
+Credentials belong only in `.env`; observer coordinates are not sent.
 
-Checkpoint 1 supports outgoing alerts only; incoming commands, webhooks, and
-observer location/GPS updates are intentionally not implemented.
+## Live dashboard
 
-#### Future dashboard graphics (design note only)
+The optional dashboard reuses production predictions and does not run another
+solver. It includes chronological LIVE Sun/Moon queues, responsive candidate
+cards, local absolute-UTC countdowns, HISTORY with filters/bounded pagination,
+CSV export, optional daily JSONL persistence, and ACTIVE/STALE/DISCONNECTED
+health based on polling and the advancing main-loop heartbeat—not candidate
+presence.
 
-A later checkpoint may add a compact graphic that reuses the offline visualizer
-concepts: the Sun/Moon disk, predicted aircraft trajectory, direction of motion,
-and near-miss or crossing geometry. The dashboard does not implement trajectory
-graphics, a mobile observer, incoming commands, or location-based prediction.
+Dashboard presentation also defaults independently to 3/5/7 degrees. Passed,
+near-event-withdrawn, and Telegram-triggered events are history-worthy; early
+insignificant transients are discarded. Persistent-history failure is fail-open,
+and `/api/state` never scans history files.
 
-### Live dashboard
+The server defaults to disabled and localhost. Remote access should use a
+trusted private transport such as Tailscale Serve/tailnet HTTPS. Do not use
+public Funnel exposure without an appropriate security model. The dashboard
+itself has no authentication.
 
-The optional read-only mobile dashboard shows independent chronological queues
-of future Sun and Moon candidates plus a bounded in-memory recent-event history.
-It uses already-computed production predictions and does not run another solver.
-It is disabled and bound to localhost by default:
+## Observer modes and mobile GPS
 
-```dotenv
-DASHBOARD_ENABLED=false
-DASHBOARD_HOST=127.0.0.1
-DASHBOARD_PORT=8765
-DASHBOARD_HISTORY_ENABLED=true
-DASHBOARD_HISTORY_DIR=recordings/dashboard_history
-DASHBOARD_MOBILE_GPS_ENABLED=false
-DASHBOARD_MOBILE_GPS_FRESH_SECONDS=15
-TMUX_SEP_GREEN_MAX_DEG=3
-TMUX_SEP_YELLOW_MAX_DEG=5
-TMUX_SEP_VISIBLE_MAX_DEG=7
-DASHBOARD_SEP_GREEN_MAX_DEG=3
-DASHBOARD_SEP_YELLOW_MAX_DEG=5
-DASHBOARD_SEP_VISIBLE_MAX_DEG=7
-```
+`ObserverPosition` is immutable, and aircraft geometry, ephemeris, moving-body
+solver, and snapshot construction share one resolved context per operation.
 
-Terminal and dashboard separation presentation is configured independently.
-With the defaults, separation below 3 degrees is green, 3 to below 5 degrees
-is yellow, 5 to below 7 degrees is red, and values at or above 7 degrees are
-not presented as transit candidates in that presentation layer. These settings
-do not change the independent Telegram, audible gong, or snapshot thresholds.
+### STATIC
 
-For a local test, set `DASHBOARD_ENABLED=true`, start Transit Warning, and open
-`http://127.0.0.1:8765/` on the same computer. The read-only JSON state is at
-`http://127.0.0.1:8765/api/state`. To test from a phone on the same
-trusted LAN, explicitly set `DASHBOARD_HOST` to the Debian host's LAN address,
-restart Transit Warning, and open `http://<debian-lan-ip>:8765/` on the phone.
-No real LAN address is stored in the repository. Return to localhost-only mode
-by restoring `DASHBOARD_HOST=127.0.0.1`, or disable the server completely with
-`DASHBOARD_ENABLED=false`.
-
-The dashboard uses plain HTML/CSS/JavaScript with no CDN. The browser polls
-state every three seconds and calculates visible countdowns locally from the
-absolute predicted UTC timestamps. A compact ACTIVE/STALE/DISCONNECTED indicator
-uses the main-loop heartbeat and polling results, independently of whether any
-candidates are present. Events which pass normally, reach the near-event window,
-or trigger a Telegram notification are retained in recent history; an early
-insignificant transient is discarded. Retained history is appended to daily UTC
-JSONL files under `DASHBOARD_HISTORY_DIR`; the 100-record in-memory list remains
-only a recent hot cache. History can be filtered by UTC date, callsign, and body,
-loaded in bounded pages, and exported as CSV. Checkpoint 2 intentionally has no
-authentication, so LAN binding should only be used on a trusted private network.
-
-The optional Phase 1 mobile GPS diagnostic is enabled with
-`DASHBOARD_MOBILE_GPS_ENABLED=true`. The user must press **Start GPS** after each
-page load; the browser then uses high-accuracy geolocation monitoring and sends
-updates to the same dashboard origin. Browser geolocation requires a secure
-context, such as the existing private Tailscale Serve HTTPS deployment (or
-localhost for development). `DASHBOARD_MOBILE_GPS_FRESH_SECONDS` controls the
-server-receipt freshness window and defaults to 15 seconds. The dashboard shows
-only accuracy, altitude availability, altitude accuracy, age, and status. It
-never returns or displays the coordinates.
-
-With `OBSERVER_MODE=MOBILE`, a phone fix is used by the prediction solver while
-the configured static elevation remains authoritative; phone altitude remains
-diagnostic-only. Without a fix, predictions are withheld unless explicit static
-fallback is enabled. A stale fix remains the selected observer indefinitely when
-fallback is disabled. The dashboard never displays or persists mobile coordinates.
-
-In the default `OBSERVER_MODE=STATIC`, mobile GPS remains diagnostic-only and is
-not used by the prediction solver. The
-latest position exists only in dashboard process memory: it is not added to
-history, CSV exports, snapshots, Telegram, recordings, logs, or replay.
-
-The application validates the installation configuration before creating the
-observer or starting the TCP threads. In RealClock mode it always records the
-accepted QNH history in daily UTC files:
+STATIC uses `OBSERVER_LAT`, `OBSERVER_LON`, and `OBSERVER_ELEVATION_M`:
 
 ```text
-recordings/
-└── environment/
-    └── environment_YYYYMMDD.jsonl
+STATIC → STATIC
 ```
 
-The daily environment recorder stores QNH changes and carries the latest known
-state into a new UTC day. It operates independently of aircraft stream
-recording.
+### MOBILE
 
-### Recording a RAW ADS-B/SBS/MLAT session
+The browser starts high-accuracy `watchPosition()` only after explicit user
+action. Phone latitude/longitude can drive prediction, but configured static
+elevation remains authoritative; phone altitude is diagnostic-only.
 
-Start session recording with:
+The compact status shows requested mode on the left and effective source on the
+right:
+
+```text
+MOBILE → MOBILE              GPS: ACTIVE  AGE: 2 s
+MOBILE → MOBILE LAST KNOWN   GPS: STALE   AGE: 47 s
+MOBILE → STATIC FALLBACK     GPS: STALE   AGE: 48 s
+MOBILE → NO POSITION         GPS: NO_FIX
+```
+
+- A fix is fresh through `DASHBOARD_MOBILE_GPS_FRESH_SECONDS` (default 15).
+- With fallback disabled, stale mobile position remains active indefinitely.
+- With fallback enabled, stale/no-fix state uses STATIC and automatically
+  returns to MOBILE when fresh GPS resumes.
+- No fix plus no fallback withholds new predictions.
+- Age above 30 seconds is orange and above 300 seconds red by default;
+  fallback/no-position is red; manual STATIC is normal green.
+- Source/mode transitions invalidate observer-dependent live predictions,
+  dashboard candidates, pending Telegram stabilization, and active snapshot
+  candidates. Aircraft ingestion continues.
+- Replay is forced to STATIC observer semantics.
+
+Selecting STATIC does not stop a running GPS watch. Browser permission is
+required again after page reload, and mobile OS/browser backgrounding may pause
+updates.
+
+Dashboard mode/fallback controls are runtime-only. After restart, mobile
+coordinates are gone, mode returns to configured `OBSERVER_MODE`, fallback to
+its configured default, and no previous fix is restored.
+
+### Mobile privacy
+
+Mobile coordinates exist only in dedicated locked memory. They are not returned
+by normal dashboard state or observer diagnostics, displayed, written to
+history/CSV, sent to Telegram, recorded in stream/log files, or included in
+mobile snapshots. Mobile snapshots contain only privacy-safe source, freshness,
+accuracy, fallback, epoch, and configured-elevation metadata.
+
+## Recording sessions
 
 ```console
 python transit_warning.py --record
 ```
 
-One run creates one session directory with independent RAW ADS-B, SBS ADS-B,
-and MLAT streams:
+Optional session members are manifest-driven:
 
 ```text
-recordings/
-├── environment/
-│   └── environment_YYYYMMDD.jsonl
-└── sessions/
-    └── YYYYMMDD_HHMMSS/
-        ├── manifest.json
-        └── streams.zip
+recordings/sessions/YYYYMMDD_HHMMSS/
+├── manifest.json
+├── streams.zip
+├── adsb_<port>.log
+├── mlat_<port>.log
+├── raw_<port>.log
+├── raw_<port>_events.jsonl
+├── mlat_beast_<port>.bin
+└── mlat_beast_<port>_events.jsonl
 ```
 
-Pressing Ctrl+C performs a controlled shutdown: it stops the TCP readers,
-closes all stream writers, records final line counts and session status in the
-manifest, and then archives the session. For a `complete` session, the raw
-`raw_<port>.log`, `adsb_<port>.log`, and `mlat_<port>.log` files are removed
-only after
-`streams.zip` has been created and verified. For a `partial` or `failed`
-session, raw logs are retained for diagnosis; a ZIP may also be present if
-archiving succeeded.
+The production readers pass the exact same SBS/RAW line or Beast bytes to the
+recorder and decoder; no duplicate source connection is opened. Writers fail
+independently. Controlled shutdown closes writers, writes final manifest counts,
+builds a temporary ZIP, verifies members/counts/CRC, then atomically renames it.
+Complete sessions remove loose streams only after verification; partial/failed
+sessions preserve them.
 
-`streams.zip` contains the RAW ADS-B, SBS ADS-B, and MLAT logs. The RAW stream
-is captured for diagnostics but is not yet consumed by replay. Daily
-environment/QNH files remain under `recordings/environment/` and are never
-included in the session archive.
+**`streams.zip` is the authoritative completed artifact.** Loose files can be
+incomplete or prefix-only after interruption. For replay/forensics: validate and
+prefer ZIP members; use loose files only if ZIP is absent/corrupt/incomplete;
+report that fallback explicitly; never silently combine archive and loose data.
 
-The verified ZIP members use the configured ports:
-
-```text
-raw_<RAW_ADSB_PORT>.log
-adsb_<ADSB_PORT>.log
-mlat_<MLAT_PORT>.log
-```
-
-RealClock also supports writing an additional explicit environment sidecar:
-
-```console
-python transit_warning.py --environment-record path/to/environment.jsonl
-```
+Accepted QNH is always recorded separately in daily UTC files under
+`recordings/environment/`; midnight rotation carries state forward. Environment
+files are not session ZIP members.
 
 ## Replay
 
-Start Transit Warning with its replay clock:
-
 ```console
-python transit_warning.py --clock replay
+python transit_warning.py --clock replay \
+  --environment-replay path/to/environment.jsonl
 ```
 
-To apply an explicitly selected historical environment file during replay:
-
-```console
-python transit_warning.py --clock replay --environment-replay path/to/environment.jsonl
-```
-
-In another terminal, start one of the implemented replay scenarios:
+`replay_server.py` supports ADS-B, MLAT, and dual SBS scenarios at `1`, `10`,
+`100`, or `max` speed. Environment is optional; without historical data the
+1013 fallback remains. Existing log formats and ReplayClock stay unchanged.
 
 ```console
 python replay_server.py adsb-2026 --speed 100
@@ -323,31 +295,114 @@ python replay_server.py mlat-2024 --speed 100
 python replay_server.py dual-2026 --speed 100
 ```
 
-Supported speeds are `1`, `10`, `100`, and `max`. `--host` changes the listen
-address, while `--file` can override the input file for a single-stream
-scenario. Replay scenarios require their corresponding local files under
-`tests/data/`; these files are ignored by Git and may not exist after a fresh
-clone.
+`--raw-diagnostics-replay` restores RAW altitude/version diagnostic events, not
+precision track. Automatic manifest/ZIP session replay and MLAT Beast replay are
+not implemented.
 
-## Offline transit snapshot visualizer
+## Snapshots and diagnostics
 
-Render a schema-v3 transit snapshot with the smooth, high-precision diagnostic
-trajectory:
+Schema-v3 snapshots capture trigger/update/final history, frozen solver input,
+intersection geometry, angular body size, vertical/intent state, effective track
+and precision provenance, GNSS/fleet altitude diagnostics, and privacy-safe
+observer source metadata. Mobile coordinates are omitted. Older schemas remain
+accepted where supported by the offline visualizer.
 
-```console
-python tools/transit_snapshot_visualizer.py snapshot.json --zoom 3 --output transit.png
-```
-
-The visualizer preserves the stored production prediction and vertical SEP,
-but uses unrounded observer-relative geometry for its default plotted path and
-full two-dimensional closest-approach result. To compare it with the exact
-legacy production-quantized geometry, add:
+SIGUSR1 can request a full terminal-table text snapshot without the normal
+screen-height/range limit. Render transit JSON offline with:
 
 ```console
---show-production-path
+python tools/transit_snapshot_visualizer.py snapshot.json \
+  --zoom 3 --show-production-path --output transit.png
 ```
 
-`--edge-tolerance-radii` controls the diagnostic limb band and defaults to
-`0.05`: below `0.95 R` is `HIT`, `0.95-1.05 R` is `EDGE`, and above `1.05 R`
-is `MISS`. This classification is offline diagnostics only and does not change
-live alerts or production prediction behavior.
+The default plot uses unrounded diagnostic observer geometry while preserving
+stored production values. Offline HIT/EDGE/MISS does not affect live behavior.
+
+## Configuration reference
+
+Required/static:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OBSERVER_LAT`, `OBSERVER_LON`, `OBSERVER_ELEVATION_M` | required | Static observer coordinates/elevation |
+| `TRANSITION_ALTITUDE_FT` | required | Positive reserved operational value |
+| `ADSB_TIMESTAMP_TIMEZONE` | required | IANA timezone of naive 30003 timestamps |
+| `METAR_STATION` | required | Four-letter AWC station |
+
+Inputs and altitude:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ADSB_HOST`, `ADSB_PORT` | `127.0.0.1`, `30003` | ADS-B SBS |
+| `MLAT_HOST`, `MLAT_PORT` | `127.0.0.1`, `30106` | MLAT SBS-compatible |
+| `RAW_ADSB_HOST`, `RAW_ADSB_PORT` | `127.0.0.1`, `30002` | RAW precision/diagnostics |
+| `BEAST_HOST`, `BEAST_PORT` | installation-specific, `30005` | TC29 intent |
+| `MLAT_BEAST_ENABLED` | `false` | Enable MLAT precision input/recording |
+| `MLAT_BEAST_HOST`, `MLAT_BEAST_PORT` | `MLAT_HOST`, `30105` | MLAT Beast endpoint |
+| `GEOMETRIC_ALTITUDE_SELECTION_ENABLED` | `false` | Enable OWN → FLEET → BARO selection |
+| `FLEET_GEOMETRIC_ALTITUDE_ENABLED` | `false` | Enable fleet diagnostics |
+| `FLEET_GEOID_PGM_PATH` | empty | Optional EGM96 PGM path |
+
+Telegram/presentation:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `TELEGRAM_NOTIFICATIONS_ENABLED` | `false` | Outgoing alerts |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | empty/private | Credentials |
+| `TELEGRAM_ALERT_SEPARATION_DEG` | `2.0` | Alert threshold |
+| `TELEGRAM_ALERT_HORIZON_SECONDS` | `300` | Alert horizon |
+| `TELEGRAM_ALERT_STABILITY_SECONDS` | `5` | Stable eligibility |
+| `TMUX_SEP_GREEN_MAX_DEG`, `TMUX_SEP_YELLOW_MAX_DEG`, `TMUX_SEP_VISIBLE_MAX_DEG` | `3`, `5`, `7` | Terminal colors/visibility |
+
+Dashboard/observer:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DASHBOARD_ENABLED` | `false` | Start dashboard |
+| `DASHBOARD_HOST`, `DASHBOARD_PORT` | `127.0.0.1`, `8765` | Bind endpoint |
+| `DASHBOARD_HISTORY_ENABLED` | `true` | Persistent history |
+| `DASHBOARD_HISTORY_DIR` | `recordings/dashboard_history` | History path |
+| `DASHBOARD_MOBILE_GPS_ENABLED` | `false` | Accept browser fixes |
+| `DASHBOARD_MOBILE_GPS_FRESH_SECONDS` | `15` | Fresh/fallback boundary |
+| `OBSERVER_MODE` | `STATIC` | Startup mode |
+| `MOBILE_GPS_STATIC_FALLBACK_ENABLED` | `false` | Static fallback |
+| `MOBILE_GPS_STALE_WARNING_SECONDS` | `30` | Orange age warning |
+| `MOBILE_GPS_CRITICAL_WARNING_SECONDS` | `300` | Red age warning |
+| `DASHBOARD_SEP_GREEN_MAX_DEG`, `DASHBOARD_SEP_YELLOW_MAX_DEG`, `DASHBOARD_SEP_VISIBLE_MAX_DEG` | `3`, `5`, `7` | Dashboard colors/visibility |
+
+System environment overrides `.env`. MOBILE startup requires dashboard and GPS
+enabled. Critical age must exceed warning age; presentation thresholds require
+green < yellow < visible.
+
+## Production operation, security, and privacy
+
+- Never commit `.env`, credentials, receiver endpoints, or observer location.
+- Keep dashboard localhost-bound unless protected by a trusted private overlay.
+- Allow graceful shutdown enough time to finalize large ZIPs; forced termination
+  can leave preserved loose files and an incomplete `.tmp`.
+- Optional output failures remain fail-open.
+- This repository currently contains no service-unit/helper scripts defining an
+  exact systemd/tmux deployment; local units must implement graceful shutdown.
+
+## Known limitations and roadmap
+
+Implemented: STATIC observer, browser MOBILE lat/lon, last-known mobile position,
+optional static fallback, compact status panel, RAW/MLAT Beast precision,
+geometric-altitude selection, terminal/dashboard/Telegram, recording/replay, and
+schema-v3 diagnostics.
+
+Planned—not implemented:
+
+- **Phase 3 — MANUAL observer:** manually supplied latitude, longitude, and
+  elevation AMSL.
+- **Phase 3.5 — elevation source:** investigate phone altitude datum/accuracy and
+  possible GNSS/geoid conversion. Phone altitude is not production-ready.
+- **Phase 4 — Transit Navigator:** geometric distance/bearing to predicted
+  centerline and optional vertical-equivalent displacement, for example
+  `CENTERLINE 420 m @ 263°   ΔELEV +31 m`.
+- RAW fractional-track, MLAT Beast, and automatic manifest/ZIP replay.
+- optional apparent/photo atmospheric-refraction layer.
+
+Transit Navigator would be purely geometric unless terrain support is added. It
+must not imply knowledge of terrain, roads, accessibility, buildings, obstacles,
+or line of sight.
