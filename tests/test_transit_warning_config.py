@@ -59,6 +59,21 @@ class ApplicationConfigurationTests(unittest.TestCase):
         self.assertEqual(transit.gatech.elevation, TEST_CONFIG.observer_elevation_m)
         self.assertEqual(transit.gatech.pressure, 0.0)
 
+    def test_true_2d_geometry_enables_internal_lifecycle_not_consumers(self):
+        config = InstallationConfig(**{
+            **TEST_CONFIG.__dict__,
+            "authoritative_prediction_geometry": "TRUE_2D",
+            "shadow_2d_enabled": False,
+        })
+        transit.apply_installation_config(config)
+        self.assertTrue(transit.authoritative_transit_lifecycle.enabled)
+        self.assertTrue(transit.shadow_2d_config.enabled)
+        self.assertIsNone(transit.shadow_2d_diagnostics)
+
+        transit.apply_installation_config(TEST_CONFIG)
+        self.assertFalse(transit.authoritative_transit_lifecycle.enabled)
+        self.assertFalse(transit.shadow_2d_config.enabled)
+
     def test_metar_request_uses_configured_station(self):
         transit.apply_installation_config(TEST_CONFIG)
         transit.metar_t = None

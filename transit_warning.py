@@ -125,6 +125,7 @@ from telegram_notifications import (
     TransitNotification,
     create_telegram_notifier,
 )
+from authoritative_transit import AuthoritativeTransitLifecycle
 from live_dashboard import (
     DashboardCandidate,
     DisabledDashboard,
@@ -619,6 +620,7 @@ geometric_altitude_selection_enabled = False
 geometric_altitude_selector = GeometricAltitudeSelector()
 shadow_2d_config = Shadow2DConfig()
 shadow_2d_diagnostics = None
+authoritative_transit_lifecycle = AuthoritativeTransitLifecycle()
 
 
 def apply_installation_config(configuration: InstallationConfig):
@@ -639,6 +641,7 @@ def apply_installation_config(configuration: InstallationConfig):
     global aircraft_los_geoid_provider, aircraft_los_geometry_mode
     global geometric_altitude_selection_enabled
     global shadow_2d_config, shadow_2d_diagnostics
+    global authoritative_transit_lifecycle
     observer_position_provider = RuntimeObserverPositionProvider(
         ObserverPosition(
             latitude_deg=configuration.observer_lat,
@@ -690,8 +693,11 @@ def apply_installation_config(configuration: InstallationConfig):
         configuration.fleet_geometric_altitude_enabled)
     geometric_altitude_selection_enabled = (
         configuration.geometric_altitude_selection_enabled)
+    authoritative_geometry = getattr(
+        configuration, "authoritative_prediction_geometry", "LEGACY")
     shadow_2d_config = Shadow2DConfig(
-        enabled=configuration.shadow_2d_enabled,
+        enabled=(configuration.shadow_2d_enabled
+                 or authoritative_geometry == "TRUE_2D"),
         horizon_seconds=configuration.shadow_2d_horizon_seconds,
         segment_seconds=configuration.shadow_2d_segment_seconds,
         local_segment_seconds=configuration.shadow_2d_local_segment_seconds,
@@ -699,7 +705,12 @@ def apply_installation_config(configuration: InstallationConfig):
         refinement_target_deg=configuration.shadow_2d_refinement_target_deg,
     )
     shadow_2d_diagnostics = (
-        Shadow2DDiagnosticWriter() if shadow_2d_config.enabled else None)
+        Shadow2DDiagnosticWriter()
+        if configuration.shadow_2d_enabled else None)
+    authoritative_transit_lifecycle = AuthoritativeTransitLifecycle(
+        authoritative_geometry,
+        grace_seconds=TRANSIT_PREDICTION_GRACE_SECONDS,
+        horizon_seconds=shadow_2d_config.horizon_seconds)
     fleet_geometric_altitude_estimator = None
     aircraft_los_geoid_provider = PgmGeoidProvider.discover(
         configuration.fleet_geoid_pgm_path)
@@ -1731,14 +1742,25 @@ def build_terminal_render_plan(planes, row_limit, maximum_distance,
     )
 
 
-def terminal_tracking_summary(observer_lat, observer_lon, render_plan):
-    return (
-        "LAT: {} LON: {} | Aircraft: {}/{} shown".format(
-            observer_lat,
-            observer_lon,
-            render_plan.shown_count,
-            render_plan.total_count,
-        )
+def terminal_observer_label(observer_context):
+    """Return a privacy-safe label for the observer used by the solver."""
+    source = observer_context.effective_source
+    if source == "MOBILE_FRESH":
+        return "MOBILE · GPS FRESH"
+    if source == "MOBILE_LAST_KNOWN":
+        return "MOBILE · GPS STALE · LAST KNOWN"
+    if source == "STATIC_FALLBACK":
+        return "MOBILE · GPS STALE · FALLBACK STATIC"
+    if source == "MOBILE_NO_FIX":
+        return "MOBILE · GPS UNAVAILABLE · NO POSITION"
+    return observer_context.requested_mode
+
+
+def terminal_tracking_summary(observer_context, render_plan):
+    return "Observer: {} | Aircraft: {}/{} shown".format(
+        terminal_observer_label(observer_context),
+        render_plan.shown_count,
+        render_plan.total_count,
     )
 
 
@@ -2005,6 +2027,8 @@ def complete_shadow_2d(prepared, legacy_result, legacy_prediction_base_utc):
             legacy_tca_seconds=legacy_tca)
             if coarse.passed else None)
         result = Shadow2DResult(coarse=coarse, exact=exact)
+        authoritative_transit_lifecycle.consider(
+            context, result, context.prediction_base_utc)
         writer = shadow_2d_diagnostics
         if writer is not None:
             writer.counters["screened"] += 1
@@ -2497,6 +2521,7 @@ def invalidate_observer_dependent_state(observer_context=None):
     vertical_transit_diagnostics.clear()
     geometric_altitude_selections.clear()
     transit_solver_diagnostics.clear()
+    authoritative_transit_lifecycle.invalidate()
     try:
         dashboard_runtime.invalidate_live()
     except Exception:
@@ -2566,6 +2591,7 @@ def clean_dict():
         geometric_altitude_selections.pop((icao, "sun"), None)
         geometric_altitude_selections.pop((icao, "moon"), None)
         drop_transit_snapshot_buffer(icao)
+        authoritative_transit_lifecycle.discard_aircraft(icao)
 
 # Funkcja do obliczania odległości między punktami (haversine) / Function to calculate distance between points (haversine)
 def haversine(origin, destination):
@@ -3337,12 +3363,17 @@ def get_metar_press():
 
 # Funkcja do generowania tabeli wyjściowej / Function to generate output table
 @synchronized_plane_dict
-def tabela(output=None, full=False, force=False, observer_position=None):
+def tabela(output=None, full=False, force=False, observer_position=None,
+           observer_context=None):
     global last_t, sun_body_angular_diameter_arcsec
     global moon_body_angular_diameter_arcsec
     global sun_body_evaluated_at_utc, moon_body_evaluated_at_utc
     output = sys.stdout if output is None else output
     emit = lambda *args: print(*args, file=output)
+    if observer_context is None:
+        observer_context = current_observer_context()
+    if observer_position is None:
+        observer_position = observer_context.position
     body_observer = gatech
     if (observer_position is not None
             and observer_position != observer_position_provider.static_position):
@@ -3486,13 +3517,11 @@ def tabela(output=None, full=False, force=False, observer_position=None):
 
                 wiersz += ' | '
                 wiersz += '{:>5.1f}'.format(diff_secx)
-                wiersz += ' {} {} '.format(len(plane_dict[pentry][15]), len(plane_dict[pentry][16]))
-                wiersz += '{:>5.1f}'.format(diff_seconds)
                 emit(wiersz)
 
         emit(" ")
         emit("{} (UTC) --- delay < {:.1f}s --- QNH {}hPa".format(clock.now_utc().time(), diff_t, pressure))
-        emit(terminal_tracking_summary(my_lat, my_lon, render_plan))
+        emit(terminal_tracking_summary(observer_context, render_plan))
         # Print combined port and recorder statuses.
         for status_line in source_status_lines():
             emit(status_line)
@@ -3500,12 +3529,19 @@ def tabela(output=None, full=False, force=False, observer_position=None):
     return sun_alt, sun_az, moon_alt, moon_az
 
 
-def tabela_for_observer(observer_position):
+def tabela_for_observer(observer):
     """Render with one observer while retaining simple legacy test doubles."""
+    observer_context = (
+        observer if isinstance(observer, ObserverContext) else None)
+    observer_position = (
+        observer.position if observer_context is not None else observer)
     try:
-        return tabela(observer_position=observer_position)
+        return tabela(
+            observer_position=observer_position,
+            observer_context=observer_context)
     except TypeError as error:
-        if "observer_position" not in str(error):
+        if not any(name in str(error) for name in (
+                "observer_position", "observer_context")):
             raise
         return tabela()
 
@@ -4173,7 +4209,7 @@ def process_line(line, port):
             except Exception:
                 pass
             sun_alt, sun_az, moon_alt, moon_az = tabela_for_observer(
-                observer_position)
+                observer_context)
             clean_dict()
             clean_transit_dict()
             return
@@ -4320,7 +4356,7 @@ def process_line(line, port):
         complete_shadow_2d(pending_shadow, None,
                            shadow_prediction_base_utc or clock.now_utc())
     sun_alt, sun_az, moon_alt, moon_az = tabela_for_observer(
-        observer_position)
+        observer_context)
     clean_dict()
     clean_transit_dict()
 

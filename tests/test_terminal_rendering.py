@@ -7,6 +7,18 @@ import unittest
 from unittest.mock import Mock, patch
 
 import transit_warning as transit
+from observer_position import ObserverContext, ObserverPosition
+
+
+STATIC_POSITION = ObserverPosition(10.0, 20.0, 100.0)
+
+
+def observer_context(source="STATIC", requested="STATIC"):
+    return ObserverContext(
+        position=STATIC_POSITION,
+        requested_mode=requested,
+        effective_source=source,
+        fallback_active=source == "STATIC_FALLBACK")
 
 
 def aircraft(distance=10, sun_time="", moon_time=""):
@@ -235,9 +247,23 @@ class TerminalRenderingTests(unittest.TestCase):
         self.assertEqual(plan.shown_count, 2)
         self.assertEqual(plan.total_count, 2)
         self.assertEqual(
-            transit.terminal_tracking_summary(51.39309, 21.18876, plan),
-            "LAT: 51.39309 LON: 21.18876 | Aircraft: 2/2 shown",
+            transit.terminal_tracking_summary(observer_context(), plan),
+            "Observer: STATIC | Aircraft: 2/2 shown",
         )
+
+    def test_mobile_observer_labels_are_privacy_safe(self):
+        cases = (
+            ("MOBILE_FRESH", "MOBILE · GPS FRESH"),
+            ("MOBILE_LAST_KNOWN", "MOBILE · GPS STALE · LAST KNOWN"),
+            ("STATIC_FALLBACK", "MOBILE · GPS STALE · FALLBACK STATIC"),
+        )
+        for source, expected in cases:
+            with self.subTest(source=source):
+                label = transit.terminal_observer_label(
+                    observer_context(source, "MOBILE"))
+                self.assertEqual(label, expected)
+                self.assertNotIn(str(STATIC_POSITION.latitude_deg), label)
+                self.assertNotIn(str(STATIC_POSITION.longitude_deg), label)
 
     def test_low_terminal_limit_hides_only_lower_priority_aircraft(self):
         planes = {
@@ -297,6 +323,7 @@ class TerminalRenderingTests(unittest.TestCase):
         with patch.object(transit, "plane_dict", planes), \
                 patch.object(transit, "clock", clock), \
                 patch.object(transit, "gatech", Mock()), \
+                patch.object(transit, "observer_position_provider") as provider, \
                 patch.object(transit, "my_lat", 51.39309), \
                 patch.object(transit, "my_lon", 21.18876), \
                 patch.object(transit, "my_elevation_const", 100), \
@@ -304,12 +331,21 @@ class TerminalRenderingTests(unittest.TestCase):
                 patch.object(transit.ephem, "Moon", return_value=moon), \
                 patch.object(transit, "terminal_aircraft_row_limit",
                              return_value=29) as row_limit:
+            provider.resolve.return_value = observer_context()
+            provider.static_position = STATIC_POSITION
             snapshot = transit.render_full_table_snapshot()
 
         self.assertIn("Aircraft: 56/56 shown", snapshot)
         self.assertIn("P054", snapshot)
         self.assertEqual(snapshot.count("\nP"), 55)
         self.assertLess(snapshot.index("SUNFIRST"), snapshot.index("P000"))
+        aircraft_lines = [
+            line for line in snapshot.splitlines()
+            if "SUNFIRST" in line or line.startswith("P")]
+        self.assertTrue(aircraft_lines)
+        self.assertTrue(all(line.rstrip().endswith("0.0")
+                            for line in aircraft_lines))
+        self.assertTrue(all(" 0 0 " not in line for line in aircraft_lines))
         self.assertEqual(planes, original)
         row_limit.assert_not_called()
 
@@ -343,8 +379,8 @@ class TerminalRenderingTests(unittest.TestCase):
         self.assertEqual((normal.shown_count, normal.total_count), (32, 46))
         self.assertEqual((full.shown_count, full.total_count), (46, 46))
         self.assertEqual(
-            transit.terminal_tracking_summary(51.39309, 21.18876, full),
-            "LAT: 51.39309 LON: 21.18876 | Aircraft: 46/46 shown",
+            transit.terminal_tracking_summary(observer_context(), full),
+            "Observer: STATIC | Aircraft: 46/46 shown",
         )
 
     def test_snapshot_signal_handler_only_sets_request_event(self):

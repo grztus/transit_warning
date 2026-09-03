@@ -351,6 +351,11 @@ Coordinate-free comparisons are rate-limited below
 `diagnostics/shadow_2d/YYYY-MM-DD/`. Shadow T0/SEP never affect terminal or
 dashboard values, history, Telegram, gong, recorder, or transit snapshots.
 
+`AUTHORITATIVE_PREDICTION_GEOMETRY` defaults to `LEGACY`. Setting it to
+`TRUE_2D` enables the internal encounter lifecycle for controlled rollout, but
+current user-facing consumers intentionally remain legacy-backed until their
+separate migration checkpoint.
+
 ## Configuration reference
 
 Required/static:

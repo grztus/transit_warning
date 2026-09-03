@@ -74,6 +74,7 @@ class InstallationConfig:
     shadow_2d_local_segment_seconds: float = 15.0
     shadow_2d_safety_margin_deg: float = 0.052
     shadow_2d_refinement_target_deg: float = 7.0
+    authoritative_prediction_geometry: str = "LEGACY"
 
 
 def _required(values, name, errors):
@@ -345,6 +346,11 @@ def load_installation_config(
     shadow_2d_refinement_target_deg = _optional_finite_float(
         values, "SHADOW_2D_REFINEMENT_TARGET_DEG", 7.0, errors,
         minimum=0.0, maximum=180.0)
+    authoritative_prediction_geometry = str(values.get(
+        "AUTHORITATIVE_PREDICTION_GEOMETRY", "LEGACY")).strip().upper()
+    if authoritative_prediction_geometry not in ("LEGACY", "TRUE_2D"):
+        errors.append(
+            "AUTHORITATIVE_PREDICTION_GEOMETRY must be LEGACY or TRUE_2D")
     if (shadow_2d_horizon_seconds is not None
             and shadow_2d_segment_seconds is not None
             and shadow_2d_segment_seconds > shadow_2d_horizon_seconds):
@@ -427,4 +433,5 @@ def load_installation_config(
         shadow_2d_local_segment_seconds=shadow_2d_local_segment_seconds,
         shadow_2d_safety_margin_deg=shadow_2d_safety_margin_deg,
         shadow_2d_refinement_target_deg=shadow_2d_refinement_target_deg,
+        authoritative_prediction_geometry=authoritative_prediction_geometry,
     )

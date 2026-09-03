@@ -74,6 +74,7 @@ class InstallationConfigTests(unittest.TestCase):
         self.assertEqual(15.0, result.shadow_2d_local_segment_seconds)
         self.assertEqual(0.052, result.shadow_2d_safety_margin_deg)
         self.assertEqual(7.0, result.shadow_2d_refinement_target_deg)
+        self.assertEqual("LEGACY", result.authoritative_prediction_geometry)
         self.assertEqual(result.mlat_beast_host, result.mlat_host)
         self.assertEqual(result.mlat_beast_port, 30105)
         self.assertEqual("STATIC", result.observer_mode)
@@ -184,6 +185,16 @@ class InstallationConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigurationError, "must not exceed"):
             self.load({**REQUIRED, "SHADOW_2D_SEGMENT_SECONDS": "30",
                        "SHADOW_2D_LOCAL_SEGMENT_SECONDS": "60"})
+
+    def test_validates_authoritative_prediction_geometry(self):
+        values = dict(REQUIRED)
+        values["AUTHORITATIVE_PREDICTION_GEOMETRY"] = "true_2d"
+        self.assertEqual(
+            "TRUE_2D",
+            self.load(values).authoritative_prediction_geometry)
+        values["AUTHORITATIVE_PREDICTION_GEOMETRY"] = "hybrid"
+        with self.assertRaises(ConfigurationError):
+            self.load(values)
 
     def test_accepts_optional_fleet_geometric_altitude_configuration(self):
         result = self.load({
