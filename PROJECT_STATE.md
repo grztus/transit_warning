@@ -70,8 +70,42 @@ authoritative if this document becomes stale.
   connections. Manifests drive verified `streams.zip` membership.
 - `streams.zip` is the canonical completed archive. Failed finalization
   preserves loose inputs.
-- Candidate Auto-Recorder is not implemented. It is planned with two
-  distinct layers:
+- Candidate Auto-Recorder Phase 1 is implemented (`candidate_recorder.py`,
+  `tests/test_candidate_recorder.py`) but remains dormant and is not connected
+  to production runtime.
+- Phase 1 provides:
+  - per-ICAO bounded in-memory pre-buffering;
+  - ADS-B SBS and MLAT SBS demultiplexing;
+  - RAW AVR attribution using existing repository decoding helpers;
+  - MLAT Beast framing across arbitrary TCP chunk boundaries;
+  - filtering before retention;
+  - ~60 s configurable pre-buffer;
+  - bounded per-ICAO record count and total ICAO count;
+  - stale ICAO pruning;
+  - thread safety;
+  - no disk writes.
+- RAW/Beast attribution is intentionally conservative:
+  - accept only repository-supported attributable DF17 and DF18 CF=2 frames with
+    valid CRC;
+  - reject DF11, DF19, anonymous DF18, AP-overlaid frames, Mode A/C, and
+    corrupt/unattributable frames.
+- Phase 1 does not:
+  - integrate with authoritative TRUE_2D lifecycle;
+  - create candidate sessions/manifests;
+  - write forensic bundles;
+  - persist observer coordinates;
+  - alter the existing FULL recorder;
+  - change TRUE_2D or LEGACY behavior.
+- Adversarial review found and resolved:
+  - future timestamp poisoning;
+  - out-of-order pruning;
+  - overly broad DF18/DF11/DF19 attribution;
+  - stale-before-active eviction;
+  - mutable metadata;
+  - naive/non-UTC timestamps.
+- Validation: Candidate Recorder tests (23 passed), recorder suites (61 passed),
+  full repository suite (746 passed), py_compile, and git diff --check clean.
+- Preserved two-layer model:
   - Physical stream capture is per ICAO: SBS, RAW, and MLAT data for an aircraft
     is physically captured only once. Multiple candidate encounters for the
     same ICAO share that physical capture rather than creating duplicate stream
@@ -118,6 +152,6 @@ authoritative if this document becomes stale.
 
 ## Planned next work
 
-The next planned feature is Candidate Auto-Recorder. The architectural audit
-and the two-layer capture/forensic decision are complete. Next is phased
-implementation per the agreed architecture.
+The next checkpoint is Candidate Auto-Recorder Phase 2 design/implementation of
+candidate encounter gating and state management, still without broad production
+rollout.

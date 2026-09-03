@@ -1,30 +1,68 @@
 # Current task
 
-Prepare for the next feature: Candidate Auto-Recorder. Design or implementation
-has not started.
+Prepare for Candidate Auto-Recorder Phase 2 design/implementation of candidate
+encounter gating and state management, still without broad production rollout.
 
 # Current baseline
 
 - Branch: `main`
 - Baseline at handoff: `e552a9b` (`Trim terminal table separator`)
 - TRUE_2D consumer promotion is complete and deployed.
+- Candidate Auto-Recorder Phase 1 in-memory pre-buffer is implemented and dormant.
 
 # Completed immediately before handoff
 
-- Authoritative TRUE_2D routes terminal, dashboard, Telegram, gong, snapshots,
-  and history consumers.
-- TMUX table cleanup is complete and its final column is `age`.
+- Candidate Auto-Recorder Phase 1 implemented in `candidate_recorder.py` and
+  tested in `tests/test_candidate_recorder.py`.
+- Phase 1 provides:
+  - per-ICAO bounded in-memory pre-buffering;
+  - ADS-B SBS and MLAT SBS demultiplexing;
+  - RAW AVR attribution using existing repository decoding helpers;
+  - MLAT Beast framing across arbitrary TCP chunk boundaries;
+  - filtering before retention;
+  - ~60 s configurable pre-buffer;
+  - bounded per-ICAO record count and total ICAO count;
+  - stale ICAO pruning;
+  - thread safety;
+  - no disk writes.
+- RAW/Beast attribution is intentionally conservative:
+  - accepts only repository-supported attributable DF17 and DF18 CF=2 frames
+    with valid CRC;
+  - rejects DF11, DF19, anonymous DF18 (CF!=2), AP-overlaid frames, Mode A/C,
+    and corrupt/unattributable frames.
+- Phase 1 does not:
+  - integrate with authoritative TRUE_2D lifecycle;
+  - create candidate sessions/manifests;
+  - write forensic bundles;
+  - persist observer coordinates;
+  - alter the existing FULL recorder;
+  - change TRUE_2D or LEGACY behavior.
+- Adversarial review found and resolved:
+  - future timestamp poisoning;
+  - out-of-order pruning;
+  - overly broad DF18/DF11/DF19 attribution;
+  - stale-before-active eviction;
+  - mutable metadata;
+  - naive/non-UTC timestamps.
+- Validation:
+  - Candidate Recorder tests: 23 passed
+  - recorder suites: 61 passed
+  - full repository suite: 746 passed
+  - py_compile passed
+  - git diff --check passed
 
 # Current production state
 
 Production is configured for TRUE_2D and is in observation/soak. The repository
-configuration default remains LEGACY for compatibility.
+configuration default remains LEGACY for compatibility. Candidate Auto-Recorder
+Phase 1 is dormant and is not connected to production runtime.
 
 # Next implementation
 
-The architecture audit is complete. Candidate Auto-Recorder design has two
-distinct identities/layers:
+The next checkpoint is Candidate Auto-Recorder Phase 2: candidate encounter
+gating and state management, still without broad production rollout.
 
+Preserve the agreed two-layer model:
 1. Physical stream capture is per ICAO:
    - SBS / RAW / MLAT data for one aircraft must be physically captured only once.
    - Multiple candidate encounters for the same ICAO share that physical capture
@@ -64,7 +102,6 @@ Operational & privacy constraints:
 - Retain the frozen observer context inside the private forensic bundle,
   including MOBILE coordinates, but never expose it through normal logs,
   dashboard, Telegram, history, snapshots, or public CSV.
-- Do not yet implement; follow phased plan when instructed.
 
 # Constraints for the next agent
 
@@ -78,5 +115,6 @@ checks, `git diff --check`, and a privacy/scope review.
 
 # Working tree state
 
-The working tree was clean before these documentation-only handoff files were
-created. No Candidate Auto-Recorder code is pending.
+Working tree contains uncommitted `candidate_recorder.py` and
+`tests/test_candidate_recorder.py`, with updated `PROJECT_STATE.md` and
+`HANDOFF.md`.
