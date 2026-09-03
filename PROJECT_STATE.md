@@ -70,9 +70,9 @@ authoritative if this document becomes stale.
   connections. Manifests drive verified `streams.zip` membership.
 - `streams.zip` is the canonical completed archive. Failed finalization
   preserves loose inputs.
-- Candidate Auto-Recorder Phase 1 is implemented (`candidate_recorder.py`,
-  `tests/test_candidate_recorder.py`) but remains dormant and is not connected
-  to production runtime.
+- Candidate Auto-Recorder Phases 1 and 2 are implemented in
+  `candidate_recorder.py` and remain dormant: they are not connected to
+  production stream readers or disk output.
 - Phase 1 provides:
   - per-ICAO bounded in-memory pre-buffering;
   - ADS-B SBS and MLAT SBS demultiplexing;
@@ -89,13 +89,19 @@ authoritative if this document becomes stale.
     valid CRC;
   - reject DF11, DF19, anonymous DF18, AP-overlaid frames, Mode A/C, and
     corrupt/unattributable frames.
-- Phase 1 does not:
-  - integrate with authoritative TRUE_2D lifecycle;
-  - create candidate sessions/manifests;
-  - write forensic bundles;
-  - persist observer coordinates;
-  - alter the existing FULL recorder;
-  - change TRUE_2D or LEGACY behavior.
+- Phase 2 adds authoritative encounter gating and in-memory state management:
+  - forensic identity comes directly from the existing
+    `prediction.encounter_id` and state is per authoritative encounter;
+  - conceptual physical capture state is per ICAO;
+  - only a future TRUE_2D `INTERIOR` prediction can trigger;
+  - default gates are T0 <= 300 seconds and SEP <= 2.0 degrees;
+  - the Phase 1 pre-buffer provides approximately 60 seconds before trigger;
+  - required end is authoritative T0 + 180 seconds;
+  - a later T0 can extend the window and an earlier T0 cannot shorten it;
+  - `WITHDRAWN` records the outcome without cancelling a triggered window;
+  - there is no ICAO cooldown: a new generation is a new forensic encounter;
+  - overlapping SUN/MOON encounters remain distinct while sharing ICAO capture;
+  - `capture_until` is the maximum required end of unfinished encounters.
 - Adversarial review found and resolved:
   - future timestamp poisoning;
   - out-of-order pruning;
@@ -103,33 +109,20 @@ authoritative if this document becomes stale.
   - stale-before-active eviction;
   - mutable metadata;
   - naive/non-UTC timestamps.
-- Validation: Candidate Recorder tests (23 passed), recorder suites (61 passed),
-  full repository suite (746 passed), py_compile, and git diff --check clean.
-- Preserved two-layer model:
-  - Physical stream capture is per ICAO: SBS, RAW, and MLAT data for an aircraft
-    is physically captured only once. Multiple candidate encounters for the
-    same ICAO share that physical capture rather than creating duplicate stream
-    files/writers. Capture remains active until the latest required end time:
-    `capture_until = max(required_end_time for active encounters)`.
-  - Forensic event identity is per authoritative encounter: `(observer_epoch,
-    icao, body, encounter_generation)`. Every encounter crossing the trigger
-    gets its own forensic metadata/manifest. A later authoritative WITHDRAWN
-    does not cancel or abort the forensic capture window once triggered; the
-    outcome is recorded in metadata (e.g. WITHDRAWN, PASSED). New generations
-    for the same ICAO are new candidates without cooldown suppression, and
-    overlapping SUN/MOON encounters remain distinct forensic encounters sharing
-    the single physical ICAO capture.
-- Candidate window semantics: trigger expected near T0 <= 300 s and SEP <= 2
-  deg (configurable). Coverage requires ~60 s pre-buffer before trigger and
-  extends to authoritative T0 + 180 s (e.g. ~7 minutes total coverage if
-  triggered 3 minutes before T0). If another encounter extends beyond the
-  current physical capture end, `capture_until` is extended rather than opening
-  a duplicate capture.
-- The full recorder has priority. A future candidate recorder must avoid
-  duplicate raw capture while full recording is active.
+- Phase 2 is in-memory only. It performs no candidate socket-reader integration,
+  physical writes, directory creation, production-runtime integration, or
+  FULL-recorder suppression/marker handling. Existing FULL recording and all
+  prediction consumers remain unchanged.
+- The manually started FULL recorder has priority and Candidate Recorder logic
+  must never stop or interfere with it. Future integration must avoid duplicate
+  physical capture while FULL recording is active; covered candidate encounters
+  should create only a lightweight marker/index referencing the FULL session
+  and relevant time window.
 - A private forensic candidate bundle may retain its frozen observer context,
   including MOBILE coordinates, solely because later photo reconstruction
-  requires it. Such coordinates must stay confined to private bundles.
+  requires it. Such coordinates are private forensic data and must stay out of
+  ordinary logs, dashboard, Telegram, HISTORY, public CSV, and other normal
+  diagnostics/output.
 
 ## Testing and runtime
 
@@ -152,6 +145,10 @@ authoritative if this document becomes stale.
 
 ## Planned next work
 
-The next checkpoint is Candidate Auto-Recorder Phase 2 design/implementation of
-candidate encounter gating and state management, still without broad production
-rollout.
+The next checkpoint is **Candidate Auto-Recorder Phase 3A — dormant runtime
+wiring without disk output**. It should connect production SBS/RAW/MLAT inputs
+to `CandidatePreBuffer` and authoritative lifecycle transitions to
+`CandidateEncounterManager`, while remaining observational and fail-open. It
+must not yet create candidate bundles/writers or implement FULL-recorder
+suppression/markers, and must not change prediction, dashboard, Telegram,
+history, snapshots, gong, or full-recorder behavior.
