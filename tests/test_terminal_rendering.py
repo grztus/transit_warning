@@ -2,6 +2,7 @@ import copy
 import datetime
 import io
 import math
+import re
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -342,9 +343,23 @@ class TerminalRenderingTests(unittest.TestCase):
         aircraft_lines = [
             line for line in snapshot.splitlines()
             if "SUNFIRST" in line or line.startswith("P")]
+        table_lines = snapshot.splitlines()
+        unit_header, name_header, separator = table_lines[1:4]
+        ansi_escape = re.compile(r"\x1b\[[0-9;]*m")
+        visible_aircraft_lines = [
+            ansi_escape.sub("", line) for line in aircraft_lines]
         self.assertTrue(aircraft_lines)
         self.assertTrue(all(line.rstrip().endswith("0.0")
                             for line in aircraft_lines))
+        self.assertTrue(unit_header.endswith("(s)"))
+        self.assertTrue(name_header.endswith("age"))
+        self.assertFalse(separator.endswith("|"))
+        self.assertTrue(all(
+            line.rsplit("|", 1)[1].strip() == "0.0"
+            for line in visible_aircraft_lines))
+        self.assertTrue(all(
+            len(line) == len(name_header) == len(unit_header) == len(separator)
+            for line in visible_aircraft_lines))
         self.assertTrue(all(" 0 0 " not in line for line in aircraft_lines))
         self.assertEqual(planes, original)
         row_limit.assert_not_called()
