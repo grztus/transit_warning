@@ -70,10 +70,10 @@ authoritative if this document becomes stale.
   connections. Manifests drive verified `streams.zip` membership.
 - `streams.zip` is the canonical completed archive. Failed finalization
   preserves loose inputs.
-- Candidate Auto-Recorder Phases 1 and 2 are implemented in
-  `candidate_recorder.py`. Phase 3A connects their in-memory machinery to live
-  production input and authoritative lifecycle paths. It is observational,
-  fail-open, and diskless rather than completely runtime-dormant.
+- Candidate Auto-Recorder Phases 1, 2, and 3 are complete. Phase 1 provides
+  bounded pre-buffering and attribution, Phase 2 provides authoritative
+  encounter/capture state, and Phase 3 connects production runtime and private
+  storage while remaining fail-open.
 - Phase 1 provides:
   - per-ICAO bounded in-memory pre-buffering;
   - ADS-B SBS and MLAT SBS demultiplexing;
@@ -128,23 +128,48 @@ authoritative if this document becomes stale.
   bundles, or writers. It emits no observer coordinates or candidate forensic
   data through ordinary logs, dashboard, Telegram, HISTORY, public CSV, or
   other normal diagnostics/output.
-- The manually started FULL recorder has priority and Candidate Recorder logic
-  must never stop or interfere with it. Future integration must avoid duplicate
-  physical capture while FULL recording is active; covered candidate encounters
-  should create only a lightweight marker/index referencing the FULL session
-  and relevant time window.
+- Phase 3B.1 implements private physical candidate bundles:
+  - one physical capture is shared per active ICAO while each authoritative
+    encounter retains a distinct private manifest;
+  - both the approximately 60-second pre-buffer and subsequent live records are
+    retained;
+  - a bounded asynchronous queue and one storage worker keep candidate
+    filesystem I/O off production reader and prediction paths;
+  - stable immutable monotonically increasing sequence IDs deduplicate the
+    pre-buffer/live boundary without collapsing legitimate identical records;
+  - cross-midnight references and capture-directory collisions are handled;
+  - finalization is retryable, stream data and timing sidecars are reconciled,
+    and crash-tail bytes cannot be silently claimed by timing metadata;
+  - configured/requested/applied hard-ceiling state and truncation reason are
+    explicit in private metadata;
+  - graceful shutdown preserves inspectable incomplete bundles when required.
+- Phase 3B.2 gives the manually started FULL recorder absolute priority:
+  - FULL state, session identity, start time, and stream coverage are read from
+    the live `SessionRecorder`, not inferred from filesystem presence;
+  - `FULL_REFERENCE` applies only when every production-enabled Candidate stream
+    is actively covered by FULL; this is an all-or-nothing coverage decision;
+  - incomplete FULL coverage retains normal Phase 3B.1 physical candidate
+    capture;
+  - in `FULL_REFERENCE` mode no duplicate candidate stream capture is opened,
+    the pre-buffer is not drained to candidate storage, and live candidate
+    stream writes are not enqueued;
+  - atomic private per-encounter markers reference the actual FULL session and
+    retain authoritative identity, logical window, lifecycle/prediction data,
+    stream membership, and frozen observer context;
+  - Candidate Recorder never stops, alters, reconfigures, or otherwise controls
+    `SessionRecorder`.
 - A private forensic candidate bundle may retain its frozen observer context,
   including MOBILE coordinates, solely because later photo reconstruction
   requires it. Such coordinates are private forensic data and must stay out of
   ordinary logs, dashboard, Telegram, HISTORY, public CSV, and other normal
-  diagnostics/output. Phase 3A does not persist this context because it writes
-  no bundles.
+  diagnostics/output. Phase 3A persists nothing; Phase 3B may store this context
+  only in private bundle or `FULL_REFERENCE` marker metadata.
 
-### Candidate Auto-Recorder Phase 3A validation
+### Candidate Auto-Recorder Phase 3B.2 validation
 
-- Focused Candidate Recorder tests: 43 passed.
-- Authoritative/recorder regression tests: 133 passed.
-- Full suite: 766 run, 765 passed, with one known Windows dashboard HTTP
+- Focused Candidate Recorder tests: 76 passed.
+- Authoritative/recorder regression tests: 108 passed.
+- Full suite: 799 run, 798 passed, with one known Windows dashboard HTTP
   teardown error; that test passed independently.
 - `py_compile` passed.
 - `git diff --check` passed.
@@ -170,9 +195,10 @@ authoritative if this document becomes stale.
 
 ## Planned next work
 
-The next checkpoint is **Candidate Auto-Recorder Phase 3B — physical
-candidate-bundle writing/finalization and FULL-recorder-aware marker/index
-handling**. It must preserve FULL recorder priority, fail-open isolation,
-authoritative encounter identity, all Phase 1/2/3A semantics, and private
-frozen observer-context rules. It must not leak private forensic data into
-normal outputs. Phase 3B is not designed or implemented yet.
+Candidate Auto-Recorder Phase 3 is complete. Optional downstream forensic work
+may consume `FULL_REFERENCE` markers to extract/reconstruct encounter windows
+from canonical FULL sessions, add replay/visualization/analysis tooling for
+candidate bundles, or provide a broader private forensic review UI. These are
+future tools, not missing Phase 3 implementation. They must preserve FULL
+recorder priority, authoritative encounter identity, fail-open isolation, and
+private observer-context rules.
