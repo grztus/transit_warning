@@ -10,6 +10,7 @@ from geometric_altitude_selection import (
 from transit_prediction_model import (
     angular_position_from_observer,
     legacy_flat_angular_position_from_observer,
+    precise_angular_position_from_observer,
     slant_distance_km_from_observer,
 )
 
@@ -91,6 +92,17 @@ class DatumBoundaryTests(unittest.TestCase):
             (50.0, 20.0), 130.0, (50.5, 21.0), 7035.0)
         self.assertEqual(actual, expected)
         self.assertEqual(provider.undulation_m.call_count, 2)
+
+    def test_shadow_precise_los_preserves_unrounded_geometry(self):
+        provider = Mock()
+        provider.undulation_m.side_effect = [30.0, 35.0]
+        transit.aircraft_los_geoid_provider = provider
+        actual = transit.precise_aircraft_angular_position_from_observer(
+            (50.0, 20.0), 100.0, (50.5, 21.0), 7000.0)
+        expected = precise_angular_position_from_observer(
+            (50.0, 20.0), 130.0, (50.5, 21.0), 7035.0)
+        self.assertEqual(actual, expected)
+        self.assertNotEqual(actual.azimuth_deg, round(actual.azimuth_deg, 1))
 
     def test_own_gnss_hae_is_not_geoid_corrected_twice(self):
         selector = GeometricAltitudeSelector()

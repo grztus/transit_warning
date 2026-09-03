@@ -1,6 +1,6 @@
 import datetime
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytz
 
@@ -275,6 +275,24 @@ class MotionFreshnessIntegrationTests(unittest.TestCase):
         self.assertEqual(
             transit.get_aircraft_motion_freshness_status("ABC123").status,
             transit.MotionFreshnessStatus.FRESH)
+
+    def test_disabled_shadow_pipeline_is_not_called(self):
+        with patch.object(transit, "prepare_shadow_2d") as prepare, \
+                patch.object(transit, "moving_body_transit_pred",
+                             return_value=0):
+            self.process(self.mlat3("2026/08/19 12:00:00.000"))
+        prepare.assert_not_called()
+
+    def test_stale_motion_does_not_enter_shadow_pipeline(self):
+        transit.shadow_2d_config = transit.Shadow2DConfig(enabled=True)
+        with patch.object(transit, "prepare_shadow_2d") as prepare, \
+                patch.object(transit, "moving_body_transit_pred",
+                             return_value=0):
+            self.process(self.mlat3("2026/08/19 12:00:00.000"))
+            self.assertGreater(prepare.call_count, 0)
+            prepare.reset_mock()
+            self.process(self.msg3("2026/08/19 12:00:15.000"), 30003)
+        prepare.assert_not_called()
 
     def test_prediction_receives_full_precision_effective_raw_track(self):
         transit.moving_body_transit_pred = Mock(return_value=0)

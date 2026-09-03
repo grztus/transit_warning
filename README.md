@@ -334,6 +334,16 @@ python tools/transit_snapshot_visualizer.py snapshot.json \
 The default plot uses unrounded diagnostic observer geometry while preserving
 stored production values. Offline HIT/EDGE/MISS does not affect live behavior.
 
+An optional true-2D shadow pipeline can independently screen and refine
+spherical Sun/Moon closest approaches without requiring the legacy azimuth
+intersection. Enable it with `SHADOW_2D_ENABLED=true`. Defaults are a 900-second
+horizon, 60-second coarse segments, local 15-second subdivision, a 7-degree
+refinement target, and a 0.052-degree conservative screening margin.
+
+Coordinate-free comparisons are rate-limited below
+`diagnostics/shadow_2d/YYYY-MM-DD/`. Shadow T0/SEP never affect terminal or
+dashboard values, history, Telegram, gong, recorder, or transit snapshots.
+
 ## Configuration reference
 
 Required/static:
@@ -387,6 +397,17 @@ Dashboard/observer:
 | `DASHBOARD_SEP_GREEN_MAX_DEG`, `DASHBOARD_SEP_YELLOW_MAX_DEG`, `DASHBOARD_SEP_VISIBLE_MAX_DEG` | `3`, `5`, `7` | Dashboard colors/visibility |
 | `NEW_TRANSIT_INDICATOR_ENABLED` | `true` | Mark late-discovered LIVE events |
 | `NEW_TRANSIT_THRESHOLD_SECONDS` | `60` | Maximum time before T0 at first LIVE appearance |
+
+Shadow diagnostics:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SHADOW_2D_ENABLED` | `false` | Run independent true-2D diagnostics |
+| `SHADOW_2D_HORIZON_SECONDS` | `900` | Shadow search horizon |
+| `SHADOW_2D_SEGMENT_SECONDS` | `60` | Coarse segment spacing |
+| `SHADOW_2D_LOCAL_SEGMENT_SECONDS` | `15` | Local subdivision spacing |
+| `SHADOW_2D_SAFETY_MARGIN_DEG` | `0.052` | Conservative coarse-pass margin |
+| `SHADOW_2D_REFINEMENT_TARGET_DEG` | `7` | Independent exact-refinement target |
 
 System environment overrides `.env`. MOBILE startup requires dashboard and GPS
 enabled. Critical age must exceed warning age; presentation thresholds require

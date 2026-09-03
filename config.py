@@ -66,6 +66,12 @@ class InstallationConfig:
     fleet_geometric_altitude_enabled: bool = False
     geometric_altitude_selection_enabled: bool = False
     fleet_geoid_pgm_path: str = ""
+    shadow_2d_enabled: bool = False
+    shadow_2d_horizon_seconds: float = 900.0
+    shadow_2d_segment_seconds: float = 60.0
+    shadow_2d_local_segment_seconds: float = 15.0
+    shadow_2d_safety_margin_deg: float = 0.052
+    shadow_2d_refinement_target_deg: float = 7.0
 
 
 def _required(values, name, errors):
@@ -317,6 +323,30 @@ def load_installation_config(
         values, "GEOMETRIC_ALTITUDE_SELECTION_ENABLED", False, errors)
     fleet_geoid_pgm_path = str(values.get(
         "FLEET_GEOID_PGM_PATH", "")).strip()
+    shadow_2d_enabled = _boolean(values, "SHADOW_2D_ENABLED", False, errors)
+    shadow_2d_horizon_seconds = _optional_finite_float(
+        values, "SHADOW_2D_HORIZON_SECONDS", 900.0, errors,
+        minimum=0.0, maximum=900.0)
+    shadow_2d_segment_seconds = _optional_finite_float(
+        values, "SHADOW_2D_SEGMENT_SECONDS", 60.0, errors,
+        minimum=0.0, maximum=900.0)
+    shadow_2d_local_segment_seconds = _optional_finite_float(
+        values, "SHADOW_2D_LOCAL_SEGMENT_SECONDS", 15.0, errors,
+        minimum=0.0, maximum=900.0)
+    shadow_2d_safety_margin_deg = _optional_nonnegative_float(
+        values, "SHADOW_2D_SAFETY_MARGIN_DEG", 0.052, errors,
+        maximum=180.0)
+    shadow_2d_refinement_target_deg = _optional_finite_float(
+        values, "SHADOW_2D_REFINEMENT_TARGET_DEG", 7.0, errors,
+        minimum=0.0, maximum=180.0)
+    if (shadow_2d_horizon_seconds is not None
+            and shadow_2d_segment_seconds is not None
+            and shadow_2d_segment_seconds > shadow_2d_horizon_seconds):
+        errors.append("SHADOW_2D_SEGMENT_SECONDS must not exceed SHADOW_2D_HORIZON_SECONDS")
+    if (shadow_2d_segment_seconds is not None
+            and shadow_2d_local_segment_seconds is not None
+            and shadow_2d_local_segment_seconds > shadow_2d_segment_seconds):
+        errors.append("SHADOW_2D_LOCAL_SEGMENT_SECONDS must not exceed SHADOW_2D_SEGMENT_SECONDS")
     if telegram_notifications_enabled:
         if not telegram_bot_token:
             errors.append(
@@ -383,4 +413,10 @@ def load_installation_config(
         geometric_altitude_selection_enabled=(
             geometric_altitude_selection_enabled),
         fleet_geoid_pgm_path=fleet_geoid_pgm_path,
+        shadow_2d_enabled=shadow_2d_enabled,
+        shadow_2d_horizon_seconds=shadow_2d_horizon_seconds,
+        shadow_2d_segment_seconds=shadow_2d_segment_seconds,
+        shadow_2d_local_segment_seconds=shadow_2d_local_segment_seconds,
+        shadow_2d_safety_margin_deg=shadow_2d_safety_margin_deg,
+        shadow_2d_refinement_target_deg=shadow_2d_refinement_target_deg,
     )

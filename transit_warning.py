@@ -157,8 +157,18 @@ from transit_prediction_model import (
     great_circle_forward_bearing_at_point,
     predict_transit_altitude as shared_predict_transit_altitude,
     predict_vertical_state_at_time as shared_predict_vertical_state,
+    precise_angular_position_from_observer,
     slant_distance_km_from_observer,
     solve_great_circle_intersection,
+)
+from shadow_2d_prediction import (
+    Shadow2DConfig,
+    Shadow2DDiagnosticWriter,
+    Shadow2DResult,
+    ShadowEncounterContext,
+    coarse_screen as shadow_coarse_screen,
+    comparison_record as shadow_comparison_record,
+    exact_refine as shadow_exact_refine,
 )
 
 # Ustawienia GUI / GUI settings
@@ -607,6 +617,8 @@ aircraft_los_geoid_provider = None
 aircraft_los_geometry_mode = "UNCONFIGURED"
 geometric_altitude_selection_enabled = False
 geometric_altitude_selector = GeometricAltitudeSelector()
+shadow_2d_config = Shadow2DConfig()
+shadow_2d_diagnostics = None
 
 
 def apply_installation_config(configuration: InstallationConfig):
@@ -626,6 +638,7 @@ def apply_installation_config(configuration: InstallationConfig):
     global fleet_geometric_altitude_estimator
     global aircraft_los_geoid_provider, aircraft_los_geometry_mode
     global geometric_altitude_selection_enabled
+    global shadow_2d_config, shadow_2d_diagnostics
     observer_position_provider = RuntimeObserverPositionProvider(
         ObserverPosition(
             latitude_deg=configuration.observer_lat,
@@ -677,6 +690,16 @@ def apply_installation_config(configuration: InstallationConfig):
         configuration.fleet_geometric_altitude_enabled)
     geometric_altitude_selection_enabled = (
         configuration.geometric_altitude_selection_enabled)
+    shadow_2d_config = Shadow2DConfig(
+        enabled=configuration.shadow_2d_enabled,
+        horizon_seconds=configuration.shadow_2d_horizon_seconds,
+        segment_seconds=configuration.shadow_2d_segment_seconds,
+        local_segment_seconds=configuration.shadow_2d_local_segment_seconds,
+        safety_margin_deg=configuration.shadow_2d_safety_margin_deg,
+        refinement_target_deg=configuration.shadow_2d_refinement_target_deg,
+    )
+    shadow_2d_diagnostics = (
+        Shadow2DDiagnosticWriter() if shadow_2d_config.enabled else None)
     fleet_geometric_altitude_estimator = None
     aircraft_los_geoid_provider = PgmGeoidProvider.discover(
         configuration.fleet_geoid_pgm_path)
@@ -751,6 +774,23 @@ def aircraft_angular_position_from_observer(
     return angular_position_from_observer(
         observer_position, observer_hae_m, target_position, target_hae_m,
         distance_km=distance_km)
+
+
+def precise_aircraft_angular_position_from_observer(
+        observer_position, observer_orthometric_elevation_m,
+        target_position, target_orthometric_altitude_m):
+    """Return unrounded datum-consistent WGS84 ECEF/ENU aircraft LOS."""
+    provider = aircraft_los_geoid_provider
+    if provider is None:
+        raise RuntimeError("datum-consistent aircraft LOS is unavailable")
+    observer_hae_m = (
+        float(observer_orthometric_elevation_m)
+        + provider.undulation_m(*observer_position))
+    target_hae_m = (
+        float(target_orthometric_altitude_m)
+        + provider.undulation_m(*target_position))
+    return precise_angular_position_from_observer(
+        observer_position, observer_hae_m, target_position, target_hae_m)
 
 
 def aircraft_slant_distance_from_observer(
@@ -1882,6 +1922,123 @@ def select_geometric_altitude_for_prediction(
             baro_m, "geometric_selection_error")
 
 
+def build_shadow_2d_context(
+        icao, callsign, body, observer_context, position, track_parameter,
+        groundspeed_kmh, current_altitude_m, prediction_base_utc):
+    """Freeze one independent shadow encounter before legacy intersection."""
+    motion = aircraft_motion_states.get(icao)
+    frozen_motion = vertical_motion_input_from_runtime(motion)
+    frozen_intent = vertical_intent_input_from_runtime(
+        aircraft_intent_states.get(icao))
+    policy = current_vertical_prediction_policy()
+    vertical_now = shared_predict_vertical_state(
+        current_altitude_m, frozen_motion, frozen_intent,
+        prediction_base_utc, 0.0, pressure, policy)
+    altitude_now = select_geometric_altitude_for_prediction(
+        icao, vertical_now.prediction, prediction_base_utc)
+    correction_m = (
+        altitude_now.altitude_m
+        - vertical_now.prediction.predicted_altitude_m)
+
+    def aircraft_los(observer, target_position, target_altitude_m):
+        return precise_aircraft_angular_position_from_observer(
+            observer.coordinates, observer.elevation_m,
+            target_position, target_altitude_m)
+
+    return ShadowEncounterContext(
+        icao=str(icao), callsign=str(callsign or ""), body=body.upper(),
+        prediction_base_utc=prediction_base_utc,
+        observer_context=observer_context,
+        latitude_deg=float(position.latitude),
+        longitude_deg=float(position.longitude),
+        track_deg=float(track_parameter.value),
+        # The legacy intersection truncates velocity before deriving time2X;
+        # retain that existing effective-groundspeed assumption in shadow.
+        groundspeed_kmh=float(int(float(groundspeed_kmh))),
+        current_altitude_m=float(current_altitude_m),
+        vertical_motion=frozen_motion, vertical_intent=frozen_intent,
+        vertical_policy=policy, qnh_hpa=float(pressure),
+        geometric_altitude_correction_m=float(correction_m),
+        altitude_source=altitude_now.source.value,
+        position_source=position.source,
+        track_source=track_parameter.source,
+        aircraft_los_resolver=aircraft_los,
+        body_position_resolver=body_position_at_utc,
+    )
+
+
+def prepare_shadow_2d(
+        icao, callsign, body, observer_context, track_parameter,
+        groundspeed_kmh, current_altitude_m, prediction_base_utc):
+    """Run the legacy-independent coarse stage, always fail-open."""
+    if not shadow_2d_config.enabled:
+        return None
+    try:
+        motion = aircraft_motion_states.get(icao)
+        position = motion.position if motion is not None else None
+        if position is None:
+            return None
+        context = build_shadow_2d_context(
+            icao, callsign, body, observer_context, position,
+            track_parameter, groundspeed_kmh, current_altitude_m,
+            prediction_base_utc)
+        return context, shadow_coarse_screen(context, shadow_2d_config)
+    except Exception:
+        return None
+
+
+def complete_shadow_2d(prepared, legacy_result, legacy_prediction_base_utc):
+    """Refine and persist a coordinate-free comparison, always fail-open."""
+    if prepared is None:
+        return None
+    try:
+        context, coarse = prepared
+        legacy_tca = None
+        if legacy_result:
+            legacy_event_utc = (
+                legacy_prediction_base_utc
+                + datetime.timedelta(seconds=float(legacy_result[6])))
+            legacy_tca = (
+                legacy_event_utc - context.prediction_base_utc).total_seconds()
+        exact = (shadow_exact_refine(
+            context, coarse, shadow_2d_config,
+            legacy_tca_seconds=legacy_tca)
+            if coarse.passed else None)
+        result = Shadow2DResult(coarse=coarse, exact=exact)
+        writer = shadow_2d_diagnostics
+        if writer is not None:
+            writer.counters["screened"] += 1
+            if coarse.passed:
+                writer.counters["passed"] += 1
+            else:
+                writer.counters["coarse_rejected"] += 1
+            if exact is not None:
+                counter = "exact_success" if exact.succeeded else "exact_failure"
+                writer.counters[counter] += 1
+            record = shadow_comparison_record(
+                context, result, legacy_prediction_base_utc, legacy_result,
+                shadow_2d_config.refinement_target_deg,
+                legacy_prediction_base_utc)
+            if record["shadow_only"]:
+                writer.counters["shadow_only"] += 1
+            record["runtime_counters"] = dict(writer.counters)
+            writer.record(record)
+        return result
+    except Exception:
+        return None
+
+
+def withdraw_shadow_2d(icao, callsign, now_utc, reason):
+    writer = shadow_2d_diagnostics
+    if writer is None:
+        return
+    for body in ("SUN", "MOON"):
+        try:
+            writer.withdraw(icao, callsign, body, now_utc, reason)
+        except Exception:
+            pass
+
+
 def apply_vertical_prediction_to_transit_result(
         icao, celestial_body, transit_result, current_altitude_m, now_utc,
         observer_position=None):
@@ -2348,6 +2505,8 @@ def clean_dict():
     current_time = clock.now_utc()
     to_delete = [icao for icao, entry in plane_dict.items() if (current_time - entry[0]).total_seconds() > MAX_AGE_SECONDS]
     for icao in to_delete:
+        withdraw_shadow_2d(
+            icao, plane_dict[icao][1], current_time, "AIRCRAFT_EXPIRED")
         cancel_pending_transit_notification(icao)
         try:
             dashboard_runtime.withdraw_aircraft(icao, current_time)
@@ -3912,6 +4071,21 @@ def process_line(line, port):
             effective_motion_state(icao, motion_now), motion_now)
         aircraft_motion_freshness_status[icao] = motion_freshness
 
+    shadow_prepared = {}
+    shadow_track = None
+    shadow_completed = False
+    shadow_prediction_base_utc = None
+    if (shadow_2d_config.enabled and observer_prediction_available
+            and mtype in ["3", "4"] and motion_freshness is not None
+            and motion_freshness.status != MotionFreshnessStatus.STALE
+            and icao in plane_dict
+            and all(is_float_try(plane_dict[icao][index])
+                    for index in (2, 3, 4, 11, 14))
+            and float(plane_dict[icao][14]) > 0):
+        shadow_prediction_base_utc = clock.now_utc()
+        shadow_track = effective_track_parameter(
+            icao, plane_dict[icao][11], shadow_prediction_base_utc)
+
     if (observer_prediction_available and mtype in ["3", "4"] and (
             icao in plane_dict and plane_dict[icao][2]
             and plane_dict[icao][11] and is_float_try(plane_dict[icao][4]))):
@@ -3958,6 +4132,8 @@ def process_line(line, port):
         if distance > alert_distance and plane_dict[icao][8] == "ENTERING":
             plane_dict[icao][8] = "LEAVING"
         if motion_freshness.status == MotionFreshnessStatus.STALE:
+            withdraw_shadow_2d(
+                icao, flight, clock.now_utc(), "MOTION_STALE")
             cancel_pending_transit_notification(icao)
             try:
                 dashboard_runtime.withdraw_aircraft(icao, clock.now_utc())
@@ -4000,6 +4176,17 @@ def process_line(line, port):
         tst_int2 = apply_vertical_prediction_to_transit_result(
             icao, "sun", tst_int2, elevation, prediction_now,
             observer_position)
+        if shadow_track is not None and is_float_try(shadow_track.value):
+            for shadow_body in ("moon", "sun"):
+                shadow_prepared[shadow_body] = prepare_shadow_2d(
+                    icao, flight, shadow_body, observer_context,
+                    shadow_track, velocity, elevation,
+                    shadow_prediction_base_utc)
+        complete_shadow_2d(
+            shadow_prepared.pop("moon", None), tst_int1, prediction_now)
+        complete_shadow_2d(
+            shadow_prepared.pop("sun", None), tst_int2, prediction_now)
+        shadow_completed = True
         if tst_int1:
             alt_a = round(tst_int1[3], 2)
             dst_h2x = round(tst_int1[4], 2)
@@ -4088,6 +4275,17 @@ def process_line(line, port):
             else:
                 expire_transit_prediction_after_grace(
                     icao, plane_dict[icao], "sun", 18, prediction_now)
+
+    if (not shadow_completed and shadow_prediction_base_utc is not None
+            and shadow_track is not None and is_float_try(shadow_track.value)):
+        for shadow_body in ("moon", "sun"):
+            shadow_prepared[shadow_body] = prepare_shadow_2d(
+                icao, plane_dict[icao][1], shadow_body, observer_context,
+                shadow_track, plane_dict[icao][14], plane_dict[icao][4],
+                shadow_prediction_base_utc)
+    for pending_shadow in shadow_prepared.values():
+        complete_shadow_2d(pending_shadow, None,
+                           shadow_prediction_base_utc or clock.now_utc())
     sun_alt, sun_az, moon_alt, moon_az = tabela_for_observer(
         observer_position)
     clean_dict()

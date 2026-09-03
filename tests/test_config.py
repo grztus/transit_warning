@@ -68,6 +68,12 @@ class InstallationConfigTests(unittest.TestCase):
         self.assertFalse(result.geometric_altitude_selection_enabled)
         self.assertEqual(result.fleet_geoid_pgm_path, "")
         self.assertFalse(result.mlat_beast_enabled)
+        self.assertFalse(result.shadow_2d_enabled)
+        self.assertEqual(900.0, result.shadow_2d_horizon_seconds)
+        self.assertEqual(60.0, result.shadow_2d_segment_seconds)
+        self.assertEqual(15.0, result.shadow_2d_local_segment_seconds)
+        self.assertEqual(0.052, result.shadow_2d_safety_margin_deg)
+        self.assertEqual(7.0, result.shadow_2d_refinement_target_deg)
         self.assertEqual(result.mlat_beast_host, result.mlat_host)
         self.assertEqual(result.mlat_beast_port, 30105)
         self.assertEqual("STATIC", result.observer_mode)
@@ -155,6 +161,29 @@ class InstallationConfigTests(unittest.TestCase):
 
         self.assertEqual(result.raw_adsb_host, "receiver.example")
         self.assertEqual(result.raw_adsb_port, 32002)
+
+    def test_accepts_and_validates_shadow_2d_configuration(self):
+        result = self.load({
+            **REQUIRED,
+            "SHADOW_2D_ENABLED": "true",
+            "SHADOW_2D_HORIZON_SECONDS": "600",
+            "SHADOW_2D_SEGMENT_SECONDS": "45",
+            "SHADOW_2D_LOCAL_SEGMENT_SECONDS": "10",
+            "SHADOW_2D_SAFETY_MARGIN_DEG": "0.075",
+            "SHADOW_2D_REFINEMENT_TARGET_DEG": "8",
+        })
+        self.assertTrue(result.shadow_2d_enabled)
+        self.assertEqual(600.0, result.shadow_2d_horizon_seconds)
+        self.assertEqual(45.0, result.shadow_2d_segment_seconds)
+        self.assertEqual(10.0, result.shadow_2d_local_segment_seconds)
+        self.assertEqual(0.075, result.shadow_2d_safety_margin_deg)
+        self.assertEqual(8.0, result.shadow_2d_refinement_target_deg)
+        with self.assertRaisesRegex(ConfigurationError, "must not exceed"):
+            self.load({**REQUIRED, "SHADOW_2D_HORIZON_SECONDS": "60",
+                       "SHADOW_2D_SEGMENT_SECONDS": "120"})
+        with self.assertRaisesRegex(ConfigurationError, "must not exceed"):
+            self.load({**REQUIRED, "SHADOW_2D_SEGMENT_SECONDS": "30",
+                       "SHADOW_2D_LOCAL_SEGMENT_SECONDS": "60"})
 
     def test_accepts_optional_fleet_geometric_altitude_configuration(self):
         result = self.load({
