@@ -22,23 +22,49 @@ configuration default remains LEGACY for compatibility.
 
 # Next implementation
 
-First inspect the existing recorder architecture before proposing changes.
-Current Candidate Auto-Recorder requirements are:
+The architecture audit is complete. Candidate Auto-Recorder design has two
+distinct identities/layers:
 
-- authoritative TRUE_2D trigger;
-- likely gate near SEP <= 2 degrees and T0 <= 5 minutes, but thresholds must be
-  configurable and confirmed against current config/constants;
-- approximately 60 seconds of pre-buffer and 180 seconds after T0;
-- record only the relevant candidate ICAO;
-- include SBS plus RAW/TC19/TC31 and MLAT data required for reconstruction;
-- one private forensic bundle per stable encounter identity;
-- when full recording is active, avoid duplicate capture and create a small
-  marker/index referencing the full session instead;
-- retain the frozen observer context inside the private forensic bundle,
+1. Physical stream capture is per ICAO:
+   - SBS / RAW / MLAT data for one aircraft must be physically captured only once.
+   - Multiple candidate encounters for the same ICAO share that physical capture
+     rather than creating duplicate stream files/writers.
+   - Physical capture remains active until the latest required end time of all
+     encounters currently using it:
+     `capture_until = max(required_end_time for active encounters)`.
+   - If another encounter extends beyond the current physical capture end,
+     extend `capture_until` rather than opening a duplicate stream capture.
+
+2. Forensic event identity remains per authoritative encounter:
+   `(observer epoch, ICAO, celestial body, encounter generation)`.
+   - Every authoritative encounter crossing the Candidate Recorder trigger gets
+     its own forensic encounter metadata/manifest.
+   - A later authoritative WITHDRAWN must NOT cancel the forensic capture window
+     once triggered; the encounter outcome is recorded as WITHDRAWN, PASSED, or
+     another final lifecycle outcome (supersedes any early-exit suggestion).
+   - A new encounter generation for the same ICAO is a new candidate even if it
+     appears seconds or minutes after the previous encounter; there must be no
+     cooldown that could suppress a legitimate new encounter.
+   - Concurrent or overlapping SUN/MOON encounters for the same ICAO are also
+     distinct forensic encounters sharing the single physical ICAO capture.
+
+Window semantics:
+- Candidate trigger is currently expected around T0 <= 300 s and SEP <= 2 deg,
+  configurable and confirmed against config/constants.
+- Each triggered encounter requires data beginning from approximately 60 s
+  before its trigger time.
+- Required end time is approximately authoritative T0 + 180 s.
+- If triggered with T0 3 minutes away, the resulting forensic coverage is
+  approximately 7 minutes including the 60 s pre-buffer.
+
+Operational & privacy constraints:
+- FULL recorder still has priority: when full recording is active, avoid
+  duplicate broad capture and create a small marker/index referencing the full
+  session instead.
+- Retain the frozen observer context inside the private forensic bundle,
   including MOBILE coordinates, but never expose it through normal logs,
-  dashboard, Telegram, history, snapshots, or public CSV;
-- do not implement until stream ownership, filtering, session format, and
-  full-recorder detection have been audited.
+  dashboard, Telegram, history, snapshots, or public CSV.
+- Do not yet implement; follow phased plan when instructed.
 
 # Constraints for the next agent
 

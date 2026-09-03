@@ -70,8 +70,27 @@ authoritative if this document becomes stale.
   connections. Manifests drive verified `streams.zip` membership.
 - `streams.zip` is the canonical completed archive. Failed finalization
   preserves loose inputs.
-- Candidate Auto-Recorder is not implemented. It is planned to capture only
-  relevant candidate ICAO data with pre/post buffering.
+- Candidate Auto-Recorder is not implemented. It is planned with two
+  distinct layers:
+  - Physical stream capture is per ICAO: SBS, RAW, and MLAT data for an aircraft
+    is physically captured only once. Multiple candidate encounters for the
+    same ICAO share that physical capture rather than creating duplicate stream
+    files/writers. Capture remains active until the latest required end time:
+    `capture_until = max(required_end_time for active encounters)`.
+  - Forensic event identity is per authoritative encounter: `(observer_epoch,
+    icao, body, encounter_generation)`. Every encounter crossing the trigger
+    gets its own forensic metadata/manifest. A later authoritative WITHDRAWN
+    does not cancel or abort the forensic capture window once triggered; the
+    outcome is recorded in metadata (e.g. WITHDRAWN, PASSED). New generations
+    for the same ICAO are new candidates without cooldown suppression, and
+    overlapping SUN/MOON encounters remain distinct forensic encounters sharing
+    the single physical ICAO capture.
+- Candidate window semantics: trigger expected near T0 <= 300 s and SEP <= 2
+  deg (configurable). Coverage requires ~60 s pre-buffer before trigger and
+  extends to authoritative T0 + 180 s (e.g. ~7 minutes total coverage if
+  triggered 3 minutes before T0). If another encounter extends beyond the
+  current physical capture end, `capture_until` is extended rather than opening
+  a duplicate capture.
 - The full recorder has priority. A future candidate recorder must avoid
   duplicate raw capture while full recording is active.
 - A private forensic candidate bundle may retain its frozen observer context,
@@ -99,7 +118,6 @@ authoritative if this document becomes stale.
 
 ## Planned next work
 
-The next planned feature is Candidate Auto-Recorder. Before implementation,
-audit the current recorder data flow, stream ownership, filtering feasibility,
-session format, and reliable detection of an active full recorder. Do not start
-from assumptions in this document.
+The next planned feature is Candidate Auto-Recorder. The architectural audit
+and the two-layer capture/forensic decision are complete. Next is phased
+implementation per the agreed architecture.
