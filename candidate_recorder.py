@@ -18,6 +18,11 @@ import time
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
+from authoritative_transit import (
+    AuthoritativeTransition,
+    AuthoritativeTransitionKind,
+    PredictionGeometry,
+)
 from beast_intent import ESCAPE, BeastFrame, BeastFrameParser, modes_crc
 from raw_adsb_track import extract_modes_hex
 
@@ -31,6 +36,225 @@ class StreamType(str, Enum):
     MLAT_SBS = "mlat_sbs"
     RAW_ADSB = "raw_adsb"
     MLAT_BEAST = "mlat_beast"
+
+
+class CandidateEncounterOutcome(str, Enum):
+    """Forensic outcome retained independently from physical capture state."""
+
+    ACTIVE = "ACTIVE"
+    WITHDRAWN = "WITHDRAWN"
+    COMPLETED = "COMPLETED"
+
+
+@dataclass(frozen=True)
+class CandidateEncounterState:
+    """One triggered authoritative encounter and its immutable window state."""
+
+    encounter_id: str
+    observer_epoch: int
+    icao: str
+    body: str
+    encounter_generation: int
+    triggered_at_utc: datetime
+    prebuffer_start_utc: datetime
+    required_end_time_utc: datetime
+    trigger_prediction: object
+    latest_prediction: object
+    outcome: CandidateEncounterOutcome
+    last_update_utc: datetime
+    completed_at_utc: datetime | None = None
+
+    @property
+    def unfinished(self) -> bool:
+        return self.completed_at_utc is None
+
+
+@dataclass(frozen=True)
+class CandidateIcaoCaptureState:
+    """Conceptual shared physical coverage for all unfinished ICAO encounters."""
+
+    icao: str
+    prebuffer_start_utc: datetime
+    capture_until_utc: datetime
+    encounter_ids: tuple[str, ...]
+
+
+class CandidateEncounterManager:
+    """Dormant Phase 2 authoritative gating and in-memory capture planning.
+
+    This manager performs no stream reads and no filesystem I/O.  It consumes
+    the stable encounter identity created by ``AuthoritativeTransitLifecycle``.
+    Physical capture remains a per-ICAO plan while forensic state remains one
+    record per authoritative encounter.
+    """
+
+    DEFAULT_TRIGGER_HORIZON_SECONDS = 300.0
+    DEFAULT_TRIGGER_SEPARATION_DEG = 2.0
+    DEFAULT_POST_T0_SECONDS = 180.0
+
+    def __init__(self, pre_buffer=None,
+                 trigger_horizon_seconds=DEFAULT_TRIGGER_HORIZON_SECONDS,
+                 trigger_separation_deg=DEFAULT_TRIGGER_SEPARATION_DEG,
+                 post_t0_seconds=DEFAULT_POST_T0_SECONDS):
+        self.pre_buffer = pre_buffer
+        self.trigger_horizon_seconds = float(trigger_horizon_seconds)
+        self.trigger_separation_deg = float(trigger_separation_deg)
+        self.post_t0_seconds = float(post_t0_seconds)
+        if self.trigger_horizon_seconds <= 0:
+            raise ValueError("trigger horizon must be positive")
+        if self.trigger_separation_deg < 0:
+            raise ValueError("trigger separation must be non-negative")
+        if self.post_t0_seconds < 0:
+            raise ValueError("post-T0 duration must be non-negative")
+        self._encounters: dict[str, CandidateEncounterState] = {}
+        self._captures: dict[str, CandidateIcaoCaptureState] = {}
+        self._lock = threading.RLock()
+        self.last_error: str | None = None
+
+    def process_transition(self, transition, now_utc):
+        """Consume one authoritative transition without propagating failures."""
+        try:
+            now = validate_utc_datetime(now_utc)
+            if not isinstance(transition, AuthoritativeTransition):
+                return None
+            prediction = transition.prediction
+            encounter_id = (str(prediction.encounter_id)
+                            if prediction is not None else None)
+            with self._lock:
+                existing = self._encounters.get(encounter_id)
+                if transition.kind == AuthoritativeTransitionKind.WITHDRAWN:
+                    if existing is None:
+                        return None
+                    updated = self._replace_encounter(
+                        existing,
+                        latest_prediction=prediction,
+                        outcome=CandidateEncounterOutcome.WITHDRAWN,
+                        last_update_utc=now)
+                    self._encounters[encounter_id] = updated
+                    self._rebuild_capture_locked(updated.icao)
+                    return updated
+                if transition.kind not in (
+                        AuthoritativeTransitionKind.OPENED,
+                        AuthoritativeTransitionKind.UPDATED):
+                    return existing
+                if prediction is None or not self._is_true_2d_interior(prediction):
+                    return existing
+                if existing is None:
+                    if not self._passes_trigger_gate(prediction, now):
+                        return None
+                    prebuffer_seconds = (
+                        self.pre_buffer.buffer_duration_seconds
+                        if self.pre_buffer is not None
+                        else CandidatePreBuffer.DEFAULT_BUFFER_DURATION_SECONDS)
+                    required_end = prediction.predicted_transit_utc + timedelta(
+                        seconds=self.post_t0_seconds)
+                    existing = CandidateEncounterState(
+                        encounter_id=encounter_id,
+                        observer_epoch=int(prediction.observer_epoch),
+                        icao=str(prediction.icao).upper(),
+                        body=str(prediction.body).upper(),
+                        encounter_generation=int(
+                            prediction.encounter_generation),
+                        triggered_at_utc=now,
+                        prebuffer_start_utc=now - timedelta(
+                            seconds=prebuffer_seconds),
+                        required_end_time_utc=required_end,
+                        trigger_prediction=prediction,
+                        latest_prediction=prediction,
+                        outcome=CandidateEncounterOutcome.ACTIVE,
+                        last_update_utc=now)
+                elif existing.unfinished:
+                    proposed_end = prediction.predicted_transit_utc + timedelta(
+                        seconds=self.post_t0_seconds)
+                    existing = self._replace_encounter(
+                        existing,
+                        required_end_time_utc=max(
+                            existing.required_end_time_utc, proposed_end),
+                        latest_prediction=prediction,
+                        last_update_utc=now)
+                self._encounters[encounter_id] = existing
+                self._rebuild_capture_locked(existing.icao)
+                return existing
+        except Exception as error:
+            self.last_error = str(error)
+            return None
+
+    def complete_due(self, now_utc):
+        """Finish elapsed forensic windows and update shared capture plans."""
+        try:
+            now = validate_utc_datetime(now_utc)
+            completed = []
+            affected_icaos = set()
+            with self._lock:
+                for encounter_id, state in tuple(self._encounters.items()):
+                    if (state.unfinished
+                            and now >= state.required_end_time_utc):
+                        outcome = (state.outcome
+                                   if state.outcome == CandidateEncounterOutcome.WITHDRAWN
+                                   else CandidateEncounterOutcome.COMPLETED)
+                        state = self._replace_encounter(
+                            state, outcome=outcome, completed_at_utc=now,
+                            last_update_utc=now)
+                        self._encounters[encounter_id] = state
+                        completed.append(state)
+                        affected_icaos.add(state.icao)
+                for icao in affected_icaos:
+                    self._rebuild_capture_locked(icao)
+            return tuple(completed)
+        except Exception as error:
+            self.last_error = str(error)
+            return ()
+
+    def encounter(self, encounter_id):
+        with self._lock:
+            return self._encounters.get(str(encounter_id))
+
+    def encounters_for_icao(self, icao):
+        normalized = normalize_icao(icao)
+        if normalized is None:
+            return ()
+        with self._lock:
+            return tuple(state for state in self._encounters.values()
+                         if state.icao == normalized)
+
+    def capture_state(self, icao):
+        normalized = normalize_icao(icao)
+        if normalized is None:
+            return None
+        with self._lock:
+            return self._captures.get(normalized)
+
+    def _passes_trigger_gate(self, prediction, now):
+        seconds = (prediction.predicted_transit_utc - now).total_seconds()
+        separation = float(prediction.separation_deg)
+        return (0.0 < seconds <= self.trigger_horizon_seconds
+                and 0.0 <= separation <= self.trigger_separation_deg)
+
+    @staticmethod
+    def _is_true_2d_interior(prediction):
+        return (str(prediction.model).upper() == PredictionGeometry.TRUE_2D.value
+                and str(prediction.boundary_status).upper() == "INTERIOR")
+
+    @staticmethod
+    def _replace_encounter(state, **changes):
+        values = dict(state.__dict__)
+        values.update(changes)
+        return CandidateEncounterState(**values)
+
+    def _rebuild_capture_locked(self, icao):
+        unfinished = [state for state in self._encounters.values()
+                      if state.icao == icao and state.unfinished]
+        if not unfinished:
+            self._captures.pop(icao, None)
+            return
+        self._captures[icao] = CandidateIcaoCaptureState(
+            icao=icao,
+            prebuffer_start_utc=min(
+                state.prebuffer_start_utc for state in unfinished),
+            capture_until_utc=max(
+                state.required_end_time_utc for state in unfinished),
+            encounter_ids=tuple(sorted(
+                state.encounter_id for state in unfinished)))
 
 
 @dataclass(frozen=True)
