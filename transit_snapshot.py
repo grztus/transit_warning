@@ -12,6 +12,21 @@ import threading
 import uuid
 
 
+def authoritative_snapshot_v3_source(prediction):
+    """Expose exact T0 state without consulting legacy or mutable live state.
+
+    This is an adapter contract for a later consumer-migration checkpoint; it
+    intentionally does not change snapshot triggering or schema output.
+    """
+    return {
+        "predicted_transit_utc": prediction.predicted_transit_utc,
+        "aircraft_latitude_deg": prediction.aircraft_latitude_deg,
+        "aircraft_longitude_deg": prediction.aircraft_longitude_deg,
+        "aircraft_altitude_m": prediction.aircraft_altitude_m,
+        "vertical_state": prediction.frozen_vertical_state,
+    }
+
+
 UTC = datetime.timezone.utc
 SCHEMA_VERSION = 3
 HISTORY_SECONDS = 5.0

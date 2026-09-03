@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 
 import transit_warning as transit
 from transit_snapshot import (
+    authoritative_snapshot_v3_source,
     BUFFER_MAXLEN,
     PREDICTION_UPDATE_MAXLEN,
     RECENT_EVENT_TTL_SECONDS,
@@ -41,6 +42,25 @@ def observation(offset, icao="ABC123", lat=51.0, optional=True):
         "parameter_sources": {"position": "adsb"},
         "source_timestamps_utc": {"position": timestamp},
     }
+
+
+class AuthoritativeSnapshotSourceTests(unittest.TestCase):
+    def test_true_2d_adapter_uses_only_authoritative_exact_state(self):
+        vertical = SimpleNamespace(marker="exact-t0-vertical")
+        prediction = SimpleNamespace(
+            predicted_transit_utc=BASE + datetime.timedelta(seconds=42.5),
+            aircraft_latitude_deg=50.1,
+            aircraft_longitude_deg=19.2,
+            aircraft_altitude_m=7654.3,
+            frozen_vertical_state=vertical,
+        )
+        source = authoritative_snapshot_v3_source(prediction)
+        self.assertEqual(prediction.predicted_transit_utc,
+                         source["predicted_transit_utc"])
+        self.assertEqual(50.1, source["aircraft_latitude_deg"])
+        self.assertEqual(19.2, source["aircraft_longitude_deg"])
+        self.assertEqual(7654.3, source["aircraft_altitude_m"])
+        self.assertIs(vertical, source["vertical_state"])
 
 
 def prediction(separation=0.4, icao="ABC123", body="SUN",
@@ -433,7 +453,8 @@ class TransitSnapshotIntegrationFailOpenTests(unittest.TestCase):
                 body_angular_diameter_arcsec=1895.5))
         try:
             transit.capture_transit_prediction(
-                "ABC123", "TEST", "sun", result, BASE, solver_input)
+                "ABC123", "TEST", "sun", result, BASE, solver_input,
+                transit.ObserverPosition(10.0, 20.0, 100.0))
             captured = manager.consider_prediction.call_args.args[0]
         finally:
             transit.sun_predicted_transit_utc.pop("ABC123", None)

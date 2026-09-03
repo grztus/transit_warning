@@ -4,6 +4,7 @@ import unittest
 
 from authoritative_transit import (
     AuthoritativeTransitLifecycle,
+    AuthoritativeTransitionKind,
     PredictionGeometry,
 )
 from observer_position import ObserverContext, ObserverPosition
@@ -31,6 +32,8 @@ def result(boundary="INTERIOR", seconds=120.0, separation=0.1,
         body_radius_deg=0.25, aircraft_azimuth_deg=120.1,
         aircraft_altitude_deg=10.2, body_azimuth_deg=120.0,
         body_altitude_deg=10.1, aircraft_altitude_m=9000.0,
+        aircraft_latitude_deg=11.1, aircraft_longitude_deg=22.2,
+        vertical_state=SimpleNamespace(marker="frozen"),
         slant_range_km=40.0)
     return SimpleNamespace(exact=exact)
 
@@ -83,6 +86,51 @@ class AuthoritativeTransitLifecycleTests(unittest.TestCase):
                             changed.predicted_transit_utc)
         self.assertEqual(0.2, changed.separation_deg)
 
+    def test_explicit_open_update_hold_withdraw_and_none_transitions(self):
+        manager = self.manager()
+        opened = manager.consider_transition(context(), result(), BASE)
+        self.assertEqual(AuthoritativeTransitionKind.OPENED, opened.kind)
+        updated = manager.consider_transition(
+            context(), result(seconds=121.0),
+            BASE + datetime.timedelta(seconds=1))
+        self.assertEqual(AuthoritativeTransitionKind.UPDATED, updated.kind)
+        held = manager.consider_transition(
+            context(), result(succeeded=False),
+            BASE + datetime.timedelta(seconds=3.999))
+        self.assertEqual(AuthoritativeTransitionKind.HELD, held.kind)
+        withdrawn = manager.consider_transition(
+            context(), result(succeeded=False),
+            BASE + datetime.timedelta(seconds=4.0))
+        self.assertEqual(AuthoritativeTransitionKind.WITHDRAWN,
+                         withdrawn.kind)
+        self.assertEqual(updated.prediction.encounter_id,
+                         withdrawn.prediction.encounter_id)
+        missing = manager.consider_transition(
+            context(), result(succeeded=False),
+            BASE + datetime.timedelta(seconds=5))
+        self.assertEqual(AuthoritativeTransitionKind.NONE, missing.kind)
+
+    def test_held_does_not_refresh_grace(self):
+        manager = self.manager()
+        manager.consider_transition(context(), result(), BASE)
+        for seconds in (1.0, 2.0, 2.999):
+            transition = manager.consider_transition(
+                context(), result(succeeded=False),
+                BASE + datetime.timedelta(seconds=seconds))
+            self.assertEqual(AuthoritativeTransitionKind.HELD,
+                             transition.kind)
+        transition = manager.consider_transition(
+            context(), result(succeeded=False),
+            BASE + datetime.timedelta(seconds=3.0))
+        self.assertEqual(AuthoritativeTransitionKind.WITHDRAWN,
+                         transition.kind)
+
+    def test_authoritative_prediction_carries_exact_frozen_state(self):
+        prediction = self.manager().consider(context(), result(), BASE)
+        self.assertEqual(11.1, prediction.aircraft_latitude_deg)
+        self.assertEqual(22.2, prediction.aircraft_longitude_deg)
+        self.assertEqual("frozen", prediction.frozen_vertical_state.marker)
+
     def test_exact_failure_uses_three_second_grace(self):
         manager = self.manager()
         first = manager.consider(context(), result(), BASE)
@@ -99,7 +147,9 @@ class AuthoritativeTransitLifecycleTests(unittest.TestCase):
     def test_observer_invalidation_discards_active_state(self):
         manager = self.manager()
         manager.consider(context(), result(), BASE)
-        manager.invalidate()
+        transitions = manager.invalidate_transitions()
+        self.assertEqual(AuthoritativeTransitionKind.WITHDRAWN,
+                         transitions[0].kind)
         self.assertIsNone(manager.active_prediction(4, "ABC123", "MOON"))
 
     def test_future_interior_after_closure_creates_new_generation(self):
@@ -117,6 +167,8 @@ class AuthoritativeTransitLifecycleTests(unittest.TestCase):
         self.assertFalse(manager.enabled)
         self.assertIsNone(manager.consider(context(), result(), BASE))
         self.assertIsNone(manager.active_prediction(4, "ABC123", "MOON"))
+        self.assertIsNone(manager.invalidate())
+        self.assertIsNone(manager.discard_aircraft("ABC123"))
 
 
 if __name__ == "__main__":

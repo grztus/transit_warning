@@ -184,6 +184,57 @@ class Shadow2DPredictionTests(unittest.TestCase):
             context(vertical_rate=3000.0, intent=intent), 120.0)
         self.assertTrue(sample.intent_clamped)
 
+    def test_exact_result_freezes_winning_position_and_vertical_decision(self):
+        item = context(vertical_rate=1200.0)
+        exact = run_shadow_pipeline(item, self.config).exact
+        winning = evaluate_shadow_geometry(item, exact.tca_seconds)
+        self.assertAlmostEqual(winning.aircraft_latitude_deg,
+                               exact.aircraft_latitude_deg)
+        self.assertAlmostEqual(winning.aircraft_longitude_deg,
+                               exact.aircraft_longitude_deg)
+        self.assertAlmostEqual(winning.aircraft_altitude_m,
+                               exact.aircraft_altitude_m)
+        self.assertIs(winning.vertical_state.prediction.mode,
+                      exact.vertical_state.prediction.mode)
+        self.assertAlmostEqual(
+            min(exact.tca_seconds, 120.0),
+            exact.vertical_state.prediction.applied_seconds)
+        self.assertAlmostEqual(exact.tca_seconds,
+                               exact.vertical_state.tca_seconds)
+        self.assertEqual("OWN_GNSS_GEOMETRIC",
+                         exact.vertical_state.altitude_source)
+        self.assertAlmostEqual(exact.aircraft_altitude_m,
+                               exact.vertical_state.final_altitude_m)
+        with self.assertRaises(TypeError):
+            exact.vertical_state.intent_details["intent_clamped"] = True
+
+    def test_exact_result_preserves_tc29_clamp_provenance(self):
+        intent = VerticalIntentState(
+            selected_altitude=IntentParameter(33000.0, BASE, "MCP/FCU"),
+            nav_qnh=IntentParameter(1013.25, BASE, "TC29"))
+        exact = run_shadow_pipeline(
+            context(vertical_rate=3000.0, intent=intent), self.config).exact
+        details = exact.vertical_state.intent_details
+        self.assertTrue(details["intent_clamped"])
+        self.assertEqual("TC29_CLAMP_APPLIED", details["intent_reason"])
+        self.assertEqual("MCP/FCU", details["selected_altitude_source"])
+        self.assertAlmostEqual(details["predicted_altitude_after_clamp_m"],
+                               exact.vertical_state.prediction.predicted_altitude_m)
+        self.assertAlmostEqual(
+            exact.vertical_state.prediction.predicted_altitude_m + 25.0,
+            exact.aircraft_altitude_m)
+
+    def test_later_live_state_mutation_cannot_change_exact_state(self):
+        item = context(vertical_rate=1200.0)
+        exact = run_shadow_pipeline(item, self.config).exact
+        retained_altitude = exact.aircraft_altitude_m
+        retained_rate = exact.vertical_state.prediction.last_vertical_rate_fpm
+        object.__setattr__(item, "current_altitude_m", 123.0)
+        object.__setattr__(item, "vertical_motion", None)
+        self.assertEqual(retained_altitude, exact.aircraft_altitude_m)
+        self.assertEqual(retained_rate,
+                         exact.vertical_state.prediction.last_vertical_rate_fpm)
+
     def test_start_and_end_boundaries(self):
         start = run_shadow_pipeline(context(SyntheticGeometry(center=-10)),
                                     self.config)

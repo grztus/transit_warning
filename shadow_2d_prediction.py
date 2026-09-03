@@ -7,6 +7,7 @@ solver.  Callers provide frozen production motion inputs and geometry resolvers.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
 import datetime
 import json
 import math
@@ -77,6 +78,24 @@ class ShadowEncounterContext:
 
 
 @dataclass(frozen=True)
+class FrozenExactVerticalState:
+    """Complete immutable vertical input/decision used by one exact sample."""
+
+    prediction_base_utc: datetime.datetime
+    tca_seconds: float
+    motion_state: VerticalMotionState | None
+    intent_state: VerticalIntentState | None
+    policy: VerticalPredictionPolicy
+    application_qnh_hpa: float
+    prediction_before_clamp: object
+    prediction: object
+    intent_details: object
+    altitude_source: str
+    geometric_altitude_correction_m: float
+    final_altitude_m: float
+
+
+@dataclass(frozen=True)
 class ShadowGeometry:
     dt_seconds: float
     separation_deg: float
@@ -90,8 +109,11 @@ class ShadowGeometry:
     body_radius_deg: float
     slant_range_km: float
     aircraft_altitude_m: float
+    aircraft_latitude_deg: float
+    aircraft_longitude_deg: float
     vertical_mode: str
     intent_clamped: bool
+    vertical_state: FrozenExactVerticalState
 
 
 @dataclass(frozen=True)
@@ -123,7 +145,10 @@ class Exact2DResult:
     body_altitude_deg: float | None
     slant_range_km: float | None
     aircraft_altitude_m: float | None
+    aircraft_latitude_deg: float | None
+    aircraft_longitude_deg: float | None
     altitude_source: str | None
+    vertical_state: FrozenExactVerticalState | None
     evaluation_count: int
     duration_ms: float
     boundary_status: str | None
@@ -182,8 +207,26 @@ def evaluate_shadow_geometry(context, dt_seconds):
         context.current_altitude_m, context.vertical_motion,
         context.vertical_intent, context.prediction_base_utc, dt_seconds,
         context.qnh_hpa, context.vertical_policy)
+    # The winning optimizer sample must remain self-contained.  In particular,
+    # do not let later aircraft/intent updates alter the decision retained for
+    # an exact result.
     altitude_m = (vertical.prediction.predicted_altitude_m
                   + context.geometric_altitude_correction_m)
+    frozen_vertical = FrozenExactVerticalState(
+        prediction_base_utc=context.prediction_base_utc,
+        tca_seconds=dt_seconds,
+        motion_state=context.vertical_motion,
+        intent_state=context.vertical_intent,
+        policy=context.vertical_policy,
+        application_qnh_hpa=float(context.qnh_hpa),
+        prediction_before_clamp=vertical.prediction_before_clamp,
+        prediction=vertical.prediction,
+        intent_details=MappingProxyType(dict(vertical.intent_details)),
+        altitude_source=str(context.altitude_source),
+        geometric_altitude_correction_m=float(
+            context.geometric_altitude_correction_m),
+        final_altitude_m=float(altitude_m),
+    )
     observer = context.observer_context.position
     aircraft = context.aircraft_los_resolver(observer, position, altitude_m)
     when_utc = context.prediction_base_utc + datetime.timedelta(
@@ -211,8 +254,11 @@ def evaluate_shadow_geometry(context, dt_seconds):
         body_radius_deg=body_radius,
         slant_range_km=float(aircraft.distance_km),
         aircraft_altitude_m=float(altitude_m),
+        aircraft_latitude_deg=float(position[0]),
+        aircraft_longitude_deg=float(position[1]),
         vertical_mode=vertical.prediction.mode.value,
         intent_clamped=bool(vertical.intent_details.get("intent_clamped")),
+        vertical_state=frozen_vertical,
     )
 
 
@@ -337,9 +383,16 @@ def exact_refine(context, coarse, config, legacy_tca_seconds=None,
     try:
         if not coarse.passed:
             return Exact2DResult(
-                False, None, None, None, None, None, None, None, None,
-                None, None, None, 0, 0.0, None, "NOT_RUN",
-                coarse.reason)
+                succeeded=False, tca_seconds=None, separation_deg=None,
+                body_radius_deg=None, separation_body_radii=None,
+                aircraft_azimuth_deg=None, aircraft_altitude_deg=None,
+                body_azimuth_deg=None, body_altitude_deg=None,
+                slant_range_km=None, aircraft_altitude_m=None,
+                aircraft_latitude_deg=None, aircraft_longitude_deg=None,
+                altitude_source=None, vertical_state=None,
+                evaluation_count=0, duration_ms=0.0,
+                boundary_status=None, solver_status="NOT_RUN",
+                reason=coarse.reason)
         brackets = {(float(coarse.best_segment_start_seconds),
                      float(coarse.best_segment_end_seconds))}
         ordered = sorted(coarse.samples, key=lambda item: item.dt_seconds)
@@ -378,20 +431,36 @@ def exact_refine(context, coarse, config, legacy_tca_seconds=None,
             boundary = "INTERIOR"
         radius = best.body_radius_deg
         return Exact2DResult(
-            True, best.dt_seconds, best.separation_deg, radius,
-            best.separation_deg / radius if radius > 0 else None,
-            best.aircraft_azimuth_deg, best.aircraft_altitude_deg,
-            best.body_azimuth_deg, best.body_altitude_deg,
-            best.slant_range_km, best.aircraft_altitude_m,
-            context.altitude_source, len(cache) - initial_count,
-            (time.perf_counter() - started) * 1000.0, boundary,
-            "SUCCESS", None)
+            succeeded=True, tca_seconds=best.dt_seconds,
+            separation_deg=best.separation_deg, body_radius_deg=radius,
+            separation_body_radii=(best.separation_deg / radius
+                                   if radius > 0 else None),
+            aircraft_azimuth_deg=best.aircraft_azimuth_deg,
+            aircraft_altitude_deg=best.aircraft_altitude_deg,
+            body_azimuth_deg=best.body_azimuth_deg,
+            body_altitude_deg=best.body_altitude_deg,
+            slant_range_km=best.slant_range_km,
+            aircraft_altitude_m=best.aircraft_altitude_m,
+            aircraft_latitude_deg=best.aircraft_latitude_deg,
+            aircraft_longitude_deg=best.aircraft_longitude_deg,
+            altitude_source=context.altitude_source,
+            vertical_state=best.vertical_state,
+            evaluation_count=len(cache) - initial_count,
+            duration_ms=(time.perf_counter() - started) * 1000.0,
+            boundary_status=boundary, solver_status="SUCCESS", reason=None)
     except Exception as error:
         return Exact2DResult(
-            False, None, None, None, None, None, None, None, None,
-            None, None, context.altitude_source, len(cache) - initial_count,
-            (time.perf_counter() - started) * 1000.0, None, "FAILED",
-            "EXACT_ERROR:{}".format(type(error).__name__))
+            succeeded=False, tca_seconds=None, separation_deg=None,
+            body_radius_deg=None, separation_body_radii=None,
+            aircraft_azimuth_deg=None, aircraft_altitude_deg=None,
+            body_azimuth_deg=None, body_altitude_deg=None,
+            slant_range_km=None, aircraft_altitude_m=None,
+            aircraft_latitude_deg=None, aircraft_longitude_deg=None,
+            altitude_source=context.altitude_source, vertical_state=None,
+            evaluation_count=len(cache) - initial_count,
+            duration_ms=(time.perf_counter() - started) * 1000.0,
+            boundary_status=None, solver_status="FAILED",
+            reason="EXACT_ERROR:{}".format(type(error).__name__))
 
 
 def run_shadow_pipeline(context, config, legacy_tca_seconds=None,
