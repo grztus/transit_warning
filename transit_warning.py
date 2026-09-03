@@ -133,6 +133,7 @@ from authoritative_transit import (
     AuthoritativeTransitLifecycle,
     AuthoritativeTransitionKind,
 )
+from candidate_recorder import CandidateEncounterManager, CandidatePreBuffer
 from live_dashboard import (
     DashboardCandidate,
     DisabledDashboard,
@@ -629,6 +630,85 @@ shadow_2d_config = Shadow2DConfig()
 shadow_2d_diagnostics = None
 authoritative_transit_lifecycle = AuthoritativeTransitLifecycle()
 authoritative_terminal_predictions = {}
+candidate_pre_buffer = None
+candidate_encounter_manager = None
+
+
+def initialize_candidate_recorder_observation():
+    """Create the diskless Candidate Recorder Phase 3A runtime state."""
+    global candidate_pre_buffer, candidate_encounter_manager
+    try:
+        candidate_pre_buffer = CandidatePreBuffer(clock=clock.now_utc)
+        candidate_encounter_manager = CandidateEncounterManager(
+            pre_buffer=candidate_pre_buffer)
+    except Exception:
+        candidate_pre_buffer = None
+        candidate_encounter_manager = None
+
+
+def observe_candidate_sbs_input(line, port, received_at_utc):
+    """Fail-open tee of one production SBS line into the in-memory buffer."""
+    try:
+        if candidate_pre_buffer is None:
+            return False
+        if port == adsb_port:
+            return candidate_pre_buffer.feed_adsb_sbs(line, received_at_utc)
+        if port == mlat_port:
+            return candidate_pre_buffer.feed_mlat_sbs(line, received_at_utc)
+    except Exception:
+        pass
+    return False
+
+
+def observe_candidate_raw_input(line, received_at_utc):
+    """Fail-open tee of one production RAW line into the in-memory buffer."""
+    try:
+        if candidate_pre_buffer is not None:
+            return candidate_pre_buffer.feed_raw_adsb(line, received_at_utc)
+    except Exception:
+        pass
+    return False
+
+
+def observe_candidate_mlat_beast_frame(frame, received_at_utc):
+    """Fail-open tee of one parsed production Beast frame into memory."""
+    try:
+        if candidate_pre_buffer is not None:
+            return candidate_pre_buffer.feed_mlat_beast_frame(
+                frame, received_at_utc)
+    except Exception:
+        pass
+    return False
+
+
+def observe_candidate_authoritative_transition(transition, now_utc):
+    """Forward an existing authoritative transition without affecting it."""
+    try:
+        if candidate_encounter_manager is not None:
+            return candidate_encounter_manager.process_transition(
+                transition, now_utc)
+    except Exception:
+        pass
+    return None
+
+
+def complete_candidate_observation_windows(now_utc):
+    """Advance diskless candidate windows; failures remain observational."""
+    try:
+        if candidate_encounter_manager is not None:
+            return candidate_encounter_manager.complete_due(now_utc)
+    except Exception:
+        pass
+    return ()
+
+
+def discard_authoritative_aircraft(icao, now_utc):
+    """Preserve lifecycle behavior while observing its withdrawal results."""
+    transitions = authoritative_transit_lifecycle.discard_aircraft_transitions(
+        icao)
+    for transition in transitions:
+        observe_candidate_authoritative_transition(transition, now_utc)
+    return transitions
 
 
 def apply_installation_config(configuration: InstallationConfig):
@@ -719,6 +799,7 @@ def apply_installation_config(configuration: InstallationConfig):
         authoritative_geometry,
         grace_seconds=TRANSIT_PREDICTION_GRACE_SECONDS,
         horizon_seconds=shadow_2d_config.horizon_seconds)
+    initialize_candidate_recorder_observation()
     fleet_geometric_altitude_estimator = None
     aircraft_los_geoid_provider = PgmGeoidProvider.discover(
         configuration.fleet_geoid_pgm_path)
@@ -2754,7 +2835,11 @@ def invalidate_observer_dependent_state(observer_context=None):
     geometric_altitude_selections.clear()
     transit_solver_diagnostics.clear()
     authoritative_terminal_predictions.clear()
-    authoritative_transit_lifecycle.invalidate()
+    transitions = authoritative_transit_lifecycle.invalidate_transitions()
+    invalidated_at_utc = clock.now_utc()
+    for transition in transitions:
+        observe_candidate_authoritative_transition(
+            transition, invalidated_at_utc)
     try:
         dashboard_runtime.invalidate_live()
     except Exception:
@@ -2769,6 +2854,7 @@ def invalidate_observer_dependent_state(observer_context=None):
 def consume_authoritative_transition(transition, context, entry,
                                      current_distance_km, now_utc):
     """Route one lifecycle transition without invoking legacy consumers."""
+    observe_candidate_authoritative_transition(transition, now_utc)
     if transition is None:
         return False
     kind = transition.kind
@@ -2866,7 +2952,7 @@ def clean_dict():
         geometric_altitude_selections.pop((icao, "sun"), None)
         geometric_altitude_selections.pop((icao, "moon"), None)
         drop_transit_snapshot_buffer(icao)
-        authoritative_transit_lifecycle.discard_aircraft(icao)
+        discard_authoritative_aircraft(icao, current_time)
         authoritative_terminal_predictions.pop((icao, "SUN"), None)
         authoritative_terminal_predictions.pop((icao, "MOON"), None)
 
@@ -3894,7 +3980,7 @@ def clean_transit_dict():
         geometric_altitude_selections.pop((icao, "sun"), None)
         geometric_altitude_selections.pop((icao, "moon"), None)
         drop_transit_snapshot_buffer(icao)
-        authoritative_transit_lifecycle.discard_aircraft(icao)
+        discard_authoritative_aircraft(icao, current_time)
         authoritative_terminal_predictions.pop((icao, "SUN"), None)
         authoritative_terminal_predictions.pop((icao, "MOON"), None)
 
@@ -4003,6 +4089,7 @@ def read_from_port(host, port, process_line, session_recorder=None):
                         session_recorder.record_line(port, line)
                     except Exception as error:
                         print("Session recorder error on port {}: {}".format(port, error))
+                observe_candidate_sbs_input(line, port, clock.now_utc())
                 process_line(line.strip(), port)
         except Exception as e:
             if stop_event.is_set():
@@ -4086,6 +4173,7 @@ def read_raw_adsb_track(host, port, session_recorder=None):
                         pass
                 raw_adsb_track_diagnostics.frames_received += 1
                 received_at_utc = clock.now_utc()
+                observe_candidate_raw_input(line, received_at_utc)
                 altitude_diagnostic = decode_raw_tc19_altitude(line)
                 version_diagnostic = decode_raw_tc31_version(line)
                 diagnostic = altitude_diagnostic or version_diagnostic
@@ -4151,6 +4239,8 @@ def read_mlat_beast_track(host, port, session_recorder=None):
                 for frame in parser.feed(chunk):
                     mlat_beast_track_diagnostics.frames_received += 1
                     received_at_utc = clock.now_utc()
+                    observe_candidate_mlat_beast_frame(
+                        frame, received_at_utc)
                     decoded = decode_mlat_beast_tc19(frame)
                     if session_recorder is not None:
                         try:
@@ -4486,7 +4576,7 @@ def process_line(line, port):
                 dashboard_runtime.withdraw_aircraft(icao, clock.now_utc())
             except Exception:
                 pass
-            authoritative_transit_lifecycle.discard_aircraft(icao)
+            discard_authoritative_aircraft(icao, clock.now_utc())
             authoritative_terminal_predictions.pop((icao, "SUN"), None)
             authoritative_terminal_predictions.pop((icao, "MOON"), None)
             sun_alt, sun_az, moon_alt, moon_az = tabela_for_observer(
@@ -4798,6 +4888,7 @@ def main():
             dashboard_now = clock.now_utc()
             dashboard_runtime.tick(dashboard_now)
             update_dashboard_body_positions(dashboard_now)
+            complete_candidate_observation_windows(dashboard_now)
             if daily_environment_recorder is not None:
                 daily_environment_recorder.rotate_if_needed(clock.now_utc())
             if session_recorder is not None:
