@@ -53,6 +53,8 @@ class CandidateRecorderRuntimeTests(unittest.TestCase):
     def setUp(self):
         self.old_buffer = transit.candidate_pre_buffer
         self.old_manager = transit.candidate_encounter_manager
+        self.old_store = transit.candidate_bundle_store
+        self.old_worker = transit.candidate_storage_worker
         self.old_adsb_port = transit.adsb_port
         self.old_mlat_port = transit.mlat_port
         self.old_stop = transit.stop_event.is_set()
@@ -61,12 +63,16 @@ class CandidateRecorderRuntimeTests(unittest.TestCase):
         self.manager = CandidateEncounterManager(self.buffer)
         transit.candidate_pre_buffer = self.buffer
         transit.candidate_encounter_manager = self.manager
+        transit.candidate_bundle_store = None
+        transit.candidate_storage_worker = None
         transit.adsb_port = 30003
         transit.mlat_port = 30106
 
     def tearDown(self):
         transit.candidate_pre_buffer = self.old_buffer
         transit.candidate_encounter_manager = self.old_manager
+        transit.candidate_bundle_store = self.old_store
+        transit.candidate_storage_worker = self.old_worker
         transit.adsb_port = self.old_adsb_port
         transit.mlat_port = self.old_mlat_port
         if self.old_stop:
@@ -215,15 +221,11 @@ class CandidateRecorderRuntimeTests(unittest.TestCase):
 
         self.assertEqual((), self.manager.encounters_for_icao("ABC123"))
 
-    def test_runtime_wiring_creates_no_disk_output(self):
+    def test_runtime_wiring_without_trigger_creates_no_disk_output(self):
         with tempfile.TemporaryDirectory() as directory:
             before = tuple(Path(directory).iterdir())
             transit.observe_candidate_sbs_input(SBS, 30003, NOW)
             transit.observe_candidate_raw_input(make_raw_df17() + "\n", NOW)
-            transit.observe_candidate_authoritative_transition(
-                AuthoritativeTransition(
-                    AuthoritativeTransitionKind.OPENED,
-                    prediction(seconds=60, separation=0.4)), NOW)
             transit.complete_candidate_observation_windows(NOW)
             after = tuple(Path(directory).iterdir())
 

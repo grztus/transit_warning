@@ -9,9 +9,13 @@ streams so that only reliably attributed data for known ICAOs is buffered.
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+import json
+import os
+from pathlib import Path
+import queue
 import re
 import threading
 import time
@@ -57,7 +61,11 @@ class CandidateEncounterState:
     encounter_generation: int
     triggered_at_utc: datetime
     prebuffer_start_utc: datetime
+    requested_end_time_utc: datetime
     required_end_time_utc: datetime
+    hard_end_time_utc: datetime
+    hard_ceiling_seconds: float
+    hard_ceiling_applied: bool
     trigger_prediction: object
     latest_prediction: object
     outcome: CandidateEncounterOutcome
@@ -75,7 +83,9 @@ class CandidateIcaoCaptureState:
 
     icao: str
     prebuffer_start_utc: datetime
+    requested_capture_until_utc: datetime
     capture_until_utc: datetime
+    hard_ceiling_applied: bool
     encounter_ids: tuple[str, ...]
 
 
@@ -91,21 +101,28 @@ class CandidateEncounterManager:
     DEFAULT_TRIGGER_HORIZON_SECONDS = 300.0
     DEFAULT_TRIGGER_SEPARATION_DEG = 2.0
     DEFAULT_POST_T0_SECONDS = 180.0
+    DEFAULT_MAX_CAPTURE_DURATION_SECONDS = 1800.0
 
     def __init__(self, pre_buffer=None,
                  trigger_horizon_seconds=DEFAULT_TRIGGER_HORIZON_SECONDS,
                  trigger_separation_deg=DEFAULT_TRIGGER_SEPARATION_DEG,
-                 post_t0_seconds=DEFAULT_POST_T0_SECONDS):
+                 post_t0_seconds=DEFAULT_POST_T0_SECONDS,
+                 max_capture_duration_seconds=(
+                     DEFAULT_MAX_CAPTURE_DURATION_SECONDS)):
         self.pre_buffer = pre_buffer
         self.trigger_horizon_seconds = float(trigger_horizon_seconds)
         self.trigger_separation_deg = float(trigger_separation_deg)
         self.post_t0_seconds = float(post_t0_seconds)
+        self.max_capture_duration_seconds = float(
+            max_capture_duration_seconds)
         if self.trigger_horizon_seconds <= 0:
             raise ValueError("trigger horizon must be positive")
         if self.trigger_separation_deg < 0:
             raise ValueError("trigger separation must be non-negative")
         if self.post_t0_seconds < 0:
             raise ValueError("post-T0 duration must be non-negative")
+        if self.max_capture_duration_seconds <= 0:
+            raise ValueError("maximum capture duration must be positive")
         self._encounters: dict[str, CandidateEncounterState] = {}
         self._captures: dict[str, CandidateIcaoCaptureState] = {}
         self._lock = threading.RLock()
@@ -146,8 +163,12 @@ class CandidateEncounterManager:
                         self.pre_buffer.buffer_duration_seconds
                         if self.pre_buffer is not None
                         else CandidatePreBuffer.DEFAULT_BUFFER_DURATION_SECONDS)
-                    required_end = prediction.predicted_transit_utc + timedelta(
+                    requested_end = prediction.predicted_transit_utc + timedelta(
                         seconds=self.post_t0_seconds)
+                    hard_end = now + timedelta(
+                        seconds=self.max_capture_duration_seconds)
+                    required_end = min(
+                        requested_end, hard_end)
                     existing = CandidateEncounterState(
                         encounter_id=encounter_id,
                         observer_epoch=int(prediction.observer_epoch),
@@ -158,7 +179,11 @@ class CandidateEncounterManager:
                         triggered_at_utc=now,
                         prebuffer_start_utc=now - timedelta(
                             seconds=prebuffer_seconds),
+                        requested_end_time_utc=requested_end,
                         required_end_time_utc=required_end,
+                        hard_end_time_utc=hard_end,
+                        hard_ceiling_seconds=self.max_capture_duration_seconds,
+                        hard_ceiling_applied=requested_end > hard_end,
                         trigger_prediction=prediction,
                         latest_prediction=prediction,
                         outcome=CandidateEncounterOutcome.ACTIVE,
@@ -166,10 +191,15 @@ class CandidateEncounterManager:
                 elif existing.unfinished:
                     proposed_end = prediction.predicted_transit_utc + timedelta(
                         seconds=self.post_t0_seconds)
+                    hard_end = existing.triggered_at_utc + timedelta(
+                        seconds=self.max_capture_duration_seconds)
+                    requested_end = max(
+                        existing.requested_end_time_utc, proposed_end)
                     existing = self._replace_encounter(
                         existing,
-                        required_end_time_utc=max(
-                            existing.required_end_time_utc, proposed_end),
+                        requested_end_time_utc=requested_end,
+                        required_end_time_utc=min(requested_end, hard_end),
+                        hard_ceiling_applied=requested_end > hard_end,
                         latest_prediction=prediction,
                         last_update_utc=now)
                 self._encounters[encounter_id] = existing
@@ -247,12 +277,17 @@ class CandidateEncounterManager:
         if not unfinished:
             self._captures.pop(icao, None)
             return
+        requested_until = max(
+            state.requested_end_time_utc for state in unfinished)
+        applied_until = max(
+            state.required_end_time_utc for state in unfinished)
         self._captures[icao] = CandidateIcaoCaptureState(
             icao=icao,
             prebuffer_start_utc=min(
                 state.prebuffer_start_utc for state in unfinished),
-            capture_until_utc=max(
-                state.required_end_time_utc for state in unfinished),
+            requested_capture_until_utc=requested_until,
+            capture_until_utc=applied_until,
+            hard_ceiling_applied=requested_until > applied_until,
             encounter_ids=tuple(sorted(
                 state.encounter_id for state in unfinished)))
 
@@ -273,6 +308,7 @@ class CandidateStreamRecord:
     received_at_utc: datetime
     raw_data: str | bytes
     metadata: Mapping[str, Any] | None = None
+    sequence_id: int = 0
 
 
 def validate_utc_datetime(dt: datetime) -> datetime:
@@ -449,6 +485,7 @@ class CandidatePreBuffer:
         clock: Callable[[], datetime] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         max_future_skew_seconds: float = DEFAULT_MAX_FUTURE_SKEW_SECONDS,
+        record_sink: Callable[[CandidateStreamRecord], None] | None = None,
     ):
         self.buffer_duration_seconds = max(1.0, float(buffer_duration_seconds))
         self.max_records_per_icao = max(1, int(max_records_per_icao))
@@ -460,6 +497,26 @@ class CandidatePreBuffer:
         self._beast_parser = BeastFrameParser()
         self._lock = threading.RLock()
         self._last_prune_mono: float | None = None
+        self._record_sink = record_sink
+        self._next_sequence_id = 1
+
+    def _with_sequence_locked(self, record):
+        sequenced = replace(record, sequence_id=self._next_sequence_id)
+        self._next_sequence_id += 1
+        return sequenced
+
+    def set_record_sink(self, sink):
+        """Attach an optional fail-open observer for newly admitted records."""
+        with self._lock:
+            self._record_sink = sink
+
+    def _notify_record_sink(self, record):
+        try:
+            sink = self._record_sink
+            if sink is not None:
+                sink(record)
+        except Exception:
+            pass
 
     def _resolve_received_at(self, received_at_utc: datetime | None) -> datetime | None:
         current_time = validate_utc_datetime(self._clock())
@@ -542,9 +599,11 @@ class CandidatePreBuffer:
             raw_data=line,
         )
         with self._lock:
+            record = self._with_sequence_locked(record)
             self._auto_prune_if_due_locked(current_time)
             buf = self._get_or_create_buffer(icao, current_time)
             buf.append(record)
+        self._notify_record_sink(record)
         return True
 
     def feed_mlat_sbs(
@@ -565,9 +624,11 @@ class CandidatePreBuffer:
             raw_data=line,
         )
         with self._lock:
+            record = self._with_sequence_locked(record)
             self._auto_prune_if_due_locked(current_time)
             buf = self._get_or_create_buffer(icao, current_time)
             buf.append(record)
+        self._notify_record_sink(record)
         return True
 
     def feed_raw_adsb(
@@ -589,9 +650,11 @@ class CandidatePreBuffer:
             metadata=MappingProxyType({"modes_hex": message.hex().upper()}),
         )
         with self._lock:
+            record = self._with_sequence_locked(record)
             self._auto_prune_if_due_locked(current_time)
             buf = self._get_or_create_buffer(icao, current_time)
             buf.append(record)
+        self._notify_record_sink(record)
         return True
 
     def feed_mlat_beast_frame(
@@ -621,9 +684,11 @@ class CandidatePreBuffer:
             }),
         )
         with self._lock:
+            record = self._with_sequence_locked(record)
             self._auto_prune_if_due_locked(current_time)
             buf = self._get_or_create_buffer(icao, current_time)
             buf.append(record)
+        self._notify_record_sink(record)
         return True
 
     def feed_mlat_beast_chunk(
@@ -640,6 +705,7 @@ class CandidatePreBuffer:
             return []
         current_time = validate_utc_datetime(self._clock())
         attributed_icaos: list[str] = []
+        admitted_records = []
         with self._lock:
             frames = self._beast_parser.feed(chunk)
             for frame in frames:
@@ -660,10 +726,14 @@ class CandidatePreBuffer:
                             "modes_hex": frame.modes.hex().upper(),
                         }),
                     )
+                    record = self._with_sequence_locked(record)
                     self._auto_prune_if_due_locked(current_time)
                     buf = self._get_or_create_buffer(icao, current_time)
                     buf.append(record)
                     attributed_icaos.append(icao)
+                    admitted_records.append(record)
+        for record in admitted_records:
+            self._notify_record_sink(record)
         return attributed_icaos
 
     def get_records(self, icao: str) -> list[CandidateStreamRecord]:
@@ -728,3 +798,645 @@ class CandidatePreBuffer:
                     del self._buffers[normalized]
             else:
                 self._buffers.clear()
+
+
+@dataclass
+class _CandidateCapture:
+    capture_id: str
+    icao: str
+    directory: Path
+    started_at_utc: datetime
+    capture_until_utc: datetime
+    requested_capture_until_utc: datetime
+    hard_ceiling_seconds: float
+    hard_ceiling_applied: bool
+    encounter_ids: set[str]
+    streams: dict
+    seen_records: set
+    closed: bool = False
+    streams_closed: bool = False
+    degraded: bool = False
+    degradation_reasons: set[str] = None
+    recovered_unindexed_bytes: dict = None
+    collision_index: int = 0
+
+    def __post_init__(self):
+        if self.degradation_reasons is None:
+            self.degradation_reasons = set()
+        if self.recovered_unindexed_bytes is None:
+            self.recovered_unindexed_bytes = {}
+
+
+class CandidateBundleStore:
+    """Private per-ICAO stream capture with per-encounter manifests.
+
+    The store owns no sockets or parsers. It receives only records already
+    admitted by ``CandidatePreBuffer`` and is deliberately fail-open to its
+    caller. A single physical capture is shared by overlapping encounters for
+    one ICAO.
+    """
+
+    STREAM_FILES = {
+        StreamType.ADSB_SBS: "adsb_sbs.log",
+        StreamType.MLAT_SBS: "mlat_sbs.log",
+        StreamType.RAW_ADSB: "raw_adsb.log",
+        StreamType.MLAT_BEAST: "mlat_beast.bin",
+    }
+
+    def __init__(self, root_directory, pre_buffer):
+        self.root_directory = Path(root_directory)
+        self.pre_buffer = pre_buffer
+        self._captures = {}
+        self._encounters = {}
+        self._encounter_contexts = {}
+        self._lock = threading.RLock()
+        self._pending_finalizations = set()
+        self._pending_degradation = {}
+        self.last_error = None
+
+    def mark_degraded(self, icaos, reason):
+        """Mark affected private captures without exposing an ordinary log."""
+        with self._lock:
+            for icao in icaos:
+                capture = self._captures.get(str(icao).upper())
+                if capture is not None:
+                    capture.degraded = True
+                    capture.degradation_reasons.add(str(reason))
+                else:
+                    self._pending_degradation.setdefault(
+                        str(icao).upper(), set()).add(str(reason))
+
+    def observe_record(self, record):
+        """Append one already-attributed live record if its ICAO is active."""
+        try:
+            self.last_error = None
+            with self._lock:
+                capture = self._captures.get(record.icao)
+                if (capture is None or capture.closed
+                        or record.received_at_utc > capture.capture_until_utc):
+                    return False
+                return self._write_record_locked(capture, record)
+        except Exception as error:
+            self.last_error = str(error)
+            return False
+
+    def observe_encounter(self, state, capture_state, observer_context=None):
+        """Create/update one private manifest and shared physical capture."""
+        try:
+            self.last_error = None
+            if not isinstance(state, CandidateEncounterState):
+                return False
+            with self._lock:
+                capture = self._captures.get(state.icao)
+                if capture is None or capture.closed:
+                    capture = self._start_capture_locked(state, capture_state)
+                if capture_state is not None:
+                    capture.capture_until_utc = max(
+                        capture.capture_until_utc,
+                        capture_state.capture_until_utc)
+                    capture.requested_capture_until_utc = max(
+                        capture.requested_capture_until_utc,
+                        capture_state.requested_capture_until_utc)
+                    capture.hard_ceiling_applied = (
+                        capture.requested_capture_until_utc
+                        > capture.capture_until_utc)
+                    capture.encounter_ids.update(capture_state.encounter_ids)
+                capture.encounter_ids.add(state.encounter_id)
+                self._encounters[state.encounter_id] = state
+                if observer_context is not None:
+                    self._encounter_contexts.setdefault(
+                        state.encounter_id, observer_context)
+                self._write_capture_manifest_locked(capture, "active")
+                self._write_encounter_manifest_locked(state, capture)
+                return True
+        except Exception as error:
+            self.last_error = str(error)
+            return False
+
+    def finalize_completed(self, completed_states, capture_states=None):
+        """Atomically finalize manifests and close captures no longer needed."""
+        try:
+            self.last_error = None
+            with self._lock:
+                capture_states = capture_states or {}
+                for icao in tuple(self._pending_finalizations):
+                    if capture_states.get(icao) is None:
+                        capture = self._captures.get(icao)
+                        if capture is not None:
+                            self._close_capture_locked(capture)
+                    self._pending_finalizations.discard(icao)
+                affected = set()
+                for state in completed_states:
+                    if not isinstance(state, CandidateEncounterState):
+                        continue
+                    self._encounters[state.encounter_id] = state
+                    affected.add(state.icao)
+                    capture = self._captures.get(state.icao)
+                    if capture is not None:
+                        self._write_encounter_manifest_locked(state, capture)
+                for icao in affected:
+                    capture = self._captures.get(icao)
+                    if capture is None:
+                        continue
+                    current = capture_states.get(icao)
+                    if current is not None:
+                        capture.capture_until_utc = max(
+                            capture.capture_until_utc,
+                            current.capture_until_utc)
+                        capture.requested_capture_until_utc = max(
+                            capture.requested_capture_until_utc,
+                            current.requested_capture_until_utc)
+                        capture.hard_ceiling_applied = (
+                            capture.requested_capture_until_utc
+                            > capture.capture_until_utc)
+                        continue
+                    try:
+                        self._close_capture_locked(capture)
+                    except Exception:
+                        self._pending_finalizations.add(icao)
+                        raise
+                return True
+        except Exception as error:
+            self.last_error = str(error)
+            return False
+
+    def close_incomplete(self, closed_at_utc=None):
+        """Close active handles while preserving inspectable incomplete data."""
+        try:
+            self.last_error = None
+            if closed_at_utc is not None:
+                validate_utc_datetime(closed_at_utc)
+            with self._lock:
+                for capture in tuple(self._captures.values()):
+                    for stream_type, stream in capture.streams.items():
+                        if not stream["data"].closed:
+                            self._reconcile_stream_locked(
+                                capture, stream_type, stream)
+                    for stream in capture.streams.values():
+                        if not stream["data"].closed:
+                            stream["data"].flush()
+                            stream["data"].close()
+                        if not stream["timing"].closed:
+                            stream["timing"].flush()
+                            stream["timing"].close()
+                    capture.streams_closed = True
+                    self._write_capture_manifest_locked(capture, "incomplete")
+                    for encounter_id in capture.encounter_ids:
+                        state = self._encounters.get(encounter_id)
+                        if state is not None:
+                            self._write_encounter_manifest_locked(state, capture)
+                    capture.closed = True
+                self._captures.clear()
+            return True
+        except Exception as error:
+            self.last_error = str(error)
+            return False
+
+    def _start_capture_locked(self, state, capture_state):
+        day = state.triggered_at_utc.strftime("%Y%m%d")
+        token = re.sub(r"[^A-Za-z0-9_.-]", "_", state.encounter_id)
+        base_capture_id = "{}_{}_{}".format(
+            state.triggered_at_utc.strftime("%Y%m%dT%H%M%S_%fZ"),
+            state.icao, token)
+        capture_root = self.root_directory / day / state.icao / "captures"
+        collision_index = 0
+        while True:
+            capture_id = (base_capture_id if collision_index == 0 else
+                          "{}_{:02d}".format(base_capture_id, collision_index))
+            directory = capture_root / capture_id
+            try:
+                directory.mkdir(parents=True, exist_ok=False)
+                break
+            except FileExistsError:
+                collision_index += 1
+        until = (capture_state.capture_until_utc if capture_state is not None
+                 else state.required_end_time_utc)
+        requested_until = (
+            capture_state.requested_capture_until_utc
+            if capture_state is not None else state.requested_end_time_utc)
+        capture = _CandidateCapture(
+            capture_id, state.icao, directory, state.prebuffer_start_utc,
+            until, requested_until, state.hard_ceiling_seconds,
+            bool(capture_state.hard_ceiling_applied
+                 if capture_state is not None else state.hard_ceiling_applied),
+            set(), {}, set(), collision_index=collision_index)
+        if collision_index:
+            capture.degraded = True
+            capture.degradation_reasons.add("capture_directory_collision")
+        pending = self._pending_degradation.pop(state.icao, set())
+        if pending:
+            capture.degraded = True
+            capture.degradation_reasons.update(pending)
+        self._captures[state.icao] = capture
+        for record in self.pre_buffer.get_records_since(
+                state.icao, state.prebuffer_start_utc):
+            self._write_record_locked(capture, record)
+        return capture
+
+    @staticmethod
+    def _record_key(record):
+        sequence_id = int(getattr(record, "sequence_id", 0))
+        return sequence_id if sequence_id > 0 else None
+
+    def _write_record_locked(self, capture, record):
+        key = self._record_key(record)
+        if key is not None and key in capture.seen_records:
+            return False
+        raw = (record.raw_data.encode("utf-8")
+               if isinstance(record.raw_data, str) else bytes(record.raw_data))
+        stream = capture.streams.get(record.stream_type)
+        if stream is None:
+            filename = self.STREAM_FILES[record.stream_type]
+            data_path = capture.directory / filename
+            timing_path = capture.directory / (filename + ".timing.jsonl")
+            stream = {
+                "filename": filename, "data": data_path.open("ab+"),
+                "timing": timing_path.open("a+", encoding="utf-8", newline="\n"),
+                "count": 0, "bytes": 0,
+                "first_received_at_utc": None, "last_received_at_utc": None,
+            }
+            capture.streams[record.stream_type] = stream
+        offset = stream["bytes"]
+        timing_offset = stream["timing"].tell()
+        try:
+            written = stream["data"].write(raw)
+            if written != len(raw):
+                raise OSError("short candidate stream write")
+            stream["data"].flush()
+            stream["timing"].write(json.dumps({
+                "sequence_id": key,
+                "received_at_utc": _utc_text(record.received_at_utc),
+                "offset": offset, "length": len(raw),
+            }, sort_keys=True) + "\n")
+            stream["timing"].flush()
+        except Exception:
+            stream["data"].seek(offset)
+            stream["data"].truncate()
+            stream["data"].flush()
+            stream["timing"].seek(timing_offset)
+            stream["timing"].truncate()
+            stream["timing"].flush()
+            raise
+        stream["count"] += 1
+        stream["bytes"] += len(raw)
+        timestamp = _utc_text(record.received_at_utc)
+        stream["first_received_at_utc"] = (
+            stream["first_received_at_utc"] or timestamp)
+        stream["last_received_at_utc"] = timestamp
+        if key is not None:
+            capture.seen_records.add(key)
+        return True
+
+    def _stream_metadata_locked(self, capture):
+        result = {}
+        for stream_type, item in capture.streams.items():
+            result[stream_type.value] = {
+                "filename": item["filename"],
+                "timing_filename": item["filename"] + ".timing.jsonl",
+                "record_count": item["count"],
+                "byte_count": item["bytes"],
+                "first_received_at_utc": item["first_received_at_utc"],
+                "last_received_at_utc": item["last_received_at_utc"],
+                "recovered_unindexed_bytes": (
+                    capture.recovered_unindexed_bytes.get(
+                        stream_type.value, 0)),
+            }
+        return result
+
+    def _write_capture_manifest_locked(self, capture, status):
+        payload = {
+            "schema_version": 1,
+            "private_forensic_data": True,
+            "capture_id": capture.capture_id,
+            "icao": capture.icao,
+            "status": status,
+            "capture_start_utc": _utc_text(capture.started_at_utc),
+            "capture_until_utc": _utc_text(capture.capture_until_utc),
+            "requested_capture_until_utc": _utc_text(
+                capture.requested_capture_until_utc),
+            "applied_capture_until_utc": _utc_text(capture.capture_until_utc),
+            "configured_hard_ceiling_seconds": capture.hard_ceiling_seconds,
+            "hard_ceiling_applied": capture.hard_ceiling_applied,
+            "truncation_reason": (
+                "maximum_capture_duration" if capture.hard_ceiling_applied
+                else None),
+            "degraded": capture.degraded,
+            "degradation_reasons": sorted(capture.degradation_reasons),
+            "collision_index": capture.collision_index,
+            "encounter_ids": sorted(capture.encounter_ids),
+            "streams": self._stream_metadata_locked(capture),
+        }
+        _atomic_json(capture.directory / "capture_manifest.json", payload)
+
+    def _write_encounter_manifest_locked(self, state, capture):
+        day = state.triggered_at_utc.strftime("%Y%m%d")
+        safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", state.encounter_id)
+        directory = self.root_directory / day / state.icao / "encounters" / safe_id
+        directory.mkdir(parents=True, exist_ok=True)
+        observer = self._encounter_contexts.get(state.encounter_id)
+        relative_capture = os.path.relpath(capture.directory, directory)
+        payload = {
+            "schema_version": 1,
+            "private_forensic_data": True,
+            "encounter_id": state.encounter_id,
+            "observer_epoch": state.observer_epoch,
+            "icao": state.icao,
+            "callsign": getattr(state.latest_prediction, "callsign", "") or None,
+            "body": state.body,
+            "encounter_generation": state.encounter_generation,
+            "triggered_at_utc": _utc_text(state.triggered_at_utc),
+            "last_update_utc": _utc_text(state.last_update_utc),
+            "completed_at_utc": _utc_text(state.completed_at_utc),
+            "outcome": state.outcome.value,
+            "required_window": {
+                "start_utc": _utc_text(state.prebuffer_start_utc),
+                "requested_end_utc": _utc_text(state.requested_end_time_utc),
+                "applied_end_utc": _utc_text(state.required_end_time_utc),
+                "hard_end_utc": _utc_text(state.hard_end_time_utc),
+                "configured_hard_ceiling_seconds": (
+                    state.hard_ceiling_seconds),
+                "hard_ceiling_applied": state.hard_ceiling_applied,
+                "truncation_reason": (
+                    "maximum_capture_duration"
+                    if state.hard_ceiling_applied else None),
+            },
+            "physical_capture": {
+                "capture_id": capture.capture_id,
+                "relative_path": Path(relative_capture).as_posix(),
+                "streams": self._stream_metadata_locked(capture),
+            },
+            "trigger_prediction": _prediction_manifest(state.trigger_prediction),
+            "latest_prediction": _prediction_manifest(state.latest_prediction),
+            "observer_context": _observer_manifest(observer),
+        }
+        _atomic_json(directory / "manifest.json", payload)
+
+    def _close_capture_locked(self, capture):
+        if capture.closed:
+            return
+        if not capture.streams_closed:
+            for stream_type, stream in capture.streams.items():
+                if not stream["data"].closed:
+                    self._reconcile_stream_locked(capture, stream_type, stream)
+            self._write_capture_manifest_locked(capture, "finalizing")
+            for encounter_id in capture.encounter_ids:
+                state = self._encounters.get(encounter_id)
+                if state is not None:
+                    self._write_encounter_manifest_locked(state, capture)
+            for stream in capture.streams.values():
+                if not stream["data"].closed:
+                    stream["data"].flush()
+                    stream["data"].close()
+                if not stream["timing"].closed:
+                    stream["timing"].flush()
+                    stream["timing"].close()
+            capture.streams_closed = True
+        self._write_capture_manifest_locked(capture, "complete")
+        capture.closed = True
+        self._captures.pop(capture.icao, None)
+
+    def _reconcile_stream_locked(self, capture, stream_type, stream):
+        stream["data"].flush()
+        stream["timing"].flush()
+        data_size = stream["data"].seek(0, os.SEEK_END)
+        stream["timing"].seek(0)
+        valid_lines = []
+        valid_end = 0
+        first = None
+        last = None
+        for line in stream["timing"]:
+            try:
+                item = json.loads(line)
+                offset = int(item["offset"])
+                length = int(item["length"])
+                if offset != valid_end or length < 0 or offset + length > data_size:
+                    break
+            except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+                break
+            valid_lines.append(line)
+            valid_end = offset + length
+            first = first or item.get("received_at_utc")
+            last = item.get("received_at_utc")
+        unindexed = max(0, data_size - valid_end)
+        if unindexed:
+            capture.degraded = True
+            capture.degradation_reasons.add("unindexed_stream_bytes_recovered")
+            capture.recovered_unindexed_bytes[stream_type.value] = unindexed
+            stream["data"].seek(valid_end)
+            stream["data"].truncate()
+            stream["data"].flush()
+        stream["timing"].seek(0)
+        stream["timing"].truncate()
+        stream["timing"].writelines(valid_lines)
+        stream["timing"].flush()
+        stream["count"] = len(valid_lines)
+        stream["bytes"] = valid_end
+        stream["first_received_at_utc"] = first
+        stream["last_received_at_utc"] = last
+
+
+class CandidateStorageWorker:
+    """Bounded asynchronous facade keeping candidate I/O off runtime threads."""
+
+    DEFAULT_QUEUE_SIZE = 8192
+
+    def __init__(self, store, max_queue_size=DEFAULT_QUEUE_SIZE,
+                 thread_factory=threading.Thread):
+        self.store = store
+        self.max_queue_size = max(1, int(max_queue_size))
+        self._queue = queue.Queue(maxsize=self.max_queue_size)
+        self._stop = threading.Event()
+        self._state_lock = threading.Lock()
+        self._degraded_icaos = {}
+        self._overflow_encounters = {}
+        self._overflow_finalizes = []
+        self.last_error = None
+        self._thread = thread_factory(
+            target=self._run, name="candidate-storage", daemon=True)
+        self._thread.start()
+
+    def enqueue_record(self, record):
+        return self._enqueue("record", record, (record.icao,))
+
+    def enqueue_encounter(self, state, capture_state, observer_context=None):
+        payload = (state, capture_state, observer_context)
+        accepted = self._enqueue("encounter", payload, (state.icao,))
+        if not accepted:
+            with self._state_lock:
+                self._overflow_encounters[state.encounter_id] = payload
+        return accepted
+
+    def enqueue_finalize(self, completed_states, capture_states):
+        frozen_states = MappingProxyType(dict(capture_states))
+        icaos = tuple({state.icao for state in completed_states})
+        payload = (tuple(completed_states), frozen_states)
+        accepted = self._enqueue("finalize", payload, icaos)
+        if not accepted:
+            with self._state_lock:
+                self._overflow_finalizes.append(payload)
+        return accepted
+
+    def _enqueue(self, kind, payload, icaos):
+        if self._stop.is_set():
+            self._mark_degraded(icaos, "storage_worker_stopped")
+            return False
+        try:
+            self._queue.put_nowait((kind, payload, tuple(icaos)))
+            return True
+        except queue.Full:
+            self._mark_degraded(icaos, "storage_queue_overflow")
+            return False
+
+    def _mark_degraded(self, icaos, reason):
+        with self._state_lock:
+            for item in icaos:
+                self._degraded_icaos.setdefault(
+                    str(item).upper(), set()).add(str(reason))
+            self.last_error = reason
+
+    def _apply_degraded(self):
+        with self._state_lock:
+            degraded = self._degraded_icaos
+            self._degraded_icaos = {}
+        for icao, reasons in degraded.items():
+            for reason in reasons:
+                self.store.mark_degraded((icao,), reason)
+
+    def _take_overflow_encounters(self):
+        with self._state_lock:
+            values = tuple(self._overflow_encounters.values())
+            self._overflow_encounters.clear()
+        return values
+
+    def _take_overflow_finalizes(self):
+        with self._state_lock:
+            values = tuple(self._overflow_finalizes)
+            self._overflow_finalizes.clear()
+        return values
+
+    def _process_overflow(self):
+        for payload in self._take_overflow_encounters():
+            self._process("encounter", payload, (payload[0].icao,))
+        for payload in self._take_overflow_finalizes():
+            self._process("finalize", payload,
+                          tuple(state.icao for state in payload[0]))
+
+    def _process(self, kind, payload, icaos):
+        self._apply_degraded()
+        if kind == "record":
+            self.store.observe_record(payload)
+        elif kind == "encounter":
+            self.store.observe_encounter(*payload)
+        elif kind == "finalize":
+            self.store.finalize_completed(*payload)
+        if self.store.last_error is not None:
+            self._mark_degraded(icaos, "storage_worker_failure")
+
+    def _run(self):
+        while (not self._stop.is_set() or not self._queue.empty()
+               or self._overflow_encounters or self._overflow_finalizes):
+            try:
+                kind, payload, icaos = self._queue.get(timeout=0.05)
+            except queue.Empty:
+                self._process_overflow()
+                continue
+            try:
+                self._process(kind, payload, icaos)
+                self._process_overflow()
+            except Exception as error:
+                self.last_error = str(error)
+                self._mark_degraded(icaos, "storage_worker_failure")
+            finally:
+                self._queue.task_done()
+        self._apply_degraded()
+        self.store.close_incomplete(datetime.now(timezone.utc))
+
+    def flush(self, timeout_seconds=5.0):
+        deadline = time.monotonic() + float(timeout_seconds)
+        while (self._queue.unfinished_tasks
+               or self._overflow_encounters or self._overflow_finalizes):
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.005)
+        return True
+
+    def close(self, timeout_seconds=5.0):
+        self._stop.set()
+        self._thread.join(timeout=max(0.0, float(timeout_seconds)))
+        return not self._thread.is_alive()
+
+
+def _utc_text(value):
+    if value is None:
+        return None
+    return validate_utc_datetime(value).isoformat().replace("+00:00", "Z")
+
+
+def _json_safe(value):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, datetime):
+        return _utc_text(value)
+    if isinstance(value, Enum):
+        return value.value
+    if is_dataclass(value):
+        return {item.name: _json_safe(getattr(value, item.name))
+                for item in fields(value)}
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_json_safe(item) for item in value]
+    return str(value)
+
+
+def _prediction_manifest(prediction):
+    if prediction is None:
+        return None
+    return {
+        "predicted_transit_utc": _utc_text(prediction.predicted_transit_utc),
+        "separation_deg": prediction.separation_deg,
+        "slant_range_km": prediction.slant_range_km,
+        "prediction_geometry": prediction.model,
+        "boundary_status": prediction.boundary_status,
+        "aircraft": {
+            "latitude_deg": prediction.aircraft_latitude_deg,
+            "longitude_deg": prediction.aircraft_longitude_deg,
+            "altitude_m": prediction.aircraft_altitude_m,
+            "azimuth_deg": prediction.aircraft_azimuth_deg,
+            "altitude_angle_deg": prediction.aircraft_altitude_deg,
+        },
+        "body": {
+            "azimuth_deg": prediction.body_azimuth_deg,
+            "altitude_deg": prediction.body_altitude_deg,
+            "radius_deg": prediction.body_radius_deg,
+        },
+        "frozen_vertical_state": _json_safe(prediction.frozen_vertical_state),
+    }
+
+
+def _observer_manifest(observer_context):
+    if observer_context is None:
+        return None
+    position = observer_context.position
+    return {
+        "requested_mode": observer_context.requested_mode,
+        "effective_source": observer_context.effective_source,
+        "epoch": observer_context.epoch,
+        "latitude_deg": position.latitude_deg if position is not None else None,
+        "longitude_deg": position.longitude_deg if position is not None else None,
+        "elevation_m": position.elevation_m if position is not None else None,
+        "mobile_age_seconds": observer_context.mobile_age_seconds,
+        "mobile_accuracy_m": observer_context.mobile_accuracy_m,
+        "fallback_enabled": observer_context.fallback_enabled,
+        "fallback_active": observer_context.fallback_active,
+    }
+
+
+def _atomic_json(path, payload):
+    path = Path(path)
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+    temporary.replace(path)

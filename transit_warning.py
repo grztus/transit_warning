@@ -133,7 +133,12 @@ from authoritative_transit import (
     AuthoritativeTransitLifecycle,
     AuthoritativeTransitionKind,
 )
-from candidate_recorder import CandidateEncounterManager, CandidatePreBuffer
+from candidate_recorder import (
+    CandidateBundleStore,
+    CandidateEncounterManager,
+    CandidatePreBuffer,
+    CandidateStorageWorker,
+)
 from live_dashboard import (
     DashboardCandidate,
     DisabledDashboard,
@@ -632,18 +637,30 @@ authoritative_transit_lifecycle = AuthoritativeTransitLifecycle()
 authoritative_terminal_predictions = {}
 candidate_pre_buffer = None
 candidate_encounter_manager = None
+candidate_bundle_store = None
+candidate_storage_worker = None
 
 
 def initialize_candidate_recorder_observation():
-    """Create the diskless Candidate Recorder Phase 3A runtime state."""
+    """Create fail-open Candidate Recorder runtime state and private store."""
     global candidate_pre_buffer, candidate_encounter_manager
+    global candidate_bundle_store
+    global candidate_storage_worker
     try:
         candidate_pre_buffer = CandidatePreBuffer(clock=clock.now_utc)
         candidate_encounter_manager = CandidateEncounterManager(
             pre_buffer=candidate_pre_buffer)
+        candidate_bundle_store = CandidateBundleStore(
+            Path("recordings") / "candidates", candidate_pre_buffer)
+        candidate_storage_worker = CandidateStorageWorker(
+            candidate_bundle_store)
+        candidate_pre_buffer.set_record_sink(
+            candidate_storage_worker.enqueue_record)
     except Exception:
         candidate_pre_buffer = None
         candidate_encounter_manager = None
+        candidate_bundle_store = None
+        candidate_storage_worker = None
 
 
 def observe_candidate_sbs_input(line, port, received_at_utc):
@@ -681,22 +698,38 @@ def observe_candidate_mlat_beast_frame(frame, received_at_utc):
     return False
 
 
-def observe_candidate_authoritative_transition(transition, now_utc):
+def observe_candidate_authoritative_transition(
+        transition, now_utc, observer_context=None):
     """Forward an existing authoritative transition without affecting it."""
     try:
         if candidate_encounter_manager is not None:
-            return candidate_encounter_manager.process_transition(
+            state = candidate_encounter_manager.process_transition(
                 transition, now_utc)
+            if state is not None and candidate_storage_worker is not None:
+                candidate_storage_worker.enqueue_encounter(
+                    state,
+                    candidate_encounter_manager.capture_state(state.icao),
+                    observer_context)
+            return state
     except Exception:
         pass
     return None
 
 
 def complete_candidate_observation_windows(now_utc):
-    """Advance diskless candidate windows; failures remain observational."""
+    """Advance and finalize candidate windows; failures remain observational."""
     try:
         if candidate_encounter_manager is not None:
-            return candidate_encounter_manager.complete_due(now_utc)
+            completed = candidate_encounter_manager.complete_due(now_utc)
+            if candidate_storage_worker is not None:
+                capture_states = {
+                    state.icao: candidate_encounter_manager.capture_state(
+                        state.icao)
+                    for state in completed
+                }
+                candidate_storage_worker.enqueue_finalize(
+                    completed, capture_states)
+            return completed
     except Exception:
         pass
     return ()
@@ -799,7 +832,6 @@ def apply_installation_config(configuration: InstallationConfig):
         authoritative_geometry,
         grace_seconds=TRANSIT_PREDICTION_GRACE_SECONDS,
         horizon_seconds=shadow_2d_config.horizon_seconds)
-    initialize_candidate_recorder_observation()
     fleet_geometric_altitude_estimator = None
     aircraft_los_geoid_provider = PgmGeoidProvider.discover(
         configuration.fleet_geoid_pgm_path)
@@ -2854,7 +2886,8 @@ def invalidate_observer_dependent_state(observer_context=None):
 def consume_authoritative_transition(transition, context, entry,
                                      current_distance_km, now_utc):
     """Route one lifecycle transition without invoking legacy consumers."""
-    observe_candidate_authoritative_transition(transition, now_utc)
+    observe_candidate_authoritative_transition(
+        transition, now_utc, context.observer_context)
     if transition is None:
         return False
     kind = transition.kind
@@ -4028,6 +4061,11 @@ def shutdown_runtime(threads, recorder):
         except Exception:
             pass
     close_transit_snapshots(clock.now_utc())
+    try:
+        if candidate_storage_worker is not None:
+            candidate_storage_worker.close()
+    except Exception:
+        pass
     if telegram_notifier is not None:
         try:
             telegram_notifier.close()
@@ -4854,6 +4892,8 @@ def main():
         except Exception as error:
             print("Session recorder initialization failed: {}".format(error))
             session_recorder = None
+
+    initialize_candidate_recorder_observation()
 
     # Uruchomienie wątków do czytania z portów / Start threads to read from ports
     threads = [threading.Thread(
