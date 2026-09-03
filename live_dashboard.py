@@ -141,6 +141,36 @@ class MobileGpsState:
         }
 
 
+class TelegramBodyControls:
+    """Thread-safe runtime-only body notification switches."""
+
+    def __init__(self, sun_enabled=True, moon_enabled=True, on_change=None):
+        self._enabled = {
+            "SUN": bool(sun_enabled), "MOON": bool(moon_enabled)}
+        self._on_change = on_change
+        self._lock = threading.Lock()
+
+    def enabled(self, body):
+        with self._lock:
+            return self._enabled.get(str(body).upper(), False)
+
+    def snapshot(self):
+        with self._lock:
+            return {key.lower() + "_enabled": value
+                    for key, value in self._enabled.items()}
+
+    def set_enabled(self, body, enabled):
+        body = str(body).upper()
+        if body not in self._enabled or not isinstance(enabled, bool):
+            raise ValueError("Invalid Telegram body control")
+        with self._lock:
+            changed = self._enabled[body] != enabled
+            self._enabled[body] = enabled
+        if changed and self._on_change is not None:
+            self._on_change(body, enabled)
+        return self.snapshot()
+
+
 class DashboardState:
     """Thread-safe live queues and bounded, non-persistent event history."""
 
@@ -163,7 +193,25 @@ class DashboardState:
         self._live = {"SUN": {}, "MOON": {}}
         self._history = []
         self._generated_at_utc = None
+        self._body_positions = {"SUN": None, "MOON": None}
         self._lock = threading.RLock()
+
+    def update_body_position(self, body, altitude_deg, azimuth_deg,
+                             evaluated_at_utc):
+        body = str(body).upper()
+        if body not in self._body_positions:
+            return False
+        with self._lock:
+            self._body_positions[body] = {
+                "altitude_deg": float(altitude_deg),
+                "azimuth_deg": float(azimuth_deg),
+                "evaluated_at_utc": utc_text(evaluated_at_utc),
+            }
+        return True
+
+    def clear_body_positions(self):
+        with self._lock:
+            self._body_positions = {"SUN": None, "MOON": None}
 
     def publish(self, candidate):
         body = candidate.body.upper()
@@ -306,10 +354,14 @@ class DashboardState:
                 "generated_at_utc": (
                     utc_text(generated_at) if generated_at is not None
                     else None),
-                "sun": {"candidates": self._body_snapshot_locked(
-                    "SUN", snapshot_now)},
-                "moon": {"candidates": self._body_snapshot_locked(
-                    "MOON", snapshot_now)},
+                "sun": {
+                    "current_position": deepcopy(self._body_positions["SUN"]),
+                    "candidates": self._body_snapshot_locked(
+                        "SUN", snapshot_now)},
+                "moon": {
+                    "current_position": deepcopy(self._body_positions["MOON"]),
+                    "candidates": self._body_snapshot_locked(
+                        "MOON", snapshot_now)},
                 "recent_events": deepcopy(self._history),
                 "presentation": {
                     "sep_green_max_deg": self.sep_green_max_deg,
@@ -339,8 +391,6 @@ class DashboardState:
 
     def _candidate_dict(self, candidate, include_live_fields=False):
         result = asdict(candidate)
-        if not include_live_fields:
-            result.pop("transit_distance_km", None)
         result["predicted_event_utc"] = utc_text(
             candidate.predicted_event_utc)
         result["last_prediction_update_utc"] = utc_text(
@@ -363,6 +413,9 @@ class DashboardState:
 
 
 class DisabledDashboard:
+    def __init__(self, telegram_controls=None):
+        self.telegram_controls = telegram_controls or TelegramBodyControls()
+
     def publish(self, candidate):
         return False
 
@@ -378,6 +431,19 @@ class DisabledDashboard:
     def tick(self, now_utc):
         return None
 
+    def update_body_position(self, body, altitude_deg, azimuth_deg,
+                             evaluated_at_utc):
+        return False
+
+    def clear_body_positions(self):
+        return None
+
+    def telegram_enabled(self, body):
+        return self.telegram_controls.enabled(body)
+
+    def set_telegram_enabled(self, body, enabled):
+        return self.telegram_controls.set_enabled(body, enabled)
+
     def invalidate_live(self):
         return None
 
@@ -386,11 +452,13 @@ class DisabledDashboard:
 
 
 class DashboardRuntime:
-    def __init__(self, state, server=None, thread=None, mobile_gps_state=None):
+    def __init__(self, state, server=None, thread=None, mobile_gps_state=None,
+                 telegram_controls=None):
         self.state = state
         self.server = server
         self.thread = thread
         self.mobile_gps_state = mobile_gps_state
+        self.telegram_controls = telegram_controls or TelegramBodyControls()
 
     def publish(self, candidate):
         return self.state.publish(candidate)
@@ -407,6 +475,20 @@ class DashboardRuntime:
     def tick(self, now_utc):
         return self.state.tick(now_utc)
 
+    def update_body_position(self, body, altitude_deg, azimuth_deg,
+                             evaluated_at_utc):
+        return self.state.update_body_position(
+            body, altitude_deg, azimuth_deg, evaluated_at_utc)
+
+    def clear_body_positions(self):
+        return self.state.clear_body_positions()
+
+    def telegram_enabled(self, body):
+        return self.telegram_controls.enabled(body)
+
+    def set_telegram_enabled(self, body, enabled):
+        return self.telegram_controls.set_enabled(body, enabled)
+
     def invalidate_live(self):
         return self.state.invalidate_live()
 
@@ -420,7 +502,7 @@ class DashboardRuntime:
             self.state.history_store.close()
 
 
-def _handler_factory(state, now_utc, mobile_gps_state,
+def _handler_factory(state, now_utc, mobile_gps_state, telegram_controls,
                      observer_position_provider=None,
                      stale_warning_seconds=30.0,
                      critical_warning_seconds=300.0):
@@ -471,6 +553,8 @@ def _handler_factory(state, now_utc, mobile_gps_state,
                 self._send_json(mobile_gps_state.diagnostics(now_utc()))
             elif path == "/api/observer":
                 self._send_json(observer_diagnostics())
+            elif path == "/api/telegram":
+                self._send_json(telegram_controls.snapshot())
             elif path in ("/", "/index.html"):
                 self._send("text/html; charset=utf-8",
                            DASHBOARD_HTML.encode("utf-8"))
@@ -479,6 +563,23 @@ def _handler_factory(state, now_utc, mobile_gps_state,
 
         def do_POST(self):
             path = urlsplit(self.path).path
+            if path == "/api/telegram":
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < length <= MAX_MOBILE_GPS_REQUEST_BYTES:
+                        raise ValueError
+                    payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                    if (not isinstance(payload, dict)
+                            or set(payload) != {"body", "enabled"}):
+                        raise ValueError
+                    self._send_json(telegram_controls.set_enabled(
+                        payload["body"], payload["enabled"]))
+                except (UnicodeDecodeError, json.JSONDecodeError,
+                        TypeError, ValueError):
+                    self._send_json(
+                        {"error": "Invalid Telegram control payload"},
+                        status=400)
+                return
             if path == "/api/observer":
                 if observer_position_provider is None:
                     self._send_json({"error": "Observer control unavailable"}, status=403)
@@ -604,9 +705,14 @@ def start_dashboard(enabled, host, port, now_utc, error_handler=None,
                     mobile_gps_critical_warning_seconds=300.0,
                     new_transit_indicator_enabled=True,
                     new_transit_threshold_seconds=(
-                        DEFAULT_NEW_TRANSIT_THRESHOLD_SECONDS)):
+                        DEFAULT_NEW_TRANSIT_THRESHOLD_SECONDS),
+                    telegram_sun_enabled=True,
+                    telegram_moon_enabled=True,
+                    telegram_body_change=None):
+    telegram_controls = TelegramBodyControls(
+        telegram_sun_enabled, telegram_moon_enabled, telegram_body_change)
     if not enabled:
-        return DisabledDashboard()
+        return DisabledDashboard(telegram_controls)
     errors = error_handler or (lambda message: None)
     history_store = (
         DashboardHistoryStore(history_dir, errors)
@@ -628,6 +734,7 @@ def start_dashboard(enabled, host, port, now_utc, error_handler=None,
         server = server_factory(
             (host, port), _handler_factory(
                 state, now_utc, mobile_gps_state,
+                telegram_controls,
                 observer_position_provider,
                 mobile_gps_stale_warning_seconds,
                 mobile_gps_critical_warning_seconds))
@@ -635,13 +742,16 @@ def start_dashboard(enabled, host, port, now_utc, error_handler=None,
             target=server.serve_forever, name="transit-dashboard", daemon=True)
         thread.start()
         return DashboardRuntime(
-            state, server, thread, mobile_gps_state=mobile_gps_state)
+            state, server, thread, mobile_gps_state=mobile_gps_state,
+            telegram_controls=telegram_controls)
     except Exception as error:
         try:
             errors("Dashboard server failed: {}".format(type(error).__name__))
         except Exception:
             pass
-        return DashboardRuntime(state, mobile_gps_state=mobile_gps_state)
+        return DashboardRuntime(
+            state, mobile_gps_state=mobile_gps_state,
+            telegram_controls=telegram_controls)
 
 
 DASHBOARD_HTML = r"""<!doctype html>
@@ -661,12 +771,13 @@ h1,h2,p{margin:4px 0}.candidate-heading{display:flex;align-items:baseline;gap:.6
 .history-controls{display:flex;flex-wrap:wrap;gap:7px;margin:8px 0 12px}.history-controls input,.history-controls select{min-width:0;padding:8px;border:1px solid #3a4558;border-radius:7px;background:#11161e;color:#eef}.history-controls input[type=date]{flex:1 1 135px}.history-controls input[type=search]{flex:2 1 150px}.history-controls select{flex:1 1 80px}.history-actions{display:flex;gap:8px;margin-top:10px}.event{margin-top:8px}.event .sep{font-size:1.05rem}
 .health{margin-left:auto;font-size:.8rem}.dot{display:inline-block;width:.65rem;height:.65rem;border-radius:50%;margin-right:.35rem}.active .dot{background:#36c66b}.stale .dot{background:#e0a62f}.disconnected .dot{background:#e45454}
 .observer-panel{display:flex;align-items:center;flex-wrap:wrap;gap:.35rem .7rem;margin:0 0 8px;padding:6px 8px;border:1px solid #303949;border-radius:8px;font-size:.8rem}.observer-controls,.observer-status{display:flex;align-items:center;flex-wrap:wrap;gap:.3rem .55rem}.observer-controls strong{font-size:.82rem}.observer-controls button{padding:5px 9px}.observer-controls label{white-space:nowrap}.gps-secondary{font-size:.75rem;padding:3px 7px!important}.observer-status{min-width:0}.observer-status .arrow{color:#8793a6}.observer-ok{color:#55d982}.observer-warn{color:#f0c34d}.observer-error{color:#ff6b6b;font-weight:700}
+.telegram-controls{display:flex;align-items:center;gap:.35rem;margin-left:auto}.telegram-controls button{padding:5px 8px;font-size:.75rem}.body-position{font-size:.72em;color:#9ba7ba;font-weight:500;white-space:nowrap}
 @media(max-width:650px){.grid{grid-template-columns:1fr}}
 </style></head><body>
 <nav><button id="live-tab" class="active">LIVE</button><button id="history-tab">HISTORY</button><span id="health" class="health disconnected"><span class="dot"></span><span class="label">DISCONNECTED</span></span></nav>
-<section class="observer-panel"><div class="observer-controls"><strong>OBSERVER</strong><span class="observer-modes"><button id="observer-static">STATIC</button><button id="observer-mobile">MOBILE</button></span><label title="Fallback to STATIC when mobile GPS becomes stale"><input id="observer-fallback" type="checkbox"> fallback</label><button id="gps-start" class="gps-secondary hidden">Start GPS</button><button id="gps-stop" class="gps-secondary hidden">Stop GPS</button></div><div id="observer-fields" class="observer-status"><span>STATIC</span><span class="arrow">→</span><span class="observer-ok">STATIC</span></div></section>
-<main id="live" class="grid"><section class="panel"><h1><span class="body-icon">☀️</span> SUN</h1><div id="sun"></div></section>
-<section class="panel"><h1><span class="body-icon moon-icon">☾</span> MOON</h1><div id="moon"></div></section></main>
+<section class="observer-panel"><div class="observer-controls"><strong>OBSERVER</strong><span class="observer-modes"><button id="observer-static">STATIC</button><button id="observer-mobile">MOBILE</button></span><label title="Fallback to STATIC when mobile GPS becomes stale"><input id="observer-fallback" type="checkbox"> fallback</label><button id="gps-start" class="gps-secondary hidden">Start GPS</button><button id="gps-stop" class="gps-secondary hidden">Stop GPS</button></div><div id="observer-fields" class="observer-status"><span>STATIC</span><span class="arrow">→</span><span class="observer-ok">STATIC</span></div><div class="telegram-controls"><strong>TELEGRAM</strong><button id="telegram-sun">SUN ON</button><button id="telegram-moon">MOON ON</button></div></section>
+<main id="live" class="grid"><section class="panel"><h1><span class="body-icon">☀️</span> SUN <span id="sun-position" class="body-position">ALT — · AZ —</span></h1><div id="sun"></div></section>
+<section class="panel"><h1><span class="body-icon moon-icon">☾</span> MOON <span id="moon-position" class="body-position">ALT — · AZ —</span></h1><div id="moon"></div></section></main>
 <main id="history" class="hidden"><section class="panel"><h1>HISTORY</h1><div class="history-controls"><input id="history-date" type="date" aria-label="UTC date"><input id="history-search" type="search" placeholder="Callsign" aria-label="Callsign search"><select id="history-body" aria-label="Celestial body"><option value="ALL">ALL</option><option value="SUN">SUN</option><option value="MOON">MOON</option></select></div><div id="events"></div><div class="history-actions"><button id="load-more" class="hidden">LOAD MORE</button><button id="export-csv">EXPORT CSV</button></div></section></main>
 <script>
 let state=null,failedPolls=0,historyRecords=[],historyOffset=0,historyHasMore=false,gpsWatchId=null,gpsEnabled=false,gpsAvailable=false,observerData=null,gpsUiOverride=null;const STALE_AFTER_MS=10000,DISCONNECT_AFTER_FAILURES=2,HISTORY_PAGE_SIZE=25;const esc=s=>String(s??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -688,14 +799,18 @@ async function refreshGpsStatus(){if(!gpsEnabled)return;try{renderGps(await gpsR
 async function loadGpsAvailability(){try{let data=await gpsRequest('GET');gpsAvailable=Boolean(data.available);renderObserver(observerData)}catch(e){renderGps({},'ERROR')}}
 function renderBody(name){let list=state?.[name]?.candidates||[],root=document.getElementById(name);if(!list.length){root.innerHTML='<p class="muted">No candidates</p>';return}
 root.innerHTML=list.slice(0,3).map((c,i)=>`<article class="candidate ${i?'':'primary'}"><div class="candidate-heading"><div class="countdown" data-utc="${esc(c.predicted_event_utc)}">${countdown(c.predicted_event_utc)}</div><h2>${esc(c.callsign||c.icao)}</h2>${c.is_new_late_candidate?'<span class="new-badge">NEW</span>':''}</div><p class="sep ${sepClass(c.separation_class)}">SEP ${c.separation_deg.toFixed(2)}°</p><p>${esc(c.state)}</p>${i?'':`<p class="transit-geometry">AZ ${c.body_azimuth_deg.toFixed(1)}° · ALT ${c.body_elevation_deg.toFixed(1)}° · ${c.transit_distance_km?.toFixed(0)??'—'} km</p><p class="muted">${eventTime(c.predicted_event_utc)}</p>`}</article>`).join('')}
-function renderHistory(){document.getElementById('events').innerHTML=historyRecords.map(x=>`<article class="event"><b>${esc(x.callsign||x.icao)} · ${esc(x.body)} · ${esc(x.outcome)}</b><p>${esc(x.predicted_event_utc)}</p><p class="sep">Final SEP ${Number(x.final_separation_deg).toFixed(2)}°</p></article>`).join('')||'<p class="muted">No history events</p>';document.getElementById('load-more').classList.toggle('hidden',!historyHasMore)}
+function renderBodyPosition(name){let p=state?.[name]?.current_position,root=document.getElementById(name+'-position');root.textContent=p?`ALT ${Math.round(p.altitude_deg)}° · AZ ${Math.round(p.azimuth_deg)}°`:'ALT — · AZ —'}
+function renderHistory(){document.getElementById('events').innerHTML=historyRecords.map(x=>`<article class="event"><b>${esc(x.callsign||x.icao)} · ${esc(x.body)} · ${esc(x.outcome)}</b><p>${esc(x.predicted_event_utc)}</p><p class="sep">Final SEP ${Number(x.final_separation_deg).toFixed(2)}°${x.transit_distance_km!=null&&Number.isFinite(Number(x.transit_distance_km))?' · '+Number(x.transit_distance_km).toFixed(0)+' km':''}</p></article>`).join('')||'<p class="muted">No history events</p>';document.getElementById('load-more').classList.toggle('hidden',!historyHasMore)}
 function historyQuery(offset=0){let q=new URLSearchParams({offset:String(offset),limit:String(HISTORY_PAGE_SIZE),body:document.getElementById('history-body').value}),d=document.getElementById('history-date').value,s=document.getElementById('history-search').value.trim();if(d)q.set('date',d);if(s)q.set('callsign',s);return q}
 async function loadHistory(reset=true){let offset=reset?0:historyOffset,response=await fetch('/api/history?'+historyQuery(offset),{cache:'no-store'});if(!response.ok)return;let page=await response.json();historyRecords=reset?page.records:historyRecords.concat(page.records);historyOffset=page.next_offset??historyRecords.length;historyHasMore=page.has_more;renderHistory()}
-function render(){renderBody('sun');renderBody('moon')}
+function render(){renderBodyPosition('sun');renderBodyPosition('moon');renderBody('sun');renderBody('moon')}
+function renderTelegram(data){for(let body of ['sun','moon']){let enabled=Boolean(data[body+'_enabled']),button=document.getElementById('telegram-'+body);button.textContent=body.toUpperCase()+' '+(enabled?'ON':'OFF');button.classList.toggle('active',enabled)}}
+async function telegramRequest(body=null,enabled=null){let options={cache:'no-store'};if(body){options.method='POST';options.headers={'Content-Type':'application/json'};options.body=JSON.stringify({body:body.toUpperCase(),enabled})}let response=await fetch('/api/telegram',options),data=await response.json();if(!response.ok)throw Error(data.error||'Telegram control failed');renderTelegram(data)}
 async function refresh(){let controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),2500);try{let response=await fetch('/api/state',{cache:'no-store',signal:controller.signal});if(!response.ok)throw Error('HTTP');state=await response.json();failedPolls=0;render();renderHealth()}catch(e){failedPolls++;renderHealth()}finally{clearTimeout(timeout)}}
 setInterval(()=>{document.querySelectorAll('[data-utc]').forEach(x=>x.textContent=countdown(x.dataset.utc));renderHealth()},1000);setInterval(refresh,3000);refresh();
 setInterval(refreshGpsStatus,3000);loadGpsAvailability();document.getElementById('gps-start').onclick=startGps;document.getElementById('gps-stop').onclick=stopGps;
 setInterval(()=>observerRequest().catch(()=>{}),3000);observerRequest().catch(()=>{});document.getElementById('observer-static').onclick=()=>observerRequest({mode:'STATIC'});document.getElementById('observer-mobile').onclick=()=>observerRequest({mode:'MOBILE'});document.getElementById('observer-fallback').onchange=e=>observerRequest({fallback_enabled:e.target.checked});
+telegramRequest().catch(()=>{});for(let body of ['sun','moon'])document.getElementById('telegram-'+body).onclick=e=>telegramRequest(body,!e.currentTarget.classList.contains('active'));
 document.getElementById('live-tab').onclick=()=>{document.getElementById('live').classList.remove('hidden');document.getElementById('history').classList.add('hidden')};
 document.getElementById('history-tab').onclick=()=>{document.getElementById('history').classList.remove('hidden');document.getElementById('live').classList.add('hidden');loadHistory(true)};
 for(let id of ['history-date','history-search','history-body'])document.getElementById(id).onchange=()=>loadHistory(true);

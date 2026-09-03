@@ -32,6 +32,7 @@ def record(index, date="2026-08-31", body="SUN", callsign=None,
         "body_elevation_deg": 20.0,
         "aircraft_elevation_deg": 21.5,
         "distance_km": 100.0,
+        "transit_distance_km": 34.4,
         "telegram_range": True,
     }
 
@@ -99,6 +100,7 @@ class DashboardHistoryStoreTests(unittest.TestCase):
             self.store.export_csv().decode("utf-8-sig"))))
         self.assertEqual('A,"B"', rows[0]["callsign"])
         self.assertEqual(list(CSV_FIELDS), list(rows[0]))
+        self.assertEqual("34.4", rows[0]["transit_distance_km"])
         empty = DashboardHistoryStore(Path(self.temp.name) / "empty")
         self.assertEqual(1, len(empty.export_csv().decode(
             "utf-8-sig").splitlines()))

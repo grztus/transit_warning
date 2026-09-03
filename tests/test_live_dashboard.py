@@ -270,14 +270,21 @@ class DashboardStateTests(unittest.TestCase):
             NOW + datetime.timedelta(seconds=11))["recent_events"][0]
         self.assertNotIn("is_new_late_candidate", history)
 
-    def test_transit_distance_is_live_only(self):
+    def test_transit_distance_is_preserved_in_history(self):
         self.state.publish(candidate(seconds=10, transit_distance=42.4))
         live = self.state.snapshot(NOW)["sun"]["candidates"][0]
         self.assertEqual(42.4, live["transit_distance_km"])
         self.state.tick(NOW + datetime.timedelta(seconds=11))
         history = self.state.snapshot(
             NOW + datetime.timedelta(seconds=11))["recent_events"][0]
-        self.assertNotIn("transit_distance_km", history)
+        self.assertEqual(42.4, history["transit_distance_km"])
+
+    def test_old_history_record_without_transit_distance_is_supported(self):
+        old = candidate(seconds=1)
+        self.state.publish(old)
+        self.state.tick(NOW + datetime.timedelta(seconds=2))
+        history = self.state.snapshot(NOW)["recent_events"][0]
+        self.assertIsNone(history["transit_distance_km"])
 
 
 class MobileGpsStateTests(unittest.TestCase):
@@ -454,6 +461,34 @@ class DashboardRuntimeTests(unittest.TestCase):
                 finally:
                     runtime.close()
 
+    def test_telegram_body_controls_are_runtime_only_and_independent(self):
+        runtime = dashboard.start_dashboard(
+            True, "127.0.0.1", 0, lambda: NOW,
+            telegram_sun_enabled=False, telegram_moon_enabled=True)
+        try:
+            self.assertFalse(runtime.telegram_enabled("SUN"))
+            self.assertTrue(runtime.telegram_enabled("MOON"))
+            port = runtime.server.server_address[1]
+            request = urllib.request.Request(
+                "http://127.0.0.1:{}/api/telegram".format(port),
+                data=json.dumps({"body": "SUN", "enabled": True}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(request, timeout=2) as response:
+                result = json.loads(response.read().decode())
+        finally:
+            runtime.close()
+        self.assertTrue(result["sun_enabled"])
+        self.assertTrue(result["moon_enabled"])
+
+    def test_telegram_switch_does_not_remove_live_candidate(self):
+        controls = dashboard.TelegramBodyControls(False, True)
+        runtime = dashboard.DashboardRuntime(
+            dashboard.DashboardState(), telegram_controls=controls)
+        runtime.publish(candidate("A00001", "SUN"))
+        runtime.set_telegram_enabled("SUN", True)
+        self.assertEqual(1, len(runtime.state.snapshot(NOW)[
+            "sun"]["candidates"]))
+
     def test_mobile_coordinates_never_enter_normal_state_history_or_export(self):
         runtime = dashboard.start_dashboard(
             True, "127.0.0.1", 0, lambda: NOW,
@@ -502,6 +537,27 @@ class DashboardRuntimeTests(unittest.TestCase):
         self.assertIn("c.transit_distance_km?.toFixed(0)", live_renderer)
         self.assertNotIn("Aircraft ALT", live_renderer)
         self.assertNotIn("c.distance_km?.toFixed(0)", live_renderer)
+
+    def test_body_headers_render_integer_alt_before_azimuth(self):
+        state = dashboard.DashboardState()
+        state.update_body_position("SUN", 31.4, 216.6, NOW)
+        state.update_body_position("MOON", 8.6, 297.6, NOW)
+        snapshot = state.snapshot(NOW)
+        self.assertEqual(31.4,
+                         snapshot["sun"]["current_position"]["altitude_deg"])
+        html = dashboard.DASHBOARD_HTML
+        self.assertIn("ALT ${Math.round(p.altitude_deg)}° · AZ ${Math.round(p.azimuth_deg)}°", html)
+        self.assertLess(html.index("ALT ${Math.round(p.altitude_deg)}"),
+                        html.index("AZ ${Math.round(p.azimuth_deg)}"))
+
+    def test_history_renders_t0_slant_range_and_handles_legacy_record(self):
+        renderer = dashboard.DASHBOARD_HTML.split(
+            "function renderHistory", 1)[1].split(
+                "function historyQuery", 1)[0]
+        self.assertIn("x.transit_distance_km", renderer)
+        self.assertIn("+' km'", renderer)
+        self.assertIn("x.transit_distance_km!=null", renderer)
+        self.assertIn("Number.isFinite", renderer)
 
     def test_moon_has_monochrome_identity_distinct_from_sun(self):
         html = dashboard.DASHBOARD_HTML
@@ -815,6 +871,33 @@ class ProductionIntegrationTests(unittest.TestCase):
             observer.coordinates, observer.elevation_m,
             (result[0], result[1]), 7000.0,
             horizontal_distance_km=result[4])
+
+    def test_current_body_positions_use_static_and_mobile_observer_contexts(self):
+        for effective in ("STATIC", "MOBILE_FRESH", "MOBILE_LAST_KNOWN"):
+            with self.subTest(effective=effective):
+                position = SimpleNamespace(marker=effective)
+                context = SimpleNamespace(position=position)
+                observed = []
+
+                def ephemeris(body, when, observer):
+                    observed.append((body, observer))
+                    return SimpleNamespace(
+                        altitude_deg=31.4 if body == "sun" else 8.6,
+                        azimuth_deg=216.6 if body == "sun" else 297.6)
+
+                with patch.object(
+                        transit, "current_observer_context",
+                        return_value=context), patch.object(
+                            transit, "body_position_at_utc",
+                            side_effect=ephemeris):
+                    self.assertTrue(
+                        transit.update_dashboard_body_positions(NOW))
+                self.assertEqual([position, position],
+                                 [item[1] for item in observed])
+                state = transit.dashboard_runtime.state.snapshot(NOW)
+                self.assertEqual(31.4,
+                                 state["sun"]["current_position"]["altitude_deg"])
+                self.assertNotIn("latitude", json.dumps(state).lower())
 
     def test_telegram_trigger_signal_marks_existing_dashboard_event(self):
         result = (51, 21, 88, 6.5, 10, 100, 600, 0, 88, 6.0, NOW)

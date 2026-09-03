@@ -44,6 +44,8 @@ class InstallationConfig:
     telegram_alert_separation_deg: float = 2.0
     telegram_alert_horizon_seconds: float = 300.0
     telegram_alert_stability_seconds: float = 5.0
+    telegram_sun_enabled: bool = True
+    telegram_moon_enabled: bool = True
     dashboard_enabled: bool = False
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8765
@@ -275,6 +277,10 @@ def load_installation_config(
     telegram_alert_stability_seconds = _optional_nonnegative_float(
         values, "TELEGRAM_ALERT_STABILITY_SECONDS", 5.0, errors,
         maximum=900.0)
+    telegram_sun_enabled = _boolean(
+        values, "TELEGRAM_SUN_ENABLED", True, errors)
+    telegram_moon_enabled = _boolean(
+        values, "TELEGRAM_MOON_ENABLED", True, errors)
     dashboard_enabled = _boolean(values, "DASHBOARD_ENABLED", False, errors)
     dashboard_host = _host(values, "DASHBOARD_HOST", "127.0.0.1", errors)
     dashboard_port = _port(values, "DASHBOARD_PORT", 8765, errors)
@@ -387,6 +393,8 @@ def load_installation_config(
         telegram_alert_separation_deg=telegram_alert_separation_deg,
         telegram_alert_horizon_seconds=telegram_alert_horizon_seconds,
         telegram_alert_stability_seconds=telegram_alert_stability_seconds,
+        telegram_sun_enabled=telegram_sun_enabled,
+        telegram_moon_enabled=telegram_moon_enabled,
         dashboard_enabled=dashboard_enabled,
         dashboard_host=dashboard_host,
         dashboard_port=dashboard_port,

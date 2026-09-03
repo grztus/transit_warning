@@ -177,6 +177,32 @@ class TelegramNotifier:
             changed = self.cancel(icao, body) or changed
         return changed
 
+    def suppress(self, event):
+        """Mark an eligible event seen without queueing a network message."""
+        key = (event.icao.upper(), event.body.upper())
+        expiry = event.predicted_transit_utc + datetime.timedelta(
+            seconds=EVENT_EXPIRY_GRACE_SECONDS)
+        with self._lock:
+            if self._closed:
+                return False
+            self._pending.pop(key, None)
+            self._events[key] = max(self._events.get(key, expiry), expiry)
+        return True
+
+    def suppress_body(self, body):
+        """Convert pending events for one body into deduplicated seen events."""
+        body = body.upper()
+        with self._lock:
+            pending = [(key, value) for key, value in self._pending.items()
+                       if key[1] == body]
+            for key, (_, event) in pending:
+                expiry = event.predicted_transit_utc + datetime.timedelta(
+                    seconds=EVENT_EXPIRY_GRACE_SECONDS)
+                self._events[key] = max(
+                    self._events.get(key, expiry), expiry)
+                self._pending.pop(key, None)
+        return bool(pending)
+
     def send_test(self, now_utc):
         success, error = self._transport.send(format_test_notification(now_utc))
         if not success:
@@ -224,6 +250,12 @@ class DisabledTelegramNotifier:
         return False
 
     def cancel_aircraft(self, icao):
+        return False
+
+    def suppress(self, event):
+        return False
+
+    def suppress_body(self, body):
         return False
 
     def close(self):

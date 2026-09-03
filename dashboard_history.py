@@ -18,7 +18,8 @@ CSV_FIELDS = (
     "outcome", "first_separation_deg", "minimum_separation_deg",
     "final_separation_deg", "first_seen_utc", "last_seen_utc",
     "history_recorded_at_utc", "body_azimuth_deg", "body_elevation_deg",
-    "aircraft_elevation_deg", "distance_km", "telegram_range",
+    "aircraft_elevation_deg", "distance_km", "transit_distance_km",
+    "telegram_range",
 )
 
 

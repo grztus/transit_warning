@@ -2294,6 +2294,13 @@ def emit_transit_notification(icao, callsign, celestial_body,
             aircraft_altitude_deg=float(transit_result[3]),
             distance_km=float(distance_km),
         )
+        try:
+            body_enabled = dashboard_runtime.telegram_enabled(body)
+        except Exception:
+            body_enabled = True
+        if not body_enabled:
+            telegram_notifier.suppress(event)
+            return False
         return telegram_notifier.consider(event)
     except Exception:
         return False
@@ -2367,6 +2374,32 @@ def mark_dashboard_history_worthy(icao, celestial_body):
     try:
         return dashboard_runtime.mark_history_worthy(
             icao, celestial_body.upper())
+    except Exception:
+        return False
+
+
+def set_telegram_body_enabled(celestial_body, enabled):
+    """Preserve notifier dedupe when a runtime body switch is turned off."""
+    if enabled or telegram_notifier is None:
+        return
+    try:
+        telegram_notifier.suppress_body(celestial_body.upper())
+    except Exception:
+        pass
+
+
+def update_dashboard_body_positions(now_utc):
+    """Publish current airless body directions for the active observer."""
+    try:
+        context = current_observer_context()
+        if context.position is None:
+            dashboard_runtime.clear_body_positions()
+            return False
+        for body in ("sun", "moon"):
+            position = body_position_at_utc(body, now_utc, context.position)
+            dashboard_runtime.update_body_position(
+                body, position.altitude_deg, position.azimuth_deg, now_utc)
+        return True
     except Exception:
         return False
 
@@ -4343,6 +4376,9 @@ def main():
             configuration.new_transit_indicator_enabled),
         new_transit_threshold_seconds=(
             configuration.new_transit_threshold_seconds),
+        telegram_sun_enabled=configuration.telegram_sun_enabled,
+        telegram_moon_enabled=configuration.telegram_moon_enabled,
+        telegram_body_change=set_telegram_body_enabled,
     )
     observer_position_provider.set_change_handler(
         invalidate_observer_dependent_state)
@@ -4418,7 +4454,9 @@ def main():
         while True:
             time.sleep(1)
             process_table_snapshot_request()
-            dashboard_runtime.tick(clock.now_utc())
+            dashboard_now = clock.now_utc()
+            dashboard_runtime.tick(dashboard_now)
+            update_dashboard_body_positions(dashboard_now)
             if daily_environment_recorder is not None:
                 daily_environment_recorder.rotate_if_needed(clock.now_utc())
             if session_recorder is not None:

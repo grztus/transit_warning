@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from config import ConfigurationError, InstallationConfig, load_installation_config
+import live_dashboard as dashboard
 import telegram_notifications as telegram
 import transit_warning as transit
 
@@ -128,6 +129,19 @@ class TelegramNotifierTests(unittest.TestCase):
         finally:
             notifier.close()
 
+    def test_disabling_body_converts_pending_event_to_seen(self):
+        transport = FakeTransport()
+        notifier = telegram.TelegramNotifier(
+            transport, stability_seconds=5.0)
+        try:
+            self.assertFalse(notifier.consider(event("SUN")))
+            self.assertTrue(notifier.suppress_body("SUN"))
+            self.assertFalse(notifier.consider(event(
+                "SUN", created=NOW + datetime.timedelta(seconds=6))))
+        finally:
+            notifier.close()
+        self.assertEqual([], transport.messages)
+
     def test_https_transport_posts_chat_and_message_with_timeout(self):
         captured = {}
 
@@ -200,6 +214,15 @@ class TelegramConfigTests(unittest.TestCase):
         self.assertEqual(2.0, config.telegram_alert_separation_deg)
         self.assertEqual(300.0, config.telegram_alert_horizon_seconds)
         self.assertEqual(5.0, config.telegram_alert_stability_seconds)
+        self.assertTrue(config.telegram_sun_enabled)
+        self.assertTrue(config.telegram_moon_enabled)
+
+    def test_body_switch_configuration_is_independent(self):
+        config = self.load({
+            **self.BASE, "TELEGRAM_SUN_ENABLED": "false",
+            "TELEGRAM_MOON_ENABLED": "true"})
+        self.assertFalse(config.telegram_sun_enabled)
+        self.assertTrue(config.telegram_moon_enabled)
 
     def test_enabled_requires_token_and_chat(self):
         with self.assertRaises(ConfigurationError) as caught:
@@ -255,6 +278,7 @@ class TransitIntegrationTests(unittest.TestCase):
         self.old_notifier = transit.telegram_notifier
         self.old_threshold = transit.telegram_alert_separation_deg
         self.old_horizon = transit.telegram_alert_horizon_seconds
+        self.old_dashboard = transit.dashboard_runtime
         transit.telegram_alert_separation_deg = 2.0
         transit.telegram_alert_horizon_seconds = 300.0
 
@@ -262,6 +286,50 @@ class TransitIntegrationTests(unittest.TestCase):
         transit.telegram_notifier = self.old_notifier
         transit.telegram_alert_separation_deg = self.old_threshold
         transit.telegram_alert_horizon_seconds = self.old_horizon
+        transit.dashboard_runtime = self.old_dashboard
+
+    def test_sun_and_moon_runtime_switches_are_independent(self):
+        notifier = Mock()
+        notifier.consider.return_value = True
+        transit.telegram_notifier = notifier
+        transit.dashboard_runtime = dashboard.DashboardRuntime(
+            dashboard.DashboardState(),
+            telegram_controls=dashboard.TelegramBodyControls(False, True))
+        result = (51, 21, 88, 6.5, 10, 100, 42, 0, 88, 6.2, NOW)
+        self.assertFalse(transit.emit_transit_notification(
+            "A00001", "SUNOFF", "sun", result, NOW, 100))
+        notifier.suppress.assert_called_once()
+        self.assertTrue(transit.emit_transit_notification(
+            "A00002", "MOONON", "moon", result, NOW, 100))
+        notifier.consider.assert_called_once()
+
+    def test_off_then_on_does_not_resend_seen_event(self):
+        transport = FakeTransport()
+        notifier = telegram.TelegramNotifier(transport, stability_seconds=0)
+        transit.telegram_notifier = notifier
+        controls = dashboard.TelegramBodyControls(
+            False, True, transit.set_telegram_body_enabled)
+        transit.dashboard_runtime = dashboard.DashboardRuntime(
+            dashboard.DashboardState(), telegram_controls=controls)
+        result = (51, 21, 88, 6.5, 10, 100, 42, 0, 88, 6.2, NOW)
+        try:
+            self.assertFalse(transit.emit_transit_notification(
+                "A00001", "SEEN", "sun", result, NOW, 100))
+            transit.dashboard_runtime.set_telegram_enabled("SUN", True)
+            self.assertFalse(transit.emit_transit_notification(
+                "A00001", "SEEN", "sun", result,
+                NOW + datetime.timedelta(seconds=1), 100))
+        finally:
+            notifier.close()
+        self.assertEqual([], transport.messages)
+
+    def test_global_disabled_notifier_still_wins(self):
+        transit.telegram_notifier = telegram.DisabledTelegramNotifier()
+        transit.dashboard_runtime = dashboard.DashboardRuntime(
+            dashboard.DashboardState())
+        result = (51, 21, 88, 6.5, 10, 100, 42, 0, 88, 6.2, NOW)
+        self.assertFalse(transit.emit_transit_notification(
+            "A00001", "OFF", "sun", result, NOW, 100))
 
     def test_emit_uses_configured_condition_and_is_fail_open(self):
         notifier = Mock()

@@ -160,6 +160,8 @@ TELEGRAM_CHAT_ID=<private-chat-id>
 TELEGRAM_ALERT_SEPARATION_DEG=2.0
 TELEGRAM_ALERT_HORIZON_SECONDS=300
 TELEGRAM_ALERT_STABILITY_SECONDS=5
+TELEGRAM_SUN_ENABLED=true
+TELEGRAM_MOON_ENABLED=true
 ```
 
 An accepted event must have `0 < time2X <= horizon` and remain below the
@@ -168,6 +170,11 @@ active ICAO/body event; countdown/improvement updates are not sent. Leaving
 eligibility resets pending stabilization. Deduplication lasts through predicted
 transit plus 60 seconds. Network delivery runs in a bounded background queue and
 fails open.
+
+SUN and MOON delivery can be switched independently from the dashboard. These
+switches are runtime-only; restart restores `TELEGRAM_SUN_ENABLED` and
+`TELEGRAM_MOON_ENABLED`. Suppression does not affect prediction or event history,
+and it preserves notification deduplication when a body is turned back on.
 
 ```console
 python transit_warning.py --test-notification
@@ -378,6 +385,7 @@ Telegram/presentation:
 | `TELEGRAM_ALERT_SEPARATION_DEG` | `2.0` | Alert threshold |
 | `TELEGRAM_ALERT_HORIZON_SECONDS` | `300` | Alert horizon |
 | `TELEGRAM_ALERT_STABILITY_SECONDS` | `5` | Stable eligibility |
+| `TELEGRAM_SUN_ENABLED`, `TELEGRAM_MOON_ENABLED` | `true` | Startup body-specific alert switches |
 | `TMUX_SEP_GREEN_MAX_DEG`, `TMUX_SEP_YELLOW_MAX_DEG`, `TMUX_SEP_VISIBLE_MAX_DEG` | `3`, `5`, `7` | Terminal colors/visibility |
 
 Dashboard/observer:
