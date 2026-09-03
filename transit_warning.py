@@ -120,12 +120,19 @@ from raw_adsb_diagnostic_replay import (
 )
 from transit_clock import ReplayClock, clock_from_args
 from transit_time import AdsBTimestampOffsetValidator, port_timestamp_to_utc
-from transit_snapshot import TransitSnapshotManager, runtime_git_commit
+from transit_snapshot import (
+    TransitSnapshotManager,
+    authoritative_snapshot_v3_source,
+    runtime_git_commit,
+)
 from telegram_notifications import (
     TransitNotification,
     create_telegram_notifier,
 )
-from authoritative_transit import AuthoritativeTransitLifecycle
+from authoritative_transit import (
+    AuthoritativeTransitLifecycle,
+    AuthoritativeTransitionKind,
+)
 from live_dashboard import (
     DashboardCandidate,
     DisabledDashboard,
@@ -621,6 +628,7 @@ geometric_altitude_selector = GeometricAltitudeSelector()
 shadow_2d_config = Shadow2DConfig()
 shadow_2d_diagnostics = None
 authoritative_transit_lifecycle = AuthoritativeTransitLifecycle()
+authoritative_terminal_predictions = {}
 
 
 def apply_installation_config(configuration: InstallationConfig):
@@ -1659,6 +1667,17 @@ def predicted_transit_remaining_seconds(icao, celestial_body, now_utc=None):
 
 def visible_transit_candidate(entry, celestial_body, icao=None, now_utc=None):
     """Return a numeric display block only for a visible transit candidate."""
+    if authoritative_transit_lifecycle.enabled and icao is not None:
+        prediction = authoritative_terminal_predictions.get(
+            (str(icao).upper(), celestial_body.upper()))
+        if prediction is None:
+            return None
+        now_utc = clock.now_utc() if now_utc is None else now_utc
+        time2x = max(
+            0, int((prediction.predicted_transit_utc - now_utc).total_seconds()))
+        if time2x <= 0 or prediction.separation_deg >= tmux_sep_visible_max_deg:
+            return None
+        return prediction.separation_deg, None, None, time2x
     indices = (
         (18, 19, 21, 20, 22)
         if celestial_body == "sun" else (23, 24, 27, 25, 26))
@@ -1685,6 +1704,16 @@ def terminal_separation_color(separation_deg):
     if separation < tmux_sep_yellow_max_deg:
         return YELLOW
     return RED
+
+
+def format_terminal_transit_candidate(values):
+    """Render SEP plus optional legacy-only p2x/h2x diagnostics."""
+    separation, p2x, h2x, time2x = values
+    p2x_text = "{:>7.1f}".format(p2x) if p2x is not None else "{:>7}".format("---")
+    h2x_text = "{:>7.1f}".format(h2x) if h2x is not None else "{:>7}".format("---")
+    return '{}{:>7.2f}{} {} {} {:>8.1f}'.format(
+        terminal_separation_color(separation), separation, RESET,
+        p2x_text, h2x_text, time2x)
 
 
 def build_terminal_render_plan(planes, row_limit, maximum_distance,
@@ -2027,7 +2056,7 @@ def complete_shadow_2d(prepared, legacy_result, legacy_prediction_base_utc):
             legacy_tca_seconds=legacy_tca)
             if coarse.passed else None)
         result = Shadow2DResult(coarse=coarse, exact=exact)
-        authoritative_transit_lifecycle.consider(
+        transition = authoritative_transit_lifecycle.consider_transition(
             context, result, context.prediction_base_utc)
         writer = shadow_2d_diagnostics
         if writer is not None:
@@ -2047,7 +2076,7 @@ def complete_shadow_2d(prepared, legacy_result, legacy_prediction_base_utc):
                 writer.counters["shadow_only"] += 1
             record["runtime_counters"] = dict(writer.counters)
             writer.record(record)
-        return result
+        return result, transition, context
     except Exception:
         return None
 
@@ -2192,6 +2221,7 @@ def _capture_transit_prediction(icao, callsign, celestial_body,
         "icao": icao,
         "callsign": callsign or None,
         "body": celestial_body.upper(),
+        "prediction_geometry": "LEGACY",
         "observer": {
             "lat": observer_position.latitude_deg,
             "lon": observer_position.longitude_deg,
@@ -2393,6 +2423,206 @@ def publish_dashboard_prediction(icao, callsign, celestial_body,
         return False
 
 
+def publish_authoritative_dashboard_prediction(prediction, now_utc,
+                                               current_distance_km):
+    """Publish one fresh true-2D result without legacy reconstruction."""
+    try:
+        time_to_event = (
+            prediction.predicted_transit_utc - now_utc).total_seconds()
+        if not 0 < time_to_event <= 900:
+            dashboard_runtime.withdraw(
+                prediction.icao, prediction.body, now_utc)
+            return False
+        return dashboard_runtime.publish(DashboardCandidate(
+            body=prediction.body, icao=prediction.icao,
+            callsign=prediction.callsign or None,
+            predicted_event_utc=prediction.predicted_transit_utc,
+            separation_deg=prediction.separation_deg,
+            body_azimuth_deg=prediction.body_azimuth_deg,
+            body_elevation_deg=prediction.body_altitude_deg,
+            aircraft_elevation_deg=prediction.aircraft_altitude_deg,
+            distance_km=float(current_distance_km),
+            last_prediction_update_utc=now_utc,
+            telegram_range=(
+                prediction.separation_deg < telegram_alert_separation_deg),
+            transit_distance_km=prediction.slant_range_km,
+            encounter_id=prediction.encounter_id,
+            prediction_geometry=prediction.model,
+        ))
+    except Exception:
+        return False
+
+
+def emit_authoritative_transit_notification(prediction, now_utc):
+    """Feed one fresh true-2D update into existing Telegram stabilization."""
+    if telegram_notifier is None:
+        return False
+    try:
+        time_to_event = (
+            prediction.predicted_transit_utc - now_utc).total_seconds()
+        if not (0 < time_to_event <= telegram_alert_horizon_seconds
+                and prediction.separation_deg
+                < telegram_alert_separation_deg):
+            telegram_notifier.cancel(prediction.icao, prediction.body)
+            return False
+        event = TransitNotification(
+            created_at_utc=now_utc, body=prediction.body,
+            icao=prediction.icao, callsign=prediction.callsign or None,
+            predicted_transit_utc=prediction.predicted_transit_utc,
+            time_to_event_seconds=time_to_event,
+            separation_deg=prediction.separation_deg,
+            body_azimuth_deg=prediction.body_azimuth_deg,
+            body_altitude_deg=prediction.body_altitude_deg,
+            aircraft_altitude_deg=prediction.aircraft_altitude_deg,
+            distance_km=prediction.slant_range_km,
+            encounter_id=prediction.encounter_id,
+            prediction_geometry=prediction.model,
+        )
+        try:
+            body_enabled = dashboard_runtime.telegram_enabled(prediction.body)
+        except Exception:
+            body_enabled = True
+        if not body_enabled:
+            telegram_notifier.suppress(event)
+            return False
+        return telegram_notifier.consider(event)
+    except Exception:
+        return False
+
+
+def _authoritative_frozen_prediction_state(prediction, context,
+                                           frozen_vertical_state=None):
+    """Serialize only state frozen by the winning true-2D evaluation."""
+    frozen = frozen_vertical_state or prediction.frozen_vertical_state
+    motion = frozen.motion_state
+    intent = frozen.intent_state
+    history = tuple(
+        motion.vertical_rate_history[-frozen.policy.stability_sample_count:]
+        if motion is not None else ())
+    details = dict(frozen.intent_details)
+    return {
+        "horizontal": {
+            "origin_lat": context.latitude_deg,
+            "origin_lon": context.longitude_deg,
+            "initial_track_deg": context.track_deg,
+            "groundspeed_kmh": context.groundspeed_kmh,
+            "earth_model": "sphere",
+            "earth_radius_km": float(earth_R),
+            "propagated_lat_at_t0_deg": prediction.aircraft_latitude_deg,
+            "propagated_lon_at_t0_deg": prediction.aircraft_longitude_deg,
+        },
+        "vertical": {
+            "evaluated_at_utc": _snapshot_utc_text(
+                frozen.prediction_base_utc),
+            "current_altitude": _frozen_parameter(
+                motion.altitude if motion is not None else None, "value_m"),
+            "latest_vertical_rate": _frozen_parameter(
+                motion.vertical_rate if motion is not None else None,
+                "value_fpm"),
+            "vertical_rate_history": [
+                _frozen_parameter(sample, "value_fpm") for sample in history
+            ],
+            "selected_altitude": _frozen_parameter(
+                intent.selected_altitude if intent is not None else None,
+                "value_ft"),
+            "nav_qnh": _frozen_parameter(
+                intent.nav_qnh if intent is not None else None, "value_hpa"),
+            "application_qnh_hpa": frozen.application_qnh_hpa,
+            "decision": {
+                "mode": frozen.prediction.mode.value,
+                "reason": frozen.prediction.reason,
+                "spread_fpm": frozen.prediction.spread_fpm,
+                "applied_seconds_at_t0": frozen.prediction.applied_seconds,
+                "predicted_altitude_before_clamp_m": (
+                    frozen.prediction_before_clamp.predicted_altitude_m),
+                "predicted_altitude_m": (
+                    frozen.prediction.predicted_altitude_m),
+                "final_geometric_altitude_m": frozen.final_altitude_m,
+                "geometric_altitude_correction_m": (
+                    frozen.geometric_altitude_correction_m),
+                "altitude_source": frozen.altitude_source,
+                "target_altitude_m": details.get("target_altitude_m"),
+                "intent_clamped": bool(details.get("intent_clamped")),
+                "intent_reason": details.get("intent_reason"),
+            },
+            "policy": _frozen_vertical_policy(frozen.policy),
+        },
+        "astronomy": {
+            "body": prediction.body,
+            "provider": "PyEphem",
+            "provider_version": _ephem_provider_version(),
+            "ephemeris_evaluated_at_utc": _snapshot_utc_text(
+                prediction.predicted_transit_utc),
+            "altitude_deg": prediction.body_altitude_deg,
+            "azimuth_deg": prediction.body_azimuth_deg,
+            "angular_diameter_arcsec": prediction.body_radius_deg * 7200.0,
+        },
+    }
+
+
+def capture_authoritative_transit_prediction(prediction, context, now_utc):
+    """Feed an exact frozen true-2D update to Snapshot V3, fail-open."""
+    if transit_snapshot_manager is None:
+        return False
+    try:
+        exact_source = authoritative_snapshot_v3_source(prediction)
+        observer_context = context.observer_context
+        observer_position = observer_context.position
+        time2x = (prediction.predicted_transit_utc - now_utc).total_seconds()
+        observer = {
+            "lat": observer_position.latitude_deg,
+            "lon": observer_position.longitude_deg,
+            "elevation_m": observer_position.elevation_m,
+        }
+        if observer_context.requested_mode == "MOBILE":
+            observer = {"elevation_m": observer_position.elevation_m}
+        return transit_snapshot_manager.consider_prediction({
+            "recorded_at_utc": now_utc,
+            "prediction_base_utc": _snapshot_utc_text(
+                context.prediction_base_utc),
+            "predicted_transit_utc": prediction.predicted_transit_utc,
+            "icao": prediction.icao,
+            "callsign": prediction.callsign or None,
+            "body": prediction.body,
+            "observer": observer,
+            "observer_context": {
+                "requested_mode": observer_context.requested_mode,
+                "effective_source": observer_context.effective_source,
+                "mobile_age_seconds": observer_context.mobile_age_seconds,
+                "mobile_accuracy_m": observer_context.mobile_accuracy_m,
+                "fallback_enabled": observer_context.fallback_enabled,
+                "fallback_active": observer_context.fallback_active,
+                "epoch": observer_context.epoch,
+            },
+            "encounter_id": prediction.encounter_id,
+            "prediction_geometry": prediction.model,
+            "time2x_seconds": time2x,
+            "aircraft_altitude_m": exact_source["aircraft_altitude_m"],
+            "separation_deg": prediction.separation_deg,
+            "predicted_aircraft_elevation_deg": (
+                prediction.aircraft_altitude_deg),
+            "body_altitude_deg": prediction.body_altitude_deg,
+            "body_azimuth_deg": prediction.body_azimuth_deg,
+            "body_angular_diameter_arcsec": (
+                prediction.body_radius_deg * 7200.0),
+            "transit_distance_km": prediction.slant_range_km,
+            "closest_point": {
+                "aircraft_lat": exact_source["aircraft_latitude_deg"],
+                "aircraft_lon": exact_source["aircraft_longitude_deg"],
+                "aircraft_azimuth_deg": prediction.aircraft_azimuth_deg,
+                "aircraft_altitude_deg": prediction.aircraft_altitude_deg,
+                "body_azimuth_deg": prediction.body_azimuth_deg,
+                "body_altitude_deg": prediction.body_altitude_deg,
+                "slant_range_km": prediction.slant_range_km,
+            },
+            "frozen_prediction_state": (
+                _authoritative_frozen_prediction_state(
+                    prediction, context, exact_source["vertical_state"])),
+        })
+    except Exception:
+        return False
+
+
 def mark_dashboard_history_worthy(icao, celestial_body):
     """Preserve a dashboard event accepted by the Telegram trigger path."""
     try:
@@ -2500,6 +2730,8 @@ def clear_transit_prediction_state(icao, entry, celestial_body,
     predicted_times.pop(icao, None)
     vertical_transit_diagnostics.pop((icao, celestial_body), None)
     geometric_altitude_selections.pop((icao, celestial_body), None)
+    authoritative_terminal_predictions.pop(
+        (str(icao).upper(), celestial_body.upper()), None)
     cancel_pending_transit_notification(icao, celestial_body)
     try:
         dashboard_runtime.withdraw(icao, celestial_body, clock.now_utc())
@@ -2521,6 +2753,7 @@ def invalidate_observer_dependent_state(observer_context=None):
     vertical_transit_diagnostics.clear()
     geometric_altitude_selections.clear()
     transit_solver_diagnostics.clear()
+    authoritative_terminal_predictions.clear()
     authoritative_transit_lifecycle.invalidate()
     try:
         dashboard_runtime.invalidate_live()
@@ -2531,6 +2764,48 @@ def invalidate_observer_dependent_state(observer_context=None):
             transit_snapshot_manager.invalidate_active_predictions()
     except Exception:
         pass
+
+
+def consume_authoritative_transition(transition, context, entry,
+                                     current_distance_km, now_utc):
+    """Route one lifecycle transition without invoking legacy consumers."""
+    if transition is None:
+        return False
+    kind = transition.kind
+    prediction = transition.prediction
+    body = context.body.lower()
+    start_index = 18 if body == "sun" else 23
+    if kind == AuthoritativeTransitionKind.HELD:
+        return True
+    if kind == AuthoritativeTransitionKind.WITHDRAWN:
+        clear_transit_prediction_state(
+            context.icao, entry, body, start_index)
+        return False
+    if kind == AuthoritativeTransitionKind.NONE or prediction is None:
+        return False
+
+    # OPENED and UPDATED are the only fresh consumer updates.
+    clear_transit_prediction(entry, start_index)
+    authoritative_terminal_predictions[(prediction.icao, prediction.body)] = (
+        prediction)
+    time2x = (
+        prediction.predicted_transit_utc - now_utc).total_seconds()
+    update_transit_prediction_timestamp(
+        prediction.icao, body, now_utc, time2x)
+    publish_authoritative_dashboard_prediction(
+        prediction, now_utc, current_distance_km)
+    if prediction.separation_deg < transit_separation_sound_alert:
+        gong()
+    notification_triggered = emit_authoritative_transit_notification(
+        prediction, now_utc)
+    if notification_triggered:
+        mark_dashboard_history_worthy(prediction.icao, prediction.body)
+    if time2x <= 2:
+        entry[31] = True
+        entry[30] = clock.now_utc()
+    entry[29 if body == "moon" else 30] = clock.now_utc()
+    capture_authoritative_transit_prediction(prediction, context, now_utc)
+    return True
 
 
 def _store_transit_solver_solution(icao, celestial_body, solution):
@@ -2592,6 +2867,8 @@ def clean_dict():
         geometric_altitude_selections.pop((icao, "moon"), None)
         drop_transit_snapshot_buffer(icao)
         authoritative_transit_lifecycle.discard_aircraft(icao)
+        authoritative_terminal_predictions.pop((icao, "SUN"), None)
+        authoritative_terminal_predictions.pop((icao, "MOON"), None)
 
 # Funkcja do obliczania odległości między punktami (haversine) / Function to calculate distance between points (haversine)
 def haversine(origin, destination):
@@ -3499,8 +3776,7 @@ def tabela(output=None, full=False, force=False, observer_position=None,
                     plane_dict[pentry], "sun", pentry, aktual_t)
 
                 if sun_values is not None:
-                    separation_deg = sun_values[0]
-                    wiersz += '{}{:>7.2f}{} {:>7.1f} {:>7.1f} {:>8.1f}'.format(terminal_separation_color(separation_deg), separation_deg, RESET, *sun_values[1:])
+                    wiersz += format_terminal_transit_candidate(sun_values)
                 else:
                     wiersz += '{:>7} {:>7} {:>7} {:>8}'.format('---', '---', '---', '---')
 
@@ -3510,8 +3786,7 @@ def tabela(output=None, full=False, force=False, observer_position=None,
                     plane_dict[pentry], "moon", pentry, aktual_t)
 
                 if moon_values is not None:
-                    separation_deg2 = moon_values[0]
-                    wiersz += '{}{:>7.2f}{} {:>7.1f} {:>7.1f} {:>8.1f}'.format(terminal_separation_color(separation_deg2), separation_deg2, RESET, *moon_values[1:])
+                    wiersz += format_terminal_transit_candidate(moon_values)
                 else:
                     wiersz += '{:>7} {:>7} {:>7} {:>8}'.format('---', '---', '---', '---')
 
@@ -3619,6 +3894,9 @@ def clean_transit_dict():
         geometric_altitude_selections.pop((icao, "sun"), None)
         geometric_altitude_selections.pop((icao, "moon"), None)
         drop_transit_snapshot_buffer(icao)
+        authoritative_transit_lifecycle.discard_aircraft(icao)
+        authoritative_terminal_predictions.pop((icao, "SUN"), None)
+        authoritative_terminal_predictions.pop((icao, "MOON"), None)
 
 # Function to manage sockets blocked in readline() during controlled shutdown.
 def _register_active_socket(port, sock):
@@ -4208,6 +4486,9 @@ def process_line(line, port):
                 dashboard_runtime.withdraw_aircraft(icao, clock.now_utc())
             except Exception:
                 pass
+            authoritative_transit_lifecycle.discard_aircraft(icao)
+            authoritative_terminal_predictions.pop((icao, "SUN"), None)
+            authoritative_terminal_predictions.pop((icao, "MOON"), None)
             sun_alt, sun_az, moon_alt, moon_az = tabela_for_observer(
                 observer_context)
             clean_dict()
@@ -4251,12 +4532,29 @@ def process_line(line, port):
                     icao, flight, shadow_body, observer_context,
                     shadow_track, velocity, elevation,
                     shadow_prediction_base_utc)
-        complete_shadow_2d(
+        moon_authoritative = complete_shadow_2d(
             shadow_prepared.pop("moon", None), tst_int1, prediction_now)
-        complete_shadow_2d(
+        sun_authoritative = complete_shadow_2d(
             shadow_prepared.pop("sun", None), tst_int2, prediction_now)
         shadow_completed = True
-        if tst_int1:
+        if authoritative_transit_lifecycle.enabled:
+            for body, completed in (
+                    ("moon", moon_authoritative),
+                    ("sun", sun_authoritative)):
+                if completed is not None:
+                    _, transition, authoritative_context = completed
+                else:
+                    transition = (
+                        authoritative_transit_lifecycle
+                        .unavailable_transition(
+                            observer_context.epoch, icao, body,
+                            prediction_now))
+                    authoritative_context = SimpleNamespace(
+                        icao=icao, body=body)
+                consume_authoritative_transition(
+                    transition, authoritative_context, plane_dict[icao],
+                    distance, prediction_now)
+        elif tst_int1:
             alt_a = round(tst_int1[3], 2)
             dst_h2x = round(tst_int1[4], 2)
             dst_p2x = round(tst_int1[5], 2)
@@ -4293,14 +4591,14 @@ def process_line(line, port):
             else:
                 clear_transit_prediction_state(
                     icao, plane_dict[icao], "moon", 23)
-        else:
+        elif not authoritative_transit_lifecycle.enabled:
             if moon_alt < 0.1:
                 clear_transit_prediction_state(
                     icao, plane_dict[icao], "moon", 23)
             else:
                 expire_transit_prediction_after_grace(
                     icao, plane_dict[icao], "moon", 23, prediction_now)
-        if tst_int2:
+        if not authoritative_transit_lifecycle.enabled and tst_int2:
             alt_a = round(tst_int2[3], 2)
             dst_h2x = round(tst_int2[4], 2)
             dst_p2x = round(tst_int2[5], 2)
@@ -4337,7 +4635,7 @@ def process_line(line, port):
             else:
                 clear_transit_prediction_state(
                     icao, plane_dict[icao], "sun", 18)
-        else:
+        elif not authoritative_transit_lifecycle.enabled:
             if sun_alt < 0.1:
                 clear_transit_prediction_state(
                     icao, plane_dict[icao], "sun", 18)
@@ -4353,8 +4651,15 @@ def process_line(line, port):
                 shadow_track, plane_dict[icao][14], plane_dict[icao][4],
                 shadow_prediction_base_utc)
     for pending_shadow in shadow_prepared.values():
-        complete_shadow_2d(pending_shadow, None,
-                           shadow_prediction_base_utc or clock.now_utc())
+        completed = complete_shadow_2d(
+            pending_shadow, None,
+            shadow_prediction_base_utc or clock.now_utc())
+        if authoritative_transit_lifecycle.enabled and completed is not None:
+            _, transition, authoritative_context = completed
+            consume_authoritative_transition(
+                transition, authoritative_context, plane_dict[icao],
+                plane_dict[icao][5],
+                shadow_prediction_base_utc or clock.now_utc())
     sun_alt, sun_az, moon_alt, moon_az = tabela_for_observer(
         observer_context)
     clean_dict()

@@ -29,6 +29,8 @@ class TransitNotification:
     body_altitude_deg: float
     aircraft_altitude_deg: float
     distance_km: float | None
+    encounter_id: str | None = None
+    prediction_geometry: str = "LEGACY"
 
 
 class TelegramTransport:
@@ -107,8 +109,13 @@ class TelegramNotifier:
             target=self._run, name="telegram-notifications", daemon=True)
         self._worker.start()
 
+    @staticmethod
+    def _event_key(event):
+        pair = (event.icao.upper(), event.body.upper())
+        return pair + (event.encounter_id,) if event.encounter_id else pair
+
     def notify(self, event):
-        key = (event.icao.upper(), event.body.upper())
+        key = self._event_key(event)
         now = event.created_at_utc
         with self._lock:
             if self._closed:
@@ -138,7 +145,7 @@ class TelegramNotifier:
         """Accept an eligible event only after continuous stable eligibility."""
         if self._stability_seconds <= 0:
             return self.notify(event)
-        key = (event.icao.upper(), event.body.upper())
+        key = self._event_key(event)
         now = event.created_at_utc
         with self._lock:
             if self._closed:
@@ -168,8 +175,11 @@ class TelegramNotifier:
 
     def cancel(self, icao, body):
         with self._lock:
-            return self._pending.pop(
-                (icao.upper(), body.upper()), None) is not None
+            prefix = (icao.upper(), body.upper())
+            keys = [key for key in self._pending if key[:2] == prefix]
+            for key in keys:
+                self._pending.pop(key, None)
+            return bool(keys)
 
     def cancel_aircraft(self, icao):
         changed = False
@@ -179,7 +189,7 @@ class TelegramNotifier:
 
     def suppress(self, event):
         """Mark an eligible event seen without queueing a network message."""
-        key = (event.icao.upper(), event.body.upper())
+        key = self._event_key(event)
         expiry = event.predicted_transit_utc + datetime.timedelta(
             seconds=EVENT_EXPIRY_GRACE_SECONDS)
         with self._lock:

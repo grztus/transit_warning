@@ -62,6 +62,25 @@ class AuthoritativeSnapshotSourceTests(unittest.TestCase):
         self.assertEqual(7654.3, source["aircraft_altitude_m"])
         self.assertIs(vertical, source["vertical_state"])
 
+    def test_stable_authoritative_id_survives_t0_drift(self):
+        manager = TransitSnapshotManager(
+            sep_threshold_deg=0.5, arm_seconds=15.0,
+            git_commit="test")
+        first = prediction(separation=0.2, time_shift=10)
+        first["encounter_id"] = "7:ABC123:SUN:1"
+        first["prediction_geometry"] = "TRUE_2D"
+        self.assertTrue(manager.consider_prediction(first))
+        changed = prediction(separation=0.1, time_shift=12,
+                             recorded_offset=1)
+        changed["encounter_id"] = first["encounter_id"]
+        changed["prediction_geometry"] = "TRUE_2D"
+        self.assertFalse(manager.consider_prediction(changed))
+        active = manager.active_events
+        self.assertEqual(1, len(active))
+        event = next(iter(active.values()))
+        self.assertEqual(first["encounter_id"], event["event_id"])
+        self.assertEqual(2, len(event["prediction_updates"]))
+
 
 def prediction(separation=0.4, icao="ABC123", body="SUN",
                recorded_offset=-2, callsign="TEST123", time_shift=0,

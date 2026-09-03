@@ -45,6 +45,8 @@ class DashboardCandidate:
     last_prediction_update_utc: datetime.datetime
     telegram_range: bool
     transit_distance_km: float | None = None
+    encounter_id: str | None = None
+    prediction_geometry: str = "LEGACY"
 
 
 @dataclass(frozen=True)
@@ -220,6 +222,7 @@ class DashboardState:
             return False
         with self._lock:
             existing = self._live[body].get(key)
+            visible_now = candidate.separation_deg < self.sep_visible_max_deg
             first_time_to_event = (
                 candidate.predicted_event_utc
                 - candidate.last_prediction_update_utc).total_seconds()
@@ -240,12 +243,19 @@ class DashboardState:
                 "history_worthy": (
                     existing["history_worthy"] if existing is not None
                     else False),
+                "ever_visible": (
+                    existing["ever_visible"] if existing is not None
+                    else visible_now),
                 "late_new_event": (
                     existing["late_new_event"] if existing is not None
-                    else (self.new_transit_indicator_enabled
+                    and existing["ever_visible"]
+                    else (visible_now
+                          and self.new_transit_indicator_enabled
                           and 0.0 <= first_time_to_event
                           <= self.new_transit_threshold_seconds)),
             }
+            if visible_now:
+                self._live[body][key]["ever_visible"] = True
         return True
 
     def mark_history_worthy(self, icao, body):
@@ -265,7 +275,8 @@ class DashboardState:
             predicted = item["candidate"].predicted_event_utc
             near_event = now_utc >= predicted - datetime.timedelta(
                 seconds=WITHDRAW_HISTORY_GRACE_SECONDS)
-            if item["history_worthy"] or near_event:
+            if (item["history_worthy"]
+                    or (item["ever_visible"] and near_event)):
                 self._to_history_locked(item, now_utc, "WITHDRAWN")
         return True
 
@@ -288,11 +299,12 @@ class DashboardState:
                        if item["candidate"].predicted_event_utc <= now_utc]
                 for icao in due:
                     item = self._live[body].pop(icao)
-                    self._to_history_locked(item, now_utc, "PASSED")
+                    if item["history_worthy"] or item["ever_visible"]:
+                        self._to_history_locked(item, now_utc, "PASSED")
 
     def _to_history_locked(self, item, recorded_at_utc, reason):
         candidate = item["candidate"]
-        event_id = "{}:{}:{}".format(
+        event_id = candidate.encounter_id or "{}:{}:{}".format(
             candidate.icao.upper(), candidate.body.upper(),
             utc_text(candidate.predicted_event_utc))
         if any(event["event_id"] == event_id for event in self._history):
@@ -380,6 +392,10 @@ class DashboardState:
         )
         result = []
         for item in items:
+            if (item["candidate"].prediction_geometry == "TRUE_2D"
+                    and item["candidate"].separation_deg
+                    >= self.sep_visible_max_deg):
+                continue
             candidate = self._candidate_dict(
                 item["candidate"], include_live_fields=True)
             candidate["is_new_late_candidate"] = bool(

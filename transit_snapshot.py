@@ -126,7 +126,9 @@ class TransitSnapshotManager:
             recorded_utc = item["recorded_at_utc"]
             self._require_aware(predicted_utc, "predicted transit timestamp")
             self._require_aware(recorded_utc, "prediction timestamp")
-            key = (icao, body)
+            supplied_event_id = item.get("encounter_id")
+            key = ((icao, body, supplied_event_id)
+                   if supplied_event_id else (icao, body))
             serialized = self._serialize_prediction(item)
             signature = self._prediction_signature(item)
             with self._lock:
@@ -153,7 +155,7 @@ class TransitSnapshotManager:
                 if recent_until is not None and recorded_utc <= recent_until:
                     return False
 
-                event_id = "{}_{}_{}_{}".format(
+                event_id = supplied_event_id or "{}_{}_{}_{}".format(
                     predicted_utc.strftime("%Y%m%d_%H%M%S_%f"),
                     icao, body, uuid.uuid4().hex[:8])
                 self._active[key] = {
@@ -346,10 +348,14 @@ class TransitSnapshotManager:
         aircraft = document["aircraft"]
         callsign = safe_filename_component(
             aircraft.get("callsign"), "NOCALL")
+        event_suffix = (
+            safe_filename_component(document["event_id"], "EVENT")[-24:]
+            if ":" in document["event_id"]
+            else document["event_id"].split("_")[-1])
         stem = "{}_{}_{}_{}_{}".format(
             reference.strftime("%Y%m%d_%H%M%S_%f"),
             safe_filename_component(aircraft["icao"], "UNKNOWN"),
-            callsign, document["body"], document["event_id"].split("_")[-1])
+            callsign, document["body"], event_suffix)
         try:
             target_dir.mkdir(parents=True, exist_ok=True)
             temporary = target_dir / (".{}.tmp".format(uuid.uuid4().hex))
