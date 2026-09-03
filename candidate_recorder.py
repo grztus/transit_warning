@@ -51,6 +51,23 @@ class CandidateEncounterOutcome(str, Enum):
 
 
 @dataclass(frozen=True)
+class FullRecorderReference:
+    """Frozen private reference to one active, fully covering FULL session."""
+
+    session_id: str
+    session_directory: Path
+    session_start_utc: datetime
+    streams: Mapping[str, Mapping[str, Any]]
+
+    def __post_init__(self):
+        frozen = {
+            str(name): MappingProxyType(dict(details))
+            for name, details in self.streams.items()
+        }
+        object.__setattr__(self, "streams", MappingProxyType(frozen))
+
+
+@dataclass(frozen=True)
 class CandidateEncounterState:
     """One triggered authoritative encounter and its immutable window state."""
 
@@ -843,12 +860,15 @@ class CandidateBundleStore:
         StreamType.MLAT_BEAST: "mlat_beast.bin",
     }
 
-    def __init__(self, root_directory, pre_buffer):
+    def __init__(self, root_directory, pre_buffer,
+                 full_recorder_reference=None):
         self.root_directory = Path(root_directory)
         self.pre_buffer = pre_buffer
+        self.full_recorder_reference = full_recorder_reference
         self._captures = {}
         self._encounters = {}
         self._encounter_contexts = {}
+        self._reference_directories = {}
         self._lock = threading.RLock()
         self._pending_finalizations = set()
         self._pending_degradation = {}
@@ -887,6 +907,13 @@ class CandidateBundleStore:
             if not isinstance(state, CandidateEncounterState):
                 return False
             with self._lock:
+                if self.full_recorder_reference is not None:
+                    self._encounters[state.encounter_id] = state
+                    if observer_context is not None:
+                        self._encounter_contexts.setdefault(
+                            state.encounter_id, observer_context)
+                    self._write_full_reference_manifest_locked(state, "active")
+                    return True
                 capture = self._captures.get(state.icao)
                 if capture is None or capture.closed:
                     capture = self._start_capture_locked(state, capture_state)
@@ -931,10 +958,16 @@ class CandidateBundleStore:
                         continue
                     self._encounters[state.encounter_id] = state
                     affected.add(state.icao)
+                    if self.full_recorder_reference is not None:
+                        self._write_full_reference_manifest_locked(
+                            state, "complete")
+                        continue
                     capture = self._captures.get(state.icao)
                     if capture is not None:
                         self._write_encounter_manifest_locked(state, capture)
                 for icao in affected:
+                    if self.full_recorder_reference is not None:
+                        continue
                     capture = self._captures.get(icao)
                     if capture is None:
                         continue
@@ -967,6 +1000,12 @@ class CandidateBundleStore:
             if closed_at_utc is not None:
                 validate_utc_datetime(closed_at_utc)
             with self._lock:
+                if self.full_recorder_reference is not None:
+                    for state in tuple(self._encounters.values()):
+                        if state.unfinished:
+                            self._write_full_reference_manifest_locked(
+                                state, "incomplete")
+                    return True
                 for capture in tuple(self._captures.values()):
                     for stream_type, stream in capture.streams.items():
                         if not stream["data"].closed:
@@ -991,6 +1030,83 @@ class CandidateBundleStore:
         except Exception as error:
             self.last_error = str(error)
             return False
+
+    def _full_reference_directory_locked(self, state):
+        existing = self._reference_directories.get(state.encounter_id)
+        if existing is not None:
+            return existing
+        day = state.triggered_at_utc.strftime("%Y%m%d")
+        safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", state.encounter_id)
+        root = self.root_directory / day / state.icao / "full_references"
+        collision_index = 0
+        while True:
+            name = (safe_id if collision_index == 0 else
+                    "{}_{:02d}".format(safe_id, collision_index))
+            directory = root / name
+            try:
+                directory.mkdir(parents=True, exist_ok=False)
+                break
+            except FileExistsError:
+                collision_index += 1
+        self._reference_directories[state.encounter_id] = directory
+        return directory
+
+    def _write_full_reference_manifest_locked(self, state, marker_status):
+        reference = self.full_recorder_reference
+        directory = self._full_reference_directory_locked(state)
+        relative_session = os.path.relpath(
+            Path(reference.session_directory).resolve(), directory.resolve())
+        observer = self._encounter_contexts.get(state.encounter_id)
+        degradation_reasons = sorted(
+            self._pending_degradation.get(state.icao, ()))
+        payload = {
+            "schema_version": 1,
+            "private_forensic_data": True,
+            "storage_mode": "FULL_REFERENCE",
+            "marker_status": marker_status,
+            "degraded": bool(degradation_reasons),
+            "degradation_reasons": degradation_reasons,
+            "encounter_id": state.encounter_id,
+            "observer_epoch": state.observer_epoch,
+            "icao": state.icao,
+            "callsign": getattr(
+                state.latest_prediction, "callsign", "") or None,
+            "body": state.body,
+            "encounter_generation": state.encounter_generation,
+            "triggered_at_utc": _utc_text(state.triggered_at_utc),
+            "last_update_utc": _utc_text(state.last_update_utc),
+            "completed_at_utc": _utc_text(state.completed_at_utc),
+            "outcome": state.outcome.value,
+            "required_window": {
+                "start_utc": _utc_text(state.prebuffer_start_utc),
+                "requested_end_utc": _utc_text(
+                    state.requested_end_time_utc),
+                "applied_end_utc": _utc_text(state.required_end_time_utc),
+                "hard_end_utc": _utc_text(state.hard_end_time_utc),
+                "configured_hard_ceiling_seconds": (
+                    state.hard_ceiling_seconds),
+                "hard_ceiling_applied": state.hard_ceiling_applied,
+                "truncation_reason": (
+                    "maximum_capture_duration"
+                    if state.hard_ceiling_applied else None),
+            },
+            "prediction_geometry": getattr(
+                getattr(state.latest_prediction, "model", None),
+                "value", getattr(state.latest_prediction, "model", None)),
+            "full_session": {
+                "session_id": reference.session_id,
+                "session_start_utc": _utc_text(
+                    reference.session_start_utc),
+                "relative_path": Path(relative_session).as_posix(),
+                "streams": _json_safe(reference.streams),
+            },
+            "trigger_prediction": _prediction_manifest(
+                state.trigger_prediction),
+            "latest_prediction": _prediction_manifest(
+                state.latest_prediction),
+            "observer_context": _observer_manifest(observer),
+        }
+        _atomic_json(directory / "manifest.json", payload)
 
     def _start_capture_locked(self, state, capture_state):
         day = state.triggered_at_utc.strftime("%Y%m%d")

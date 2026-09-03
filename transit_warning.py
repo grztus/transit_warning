@@ -138,6 +138,7 @@ from candidate_recorder import (
     CandidateEncounterManager,
     CandidatePreBuffer,
     CandidateStorageWorker,
+    FullRecorderReference,
 )
 from live_dashboard import (
     DashboardCandidate,
@@ -641,6 +642,51 @@ candidate_bundle_store = None
 candidate_storage_worker = None
 
 
+def active_full_recorder_reference(recorder):
+    """Return a frozen reference only when FULL covers every live stream.
+
+    FULL recording is fixed at process startup.  Candidate storage therefore
+    selects one mode for that process and never mutates or controls the FULL
+    recorder.
+    """
+    try:
+        if recorder is None or getattr(recorder, "_closed", True):
+            return None
+        manifest = recorder.manifest_data()
+        if manifest.get("recording_status") != "recording":
+            return None
+        required = [
+            ("adsb", "adsb_sbs"),
+            ("mlat", "mlat_sbs"),
+        ]
+        if raw_adsb_port is not None:
+            required.append(("raw", "raw_adsb"))
+        if mlat_beast_enabled:
+            required.append(("mlat_beast", "mlat_beast"))
+        streams = {}
+        for section_name, stream_name in required:
+            section = manifest.get(section_name)
+            if not isinstance(section, dict):
+                return None
+            if section.get("status") != "recording":
+                return None
+            streams[stream_name] = {
+                key: section.get(key) for key in (
+                    "file", "events_file", "port", "format",
+                    "timestamp_semantics", "receipt_timing",
+                    "receipt_timestamp_semantics", "status")
+                if key in section
+            }
+        return FullRecorderReference(
+            session_id=str(recorder.session_id),
+            session_directory=Path(recorder.session_dir),
+            session_start_utc=recorder.session_start_utc,
+            streams=streams,
+        )
+    except Exception:
+        return None
+
+
 def initialize_candidate_recorder_observation():
     """Create fail-open Candidate Recorder runtime state and private store."""
     global candidate_pre_buffer, candidate_encounter_manager
@@ -650,12 +696,15 @@ def initialize_candidate_recorder_observation():
         candidate_pre_buffer = CandidatePreBuffer(clock=clock.now_utc)
         candidate_encounter_manager = CandidateEncounterManager(
             pre_buffer=candidate_pre_buffer)
+        full_reference = active_full_recorder_reference(session_recorder)
         candidate_bundle_store = CandidateBundleStore(
-            Path("recordings") / "candidates", candidate_pre_buffer)
+            Path("recordings") / "candidates", candidate_pre_buffer,
+            full_recorder_reference=full_reference)
         candidate_storage_worker = CandidateStorageWorker(
             candidate_bundle_store)
-        candidate_pre_buffer.set_record_sink(
-            candidate_storage_worker.enqueue_record)
+        if full_reference is None:
+            candidate_pre_buffer.set_record_sink(
+                candidate_storage_worker.enqueue_record)
     except Exception:
         candidate_pre_buffer = None
         candidate_encounter_manager = None
