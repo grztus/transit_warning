@@ -71,8 +71,9 @@ authoritative if this document becomes stale.
 - `streams.zip` is the canonical completed archive. Failed finalization
   preserves loose inputs.
 - Candidate Auto-Recorder Phases 1 and 2 are implemented in
-  `candidate_recorder.py` and remain dormant: they are not connected to
-  production stream readers or disk output.
+  `candidate_recorder.py`. Phase 3A connects their in-memory machinery to live
+  production input and authoritative lifecycle paths. It is observational,
+  fail-open, and diskless rather than completely runtime-dormant.
 - Phase 1 provides:
   - per-ICAO bounded in-memory pre-buffering;
   - ADS-B SBS and MLAT SBS demultiplexing;
@@ -109,10 +110,24 @@ authoritative if this document becomes stale.
   - stale-before-active eviction;
   - mutable metadata;
   - naive/non-UTC timestamps.
-- Phase 2 is in-memory only. It performs no candidate socket-reader integration,
-  physical writes, directory creation, production-runtime integration, or
-  FULL-recorder suppression/marker handling. Existing FULL recording and all
-  prediction consumers remain unchanged.
+- Phase 3A observes existing production paths without duplicating their
+  ownership:
+  - ADS-B SBS and MLAT SBS input feed `CandidatePreBuffer`;
+  - RAW ADS-B input is observed from the existing reader path;
+  - parsed MLAT Beast frames are observed from the existing parser path;
+  - existing authoritative lifecycle transitions feed
+    `CandidateEncounterManager`, including applicable observer invalidation and
+    aircraft-removal transitions;
+  - the main loop advances completion of in-memory forensic windows.
+- No duplicate sockets, readers, or parsers were introduced. Candidate runtime
+  hooks are fail-open so their exceptions cannot interrupt normal stream
+  processing, prediction, authoritative lifecycle handling, or FULL recording.
+  Phase 3A changed no prediction geometry, dashboard, Telegram, HISTORY,
+  snapshot, gong, or FULL-recorder behavior.
+- Phase 3A remains diskless: it creates no candidate files, directories,
+  bundles, or writers. It emits no observer coordinates or candidate forensic
+  data through ordinary logs, dashboard, Telegram, HISTORY, public CSV, or
+  other normal diagnostics/output.
 - The manually started FULL recorder has priority and Candidate Recorder logic
   must never stop or interfere with it. Future integration must avoid duplicate
   physical capture while FULL recording is active; covered candidate encounters
@@ -122,7 +137,17 @@ authoritative if this document becomes stale.
   including MOBILE coordinates, solely because later photo reconstruction
   requires it. Such coordinates are private forensic data and must stay out of
   ordinary logs, dashboard, Telegram, HISTORY, public CSV, and other normal
-  diagnostics/output.
+  diagnostics/output. Phase 3A does not persist this context because it writes
+  no bundles.
+
+### Candidate Auto-Recorder Phase 3A validation
+
+- Focused Candidate Recorder tests: 43 passed.
+- Authoritative/recorder regression tests: 133 passed.
+- Full suite: 766 run, 765 passed, with one known Windows dashboard HTTP
+  teardown error; that test passed independently.
+- `py_compile` passed.
+- `git diff --check` passed.
 
 ## Testing and runtime
 
@@ -145,10 +170,9 @@ authoritative if this document becomes stale.
 
 ## Planned next work
 
-The next checkpoint is **Candidate Auto-Recorder Phase 3A — dormant runtime
-wiring without disk output**. It should connect production SBS/RAW/MLAT inputs
-to `CandidatePreBuffer` and authoritative lifecycle transitions to
-`CandidateEncounterManager`, while remaining observational and fail-open. It
-must not yet create candidate bundles/writers or implement FULL-recorder
-suppression/markers, and must not change prediction, dashboard, Telegram,
-history, snapshots, gong, or full-recorder behavior.
+The next checkpoint is **Candidate Auto-Recorder Phase 3B — physical
+candidate-bundle writing/finalization and FULL-recorder-aware marker/index
+handling**. It must preserve FULL recorder priority, fail-open isolation,
+authoritative encounter identity, all Phase 1/2/3A semantics, and private
+frozen observer-context rules. It must not leak private forensic data into
+normal outputs. Phase 3B is not designed or implemented yet.
