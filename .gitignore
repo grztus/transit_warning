@@ -19,3 +19,7 @@ venv/
 
 # Pliki tymczasowe
 *.tmp
+
+# Local/private development state
+HANDOFF.md
+PROJECT_STATE.md
