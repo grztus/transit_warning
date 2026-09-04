@@ -1,6 +1,7 @@
 import type { BootstrapDto } from "./types";
 
 export const BOOTSTRAP_ENDPOINT = "/api/v1/bootstrap";
+export const STREAM_ENDPOINT = "/api/v1/stream";
 export const POLL_INTERVAL_MS = 3_000;
 export const MAX_RETRY_INTERVAL_MS = 30_000;
 

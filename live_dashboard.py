@@ -16,6 +16,7 @@ from app_backend.settings import (
     SettingsValidationError,
 )
 from app_backend.state import ApplicationStateStore
+from app_backend.sse import SseBroker, encode_sse, live_envelope, settings_envelope
 from dashboard_history import (
     DEFAULT_PAGE_SIZE,
     DashboardHistoryStore,
@@ -564,6 +565,7 @@ class DashboardRuntime:
 
 def _handler_factory(state, now_utc, mobile_gps_state, telegram_controls,
                      application_state_store=None, settings_store=None,
+                     sse_broker=None,
                      observer_position_provider=None,
                      stale_warning_seconds=30.0,
                      critical_warning_seconds=300.0):
@@ -599,6 +601,8 @@ def _handler_factory(state, now_utc, mobile_gps_state, telegram_controls,
                     application_state_store.snapshot(),
                     settings_store.snapshot(), observer_diagnostics(),
                     now_utc()))
+            elif path == "/api/v1/stream":
+                self._send_sse()
             elif path == "/api/v1/settings":
                 self._send_json(settings_store.snapshot())
             elif path == "/api/history":
@@ -781,6 +785,30 @@ def _handler_factory(state, now_utc, mobile_gps_state, telegram_controls,
                 json.dumps(value, separators=(",", ":")).encode("utf-8"),
                 status=status)
 
+        def _send_sse(self):
+            if sse_broker is None:
+                self.send_error(503)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            client = sse_broker.subscribe((
+                live_envelope(application_state_store.snapshot()),
+                settings_envelope(settings_store.snapshot())))
+            try:
+                while True:
+                    events = client.next(20.0)
+                    text = ("".join(encode_sse(item) for item in events)
+                            if events else ": heartbeat\n\n")
+                    self.wfile.write(text.encode("utf-8"))
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            finally:
+                client.close()
+
         def _send(self, content_type, body, disposition=None, status=200):
             self.send_response(status)
             self.send_header("Content-Type", content_type)
@@ -867,6 +895,11 @@ def start_dashboard(enabled, host, port, now_utc, error_handler=None,
         new_transit_indicator_enabled=new_transit_indicator_enabled,
         new_transit_threshold_seconds=new_transit_threshold_seconds)
     application_state_store = ApplicationStateStore()
+    sse_broker = SseBroker()
+    application_state_store.subscribe(
+        lambda snapshot: sse_broker.publish(live_envelope(snapshot)))
+    settings_store.subscribe(
+        lambda snapshot: sse_broker.publish(settings_envelope(snapshot)))
     try:
         state.tick(now_utc())
         application_state_store.publish(state.snapshot())
@@ -875,6 +908,7 @@ def start_dashboard(enabled, host, port, now_utc, error_handler=None,
                 state, now_utc, mobile_gps_state,
                 telegram_controls,
                 application_state_store, settings_store,
+                sse_broker,
                 observer_position_provider,
                 mobile_gps_stale_warning_seconds,
                 mobile_gps_critical_warning_seconds))

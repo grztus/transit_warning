@@ -74,3 +74,26 @@ export interface BootstrapDto {
   presentation: PresentationDto;
   capabilities: Record<string, unknown>;
 }
+
+export interface LiveStateEvent {
+  schema_version: 1;
+  event: "live_state";
+  live_revision: number;
+  generated_at_utc?: string | null;
+  payload: Pick<BootstrapDto, "generated_at_utc" | "bodies" | "recent_events" | "presentation">;
+}
+
+export interface SettingsSnapshotDto {
+  schema_version: 1;
+  revision: number;
+  values: Record<string, unknown>;
+  capabilities: Record<string, unknown>;
+  persistence: string;
+}
+
+export interface SettingsEvent {
+  schema_version: 1;
+  event: "settings";
+  settings_revision: number;
+  payload: SettingsSnapshotDto;
+}

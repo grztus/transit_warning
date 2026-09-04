@@ -55,6 +55,10 @@ h2 { margin-bottom: 0; font-size: 1.05rem; letter-spacing: .08em; }
 .health-active { color: #52d68a; }
 .health-stale { color: #ffd15a; border: 1px solid #7c6325; }
 .health-offline { color: #ff7474; border: 1px solid #9c4545; background: #321a20; }
+.transport { font-size: .72rem; color: #9fb2c2; white-space: nowrap; }
+.transport-realtime { color: #52d68a; }
+.transport-reconnecting, .transport-polling-fallback { color: #ffd15a; }
+.transport-offline { color: #ff7474; }
 .offline-banner { padding: .65rem .8rem; border: 1px solid #b94747; border-radius: .55rem; color: #ffd1d1; background: #351a20; }
 .event-list { list-style: none; padding: 0; margin: .8rem 0 0; display: grid; gap: .4rem; }
 .event-list li { display: grid; grid-template-columns: 1.2fr .7fr 1fr auto; align-items: center; gap: .5rem; padding: .62rem 0; border-top: 1px solid #203344; font-size: .86rem; }

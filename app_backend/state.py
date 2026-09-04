@@ -13,18 +13,33 @@ class ApplicationStateStore:
         self._revision = 0
         self._state = serialize_live_state({})
         self._lock = threading.Lock()
+        self._subscribers = []
+
+    def subscribe(self, callback):
+        if not callable(callback):
+            raise TypeError("subscriber must be callable")
+        with self._lock:
+            self._subscribers.append(callback)
 
     def publish(self, snapshot):
         detached = serialize_live_state(snapshot)
         with self._lock:
             self._revision += 1
             self._state = detached
-            return self._revision
+            revision = self._revision
+            result = self._snapshot_locked()
+            subscribers = tuple(self._subscribers)
+        for callback in subscribers:
+            try:
+                callback(deepcopy(result))
+            except Exception:
+                pass
+        return revision
 
     def snapshot(self):
         with self._lock:
-            return {
-                "schema_version": SCHEMA_VERSION,
-                "revision": self._revision,
-                "state": deepcopy(self._state),
-            }
+            return self._snapshot_locked()
+
+    def _snapshot_locked(self):
+        return {"schema_version": SCHEMA_VERSION, "revision": self._revision,
+                "state": deepcopy(self._state)}

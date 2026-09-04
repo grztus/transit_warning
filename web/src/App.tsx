@@ -7,11 +7,14 @@ import type {
   TransitCandidateDto,
 } from "./types";
 import { useBootstrap } from "./useBootstrap";
+import type { EventSourceFactory } from "./useBootstrap";
 import "./styles.css";
 
 interface AppProps {
   client?: BootstrapFetcher;
   pollIntervalMs?: number;
+  eventSourceFactory?: EventSourceFactory;
+  fallbackDelayMs?: number;
 }
 
 const value = (number: number | undefined, suffix = "") =>
@@ -134,8 +137,8 @@ function EventCard({ event }: { event: RecentEventDto }) {
   );
 }
 
-export default function App({ client, pollIntervalMs }: AppProps) {
-  const state = useBootstrap(client, pollIntervalMs);
+export default function App({ client, pollIntervalMs, eventSourceFactory, fallbackDelayMs }: AppProps) {
+  const state = useBootstrap(client, pollIntervalMs, eventSourceFactory, fallbackDelayMs);
   const nowMs = useLiveClock();
   const snapshot = state.snapshot;
   const health = state.offline ? "OFFLINE" : snapshot?.health || "STALE";
@@ -149,6 +152,9 @@ export default function App({ client, pollIntervalMs }: AppProps) {
         </div>
         <div className={`health health-${health.toLowerCase()}`} role="status">
           <span className="health-dot" />{health}
+        </div>
+        <div className={`transport transport-${state.transport.toLowerCase().replaceAll(" ", "-")}`}>
+          {state.transport}
         </div>
       </header>
 
