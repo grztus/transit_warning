@@ -1,9 +1,11 @@
 # Transit Warning
 
 Transit Warning consumes live aircraft surveillance data and predicts possible
-aircraft crossings of the Sun and Moon for an observer. It provides a terminal
-display, optional mobile dashboard, Telegram attention alerts, lossless session
-recording, deterministic SBS replay, and diagnostic transit snapshots.
+aircraft crossings of the Sun and Moon for an observer. It is intended to give
+photographers and observers useful advance notice of potential solar and lunar
+aircraft transits. The project provides a terminal display, two web interfaces,
+Telegram attention alerts, lossless session recording, candidate-focused
+forensic capture, deterministic SBS replay, and diagnostic transit snapshots.
 
 Optional inputs and outputs are fail-open: loss of RAW ADS-B, MLAT Beast, METAR,
 Telegram, dashboard, or recording does not stop the core ADS-B/MLAT receiver.
@@ -31,6 +33,35 @@ On PowerShell use `Copy-Item .env.example .env`. Keep `.env` private; it is
 ignored by Git.
 
 ## Architecture and data sources
+
+```text
+ADS-B / MLAT / Mode-S inputs
+            |
+            v
+Transit Warning prediction engine
+            |
+            v
+   authoritative live state
+      |       |       |       |
+      v       v       v       v
+  terminal  legacy  /api/v1  recorder and
+            web UI  + React  diagnostics
+```
+
+The Transit Warning core remains authoritative. Web clients display its public
+state and do not contain a second prediction implementation.
+
+### Implemented features
+
+- Sun and Moon transit prediction with an authoritative true two-dimensional
+  closest-approach path and retained LEGACY mode for compatibility.
+- ADS-B, MLAT, RAW ADS-B, MLAT Beast, TC29 intent, and METAR/QNH integration.
+- Datum-consistent WGS84 ECEF/ENU aircraft geometry and optional geometric
+  altitude selection.
+- Terminal presentation, Telegram alerts, operational legacy dashboard, and a
+  read-only React LIVE frontend.
+- Full-session recording, Candidate Auto-Recorder forensic bundles and
+  FULL_REFERENCE markers, replay, Snapshot V3, and offline diagnostics.
 
 Motion parameters are timestamped independently, so a new message does not make
 unrelated position, altitude, track, or groundspeed values appear fresh. One
@@ -69,9 +100,9 @@ extrapolation; it is intent, not measured altitude.
 
 Internal solutions extend to 15 degrees vertical separation and approximately
 900 seconds. A three-second prediction grace absorbs brief input jitter.
-Production `SEP` is the absolute vertical angular difference at the predicted
-horizontal crossing; the offline visualizer also computes sampled full 2-D
-sky-plane separation.
+In authoritative `TRUE_2D` mode, production T0 and SEP are the spherical
+closest-approach time and angular separation. `LEGACY` mode remains available
+for compatibility and uses the older azimuth-intersection event semantics.
 
 Sun/Moon prediction uses topocentric geometric (airless) PyEphem coordinates
 with observer pressure explicitly zero. This preserves lunar parallax and keeps
@@ -182,7 +213,11 @@ python transit_warning.py --test-notification
 
 Credentials belong only in `.env`; observer coordinates are not sent.
 
-## Live dashboard
+## Web interfaces
+
+Both interfaces reuse the same production state and remain available.
+
+### Legacy dashboard
 
 The optional dashboard reuses production predictions and does not run another
 solver. It includes chronological LIVE Sun/Moon queues, responsive candidate
@@ -207,6 +242,60 @@ The server defaults to disabled and localhost. Remote access should use a
 trusted private transport such as Tailscale Serve/tailnet HTTPS. Do not use
 public Funnel exposure without an appropriate security model. The dashboard
 itself has no authentication.
+
+### New read-only LIVE frontend
+
+`web/` contains the shared React + TypeScript frontend introduced in App/Web
+Phase A2. It consumes only `GET /api/v1/bootstrap` and is currently read-only;
+settings controls remain in the legacy interface.
+
+The responsive LIVE view displays:
+
+- distinct ACTIVE, backend STALE, and frontend OFFLINE states;
+- current Sun/Moon altitude and azimuth;
+- authoritative candidates with callsign, SEP class, lifecycle state,
+  prediction geometry, and encounter identity;
+- a browser-local countdown based on authoritative `predicted_event_utc`;
+- recent events and privacy-safe observer diagnostics.
+
+The browser updates countdowns once per second without increasing the normal
+three-second bootstrap polling rate. On a temporary fetch failure, the last
+valid snapshot remains visible and is clearly marked as cached/offline.
+
+For local frontend development:
+
+```powershell
+cd web
+npm.cmd install
+npm.cmd run dev
+```
+
+Vite proxies `/api` to `http://127.0.0.1:8765` by default. To use a Transit
+Warning backend running on another private development host:
+
+```powershell
+$env:VITE_BACKEND_TARGET = "http://<backend-host>:8765"
+npm.cmd run dev
+```
+
+The override affects only the development proxy; browser API paths remain
+unchanged. This supports, for example, a production-like Debian/Linux backend
+and a separate Windows frontend development machine.
+
+### Versioned application API
+
+The public App/Web foundation provides:
+
+- `GET /api/v1/bootstrap`
+- `GET /api/v1/settings`
+- `PATCH /api/v1/settings`
+
+Schema-v1 bootstrap responses use explicit privacy-safe contracts and include
+monotonic live and settings revisions. Runtime mutation uses one authoritative
+settings store with expected-revision conflict handling and idempotent command
+identifiers. The A2 frontend consumes bootstrap only and does not mutate
+settings. Ordinary API/frontend payloads do not expose observer coordinates,
+Telegram credentials, private recorder paths, or private forensic context.
 
 ## Observer modes and mobile GPS
 
@@ -301,6 +390,21 @@ Accepted QNH is always recorded separately in daily UTC files under
 `recordings/environment/`; midnight rotation carries state forward. Environment
 files are not session ZIP members.
 
+### Candidate Auto-Recorder
+
+The Candidate Auto-Recorder maintains bounded per-aircraft pre-buffers and can
+retain focused private forensic windows for qualifying authoritative TRUE_2D
+encounters. Distinct Sun/Moon encounters can share one physical per-aircraft
+capture without duplicating stream bytes. Storage is asynchronous and fail-open
+so candidate filesystem failures do not interrupt surveillance or prediction.
+
+When a manually started FULL recorder already covers every required candidate
+stream, it has priority. Candidate recording creates a lightweight
+`FULL_REFERENCE` encounter marker referring to that full session instead of
+duplicating broad physical capture. If complete FULL coverage is unavailable,
+the normal candidate bundle path remains active. Candidate logic never starts,
+stops, or controls the FULL recorder.
+
 ## Replay
 
 ```console
@@ -348,13 +452,14 @@ horizon, 60-second coarse segments, local 15-second subdivision, a 7-degree
 refinement target, and a 0.052-degree conservative screening margin.
 
 Coordinate-free comparisons are rate-limited below
-`diagnostics/shadow_2d/YYYY-MM-DD/`. Shadow T0/SEP never affect terminal or
-dashboard values, history, Telegram, gong, recorder, or transit snapshots.
+`diagnostics/shadow_2d/YYYY-MM-DD/`. Shadow results remain diagnostic and do
+not replace the configured authoritative prediction.
 
-`AUTHORITATIVE_PREDICTION_GEOMETRY` defaults to `LEGACY`. Setting it to
-`TRUE_2D` enables the internal encounter lifecycle for controlled rollout, but
-current user-facing consumers intentionally remain legacy-backed until their
-separate migration checkpoint.
+`AUTHORITATIVE_PREDICTION_GEOMETRY` selects `LEGACY` or `TRUE_2D` and defaults
+to `LEGACY` for compatibility. In `TRUE_2D` mode the authoritative lifecycle
+and its terminal, dashboard, Telegram, history, snapshot, and candidate-recorder
+consumers use exact 2-D T0/SEP semantics; an exact failure does not silently
+fall back to LEGACY for that event.
 
 ## Configuration reference
 
@@ -421,6 +526,7 @@ Shadow diagnostics:
 | `SHADOW_2D_LOCAL_SEGMENT_SECONDS` | `15` | Local subdivision spacing |
 | `SHADOW_2D_SAFETY_MARGIN_DEG` | `0.052` | Conservative coarse-pass margin |
 | `SHADOW_2D_REFINEMENT_TARGET_DEG` | `7` | Independent exact-refinement target |
+| `AUTHORITATIVE_PREDICTION_GEOMETRY` | `LEGACY` | Select `LEGACY` or authoritative `TRUE_2D` |
 
 System environment overrides `.env`. MOBILE startup requires dashboard and GPS
 enabled. Critical age must exceed warning age; presentation thresholds require
@@ -436,25 +542,31 @@ green < yellow < visible.
 - This repository currently contains no service-unit/helper scripts defining an
   exact systemd/tmux deployment; local units must implement graceful shutdown.
 
-## Known limitations and roadmap
+## Repository layout
 
-Implemented: STATIC observer, browser MOBILE lat/lon, last-known mobile position,
-optional static fallback, compact status panel, RAW/MLAT Beast precision,
-geometric-altitude selection, terminal/dashboard/Telegram, recording/replay, and
-schema-v3 diagnostics.
+| Path | Purpose |
+|---|---|
+| `transit_warning.py` | Main ingestion, prediction, and runtime integration |
+| `authoritative_transit.py` | LEGACY/TRUE_2D authoritative encounter lifecycle |
+| `shadow_2d_prediction.py` | Independent coarse screening and exact 2-D solver |
+| `live_dashboard.py` | Operational legacy dashboard and HTTP API host |
+| `app_backend/` | Versioned public contracts, live-state, and runtime settings stores |
+| `web/` | React + TypeScript read-only LIVE frontend |
+| `recording.py`, `replay_server.py` | Full-session recording and SBS replay |
+| `candidate_recorder.py` | Candidate pre-buffer, bundles, and FULL_REFERENCE markers |
+| `transit_snapshot.py`, `tools/` | Snapshot and offline diagnostic tooling |
+| `tests/` | Python and integration regression tests |
+| `web/src/test/` | React frontend tests |
 
-Planned—not implemented:
+## Current project status and limitations
 
-- **Phase 3 — MANUAL observer:** manually supplied latitude, longitude, and
-  elevation AMSL.
-- **Phase 3.5 — elevation source:** investigate phone altitude datum/accuracy and
-  possible GNSS/geoid conversion. Phone altitude is not production-ready.
-- **Phase 4 — Transit Navigator:** geometric distance/bearing to predicted
-  centerline and optional vertical-equivalent displacement, for example
-  `CENTERLINE 420 m @ 263°   ΔELEV +31 m`.
-- RAW fractional-track, MLAT Beast, and automatic manifest/ZIP replay.
-- optional apparent/photo atmospheric-refraction layer.
+The terminal UI, legacy dashboard, versioned App/Web API, A2 React LIVE view,
+TRUE_2D production path, Telegram notifications, observer modes, recording,
+Candidate Auto-Recorder, replay, and Snapshot V3 diagnostics are implemented.
+The React client is read-only at the current public checkpoint; operational
+settings remain available through the legacy dashboard and versioned API.
 
-Transit Navigator would be purely geometric unless terrain support is added. It
-must not imply knowledge of terrain, roads, accessibility, buildings, obstacles,
-or line of sight.
+Development is ongoing. Some recorded precision streams do not yet have full
+deterministic replay support, phone altitude remains diagnostic-only, and
+atmospheric refraction is intentionally outside deterministic production
+geometry.
