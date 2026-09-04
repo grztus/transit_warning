@@ -22,12 +22,17 @@ export const activeFixture: BootstrapDto = {
         body: "SUN", icao: "ABC123", callsign: "TEST123",
         predicted_event_utc: "2026-09-04T10:02:30Z", separation_deg: 0.42,
         encounter_id: "7:ABC123:SUN:2", prediction_geometry: "TRUE_2D",
-        state: "ACTIVE", separation_class: "GREEN",
+        state: "CANDIDATE", separation_class: "GREEN",
       }],
     },
     moon: {
       current_position: { altitude_deg: 9.1, azimuth_deg: 298.2 },
-      candidates: [],
+      candidates: [{
+        body: "MOON", icao: "XYZ789", callsign: "ALERT789",
+        predicted_event_utc: "2026-09-04T10:03:30Z", separation_deg: 1.2,
+        encounter_id: "7:XYZ789:MOON:1", prediction_geometry: "TRUE_2D",
+        state: "TELEGRAM RANGE", separation_class: "YELLOW",
+      }],
     },
   },
   recent_events: [{

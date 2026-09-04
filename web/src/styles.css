@@ -21,25 +21,45 @@ h2 { margin-bottom: 0; font-size: 1.05rem; letter-spacing: .08em; }
 .eyebrow { margin-bottom: .15rem; color: #86a4bd; text-transform: uppercase; font-size: .72rem; letter-spacing: .16em; }
 .panel { background: #111d28; border: 1px solid #203344; border-radius: .8rem; padding: 1rem; margin-bottom: .8rem; }
 .body-grid { display: grid; gap: .8rem; }
+.body-heading { display: inline-flex; align-items: center; gap: .4rem; font-size: 1.18rem; }
+.body-heading > span { font-size: 1.45rem; line-height: 1; }
+.body-sun { color: #ffd76a; }
+.body-moon { color: #dceaff; }
 .body-position { color: #b9cddd; font-variant-numeric: tabular-nums; }
 .candidate-list { display: grid; gap: .65rem; margin-top: .9rem; }
-.candidate-card { background: #0b151e; border-left: 3px solid #3488ce; border-radius: .45rem; padding: .75rem; }
+.candidate-card { background: #0b151e; border-left: 3px solid #3488ce; border-radius: .45rem; padding: .78rem; }
 .candidate-title { margin-bottom: .6rem; }
-.sep { color: #9fcaf0; font-variant-numeric: tabular-nums; }
+.candidate-title > div { min-width: 0; }
+.candidate-identity { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: baseline; gap: .12rem .55rem; }
+.countdown { color: #f2f7fb; font-size: 1.36rem; line-height: 1; font-variant-numeric: tabular-nums; letter-spacing: .015em; }
+.callsign { font-size: 1.16rem; overflow-wrap: anywhere; }
+.event-time { grid-column: 1 / -1; color: #8da5b8; font-size: .76rem; font-variant-numeric: tabular-nums; }
+.sep { color: #d9e3eb; font-variant-numeric: tabular-nums; font-weight: 760; white-space: nowrap; }
+.candidate-title .sep { font-size: 1.1rem; }
+.sep-green { color: #55df8b; }
+.sep-yellow { color: #ffd15a; }
+.sep-red, .sep-hidden, .sep-neutral { color: #d9e3eb; }
+.state-badge { display: inline-flex; width: fit-content; margin: 0 0 .62rem; padding: .18rem .46rem; border: 1px solid #3d5468; border-radius: 999px; color: #c8d7e3; font-size: .69rem; font-weight: 780; letter-spacing: .045em; }
+.state-telegram-range { color: #ffe28a; border-color: #95752b; background: #382e14; }
+.state-passed { color: #91d9b0; border-color: #35694b; }
+.state-withdrawn { color: #ffb2b2; border-color: #854a4a; }
 .compact-grid { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .3rem .7rem; margin: 0; font-size: .85rem; }
 .compact-grid dt { color: #7895ad; }
 .compact-grid dd { margin: 0; overflow-wrap: anywhere; }
+.encounter-id { color: #71899c; font-size: .77rem; }
 .status-strip { display: grid; grid-template-columns: 1fr; gap: .65rem; }
 .status-strip div { display: flex; justify-content: space-between; gap: 1rem; }
 .status-strip span, .empty, .read-only p { color: #7895ad; }
 .health { display: inline-flex; align-items: center; gap: .45rem; padding: .45rem .7rem; border-radius: 999px; background: #142431; font-weight: 750; }
 .health-dot { width: .65rem; height: .65rem; border-radius: 50%; background: currentColor; box-shadow: 0 0 .65rem currentColor; }
 .health-active { color: #52d68a; }
-.health-stale { color: #f3bd4c; }
-.health-offline { color: #ff6b6b; }
+.health-stale { color: #ffd15a; border: 1px solid #7c6325; }
+.health-offline { color: #ff7474; border: 1px solid #9c4545; background: #321a20; }
 .offline-banner { padding: .65rem .8rem; border: 1px solid #b94747; border-radius: .55rem; color: #ffd1d1; background: #351a20; }
 .event-list { list-style: none; padding: 0; margin: .8rem 0 0; display: grid; gap: .4rem; }
-.event-list li { display: grid; grid-template-columns: 1.2fr .7fr 1fr auto; gap: .5rem; padding: .55rem 0; border-top: 1px solid #203344; font-size: .86rem; }
+.event-list li { display: grid; grid-template-columns: 1.2fr .7fr 1fr auto; align-items: center; gap: .5rem; padding: .62rem 0; border-top: 1px solid #203344; font-size: .86rem; }
+.event-list .state-badge { margin: 0; }
+.event-withdrawn { opacity: .82; }
 .read-only p { margin: .6rem 0 0; }
 .empty-state { text-align: center; padding: 3rem 1rem; }
 
@@ -56,4 +76,8 @@ h2 { margin-bottom: 0; font-size: 1.05rem; letter-spacing: .08em; }
 @media (max-width: 470px) {
   .event-list li { grid-template-columns: 1fr 1fr; }
   .body-position { font-size: .85rem; }
+  .candidate-title { align-items: flex-start; }
+  .candidate-title .sep { font-size: 1rem; }
+  .candidate-identity { grid-template-columns: max-content minmax(5rem, 1fr); column-gap: .42rem; }
+  .countdown { font-size: 1.2rem; }
 }
