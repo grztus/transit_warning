@@ -868,6 +868,8 @@ class CandidateBundleStore:
         self._captures = {}
         self._encounters = {}
         self._encounter_contexts = {}
+        self._encounter_captures = {}
+        self._completed_encounter_ids = set()
         self._reference_directories = {}
         self._lock = threading.RLock()
         self._pending_finalizations = set()
@@ -900,21 +902,49 @@ class CandidateBundleStore:
             self.last_error = str(error)
             return False
 
-    def observe_encounter(self, state, capture_state, observer_context=None):
+    def observe_encounter(self, state, capture_state, observer_context=None,
+                          observed_at_utc=None):
         """Create/update one private manifest and shared physical capture."""
         try:
             self.last_error = None
             if not isinstance(state, CandidateEncounterState):
                 return False
+            observed_at = validate_utc_datetime(
+                observed_at_utc if observed_at_utc is not None
+                else state.last_update_utc)
             with self._lock:
                 if self.full_recorder_reference is not None:
                     self._encounters[state.encounter_id] = state
                     if observer_context is not None:
                         self._encounter_contexts.setdefault(
                             state.encounter_id, observer_context)
-                    self._write_full_reference_manifest_locked(state, "active")
+                    marker_status = (
+                        "complete" if state.completed_at_utc is not None
+                        or state.encounter_id in self._completed_encounter_ids
+                        else "active")
+                    self._write_full_reference_manifest_locked(
+                        state, marker_status)
                     return True
                 capture = self._captures.get(state.icao)
+                belongs_to_active_capture = (
+                    capture is not None and not capture.closed
+                    and state.encounter_id in capture.encounter_ids)
+                storage_window_completed = (
+                    state.completed_at_utc is not None
+                    or state.encounter_id in self._completed_encounter_ids
+                    or (state.required_end_time_utc <= observed_at
+                        and not belongs_to_active_capture))
+                if storage_window_completed:
+                    self._encounters[state.encounter_id] = state
+                    if observer_context is not None:
+                        self._encounter_contexts.setdefault(
+                            state.encounter_id, observer_context)
+                    historical = self._encounter_captures.get(
+                        state.encounter_id)
+                    if historical is not None:
+                        self._write_encounter_manifest_locked(
+                            state, historical)
+                    return True
                 if capture is None or capture.closed:
                     capture = self._start_capture_locked(state, capture_state)
                 if capture_state is not None:
@@ -929,6 +959,7 @@ class CandidateBundleStore:
                         > capture.capture_until_utc)
                     capture.encounter_ids.update(capture_state.encounter_ids)
                 capture.encounter_ids.add(state.encounter_id)
+                self._encounter_captures[state.encounter_id] = capture
                 self._encounters[state.encounter_id] = state
                 if observer_context is not None:
                     self._encounter_contexts.setdefault(
@@ -957,6 +988,7 @@ class CandidateBundleStore:
                     if not isinstance(state, CandidateEncounterState):
                         continue
                     self._encounters[state.encounter_id] = state
+                    self._completed_encounter_ids.add(state.encounter_id)
                     affected.add(state.icao)
                     if self.full_recorder_reference is not None:
                         self._write_full_reference_manifest_locked(
@@ -1374,8 +1406,9 @@ class CandidateStorageWorker:
     def enqueue_record(self, record):
         return self._enqueue("record", record, (record.icao,))
 
-    def enqueue_encounter(self, state, capture_state, observer_context=None):
-        payload = (state, capture_state, observer_context)
+    def enqueue_encounter(self, state, capture_state, observer_context=None,
+                          observed_at_utc=None):
+        payload = (state, capture_state, observer_context, observed_at_utc)
         accepted = self._enqueue("encounter", payload, (state.icao,))
         if not accepted:
             with self._state_lock:

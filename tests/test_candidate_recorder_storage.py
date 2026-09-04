@@ -220,6 +220,72 @@ class CandidateBundleStoreTests(unittest.TestCase):
                          stream["byte_count"])
         self.assertFalse(list(self.root.rglob("*.tmp")))
 
+    def test_completed_encounter_late_transition_cannot_reopen_capture(self):
+        state = self.open(seconds=10)
+        first_record_time = NOW + datetime.timedelta(seconds=1)
+        self.prebuffer.feed_adsb_sbs(SBS, first_record_time)
+        completed_at = state.required_end_time_utc
+        completed = self.manager.complete_due(completed_at)
+        self.assertTrue(self.store.finalize_completed(
+            completed, {"ABC123": self.manager.capture_state("ABC123")}))
+        capture = self.capture_directories()[0]
+        original_bytes = (capture / "adsb_sbs.log").read_bytes()
+
+        late_now = completed_at + datetime.timedelta(minutes=10)
+        late = self.manager.process_transition(transition(
+            AuthoritativeTransitionKind.UPDATED, seconds=10), late_now)
+        self.assertIsNotNone(late.completed_at_utc)
+        self.assertTrue(self.store.observe_encounter(
+            late, self.manager.capture_state("ABC123"), self.context,
+            late_now))
+        withdrawn_now = late_now + datetime.timedelta(seconds=1)
+        withdrawn = self.manager.process_transition(AuthoritativeTransition(
+            AuthoritativeTransitionKind.WITHDRAWN,
+            late.latest_prediction), withdrawn_now)
+        self.assertEqual(withdrawn_now, withdrawn.last_update_utc)
+        self.assertTrue(self.store.observe_encounter(
+            withdrawn, self.manager.capture_state("ABC123"), self.context,
+            withdrawn_now))
+        late_line = SBS.replace("11:59:20.000", "12:10:00.000")
+        self.prebuffer.feed_adsb_sbs(late_line, withdrawn_now)
+
+        self.assertEqual(1, len(self.capture_directories()))
+        self.assertFalse(any(
+            item.name.endswith("_01") for item in self.capture_directories()))
+        self.assertEqual(original_bytes,
+                         (capture / "adsb_sbs.log").read_bytes())
+        payload = json.loads(self.manifests()[0].read_text())
+        self.assertEqual("WITHDRAWN", payload["outcome"])
+        self.assertEqual(
+            withdrawn_now.isoformat().replace("+00:00", "Z"),
+            payload["last_update_utc"])
+
+    def test_new_generation_after_completion_starts_legitimate_capture(self):
+        first = self.open(generation=1, seconds=10)
+        self.store.finalize_completed(
+            self.manager.complete_due(first.required_end_time_utc),
+            {"ABC123": self.manager.capture_state("ABC123")})
+
+        later_now = NOW + datetime.timedelta(seconds=200)
+        second = self.manager.process_transition(
+            transition(generation=2, seconds=300), later_now)
+        self.assertIsNotNone(second)
+        self.assertTrue(second.unfinished)
+        self.assertTrue(self.store.observe_encounter(
+            second, self.manager.capture_state("ABC123"), self.context,
+            later_now))
+
+        self.assertEqual(2, len(self.capture_directories()))
+        self.assertNotEqual(first.encounter_id, second.encounter_id)
+
+    def test_expired_unstored_encounter_does_not_start_physical_capture(self):
+        state = self.manager.process_transition(transition(seconds=10), NOW)
+        late_now = state.required_end_time_utc + datetime.timedelta(seconds=1)
+
+        self.assertTrue(self.store.observe_encounter(
+            state, None, self.context, late_now))
+        self.assertEqual([], self.capture_directories())
+
     def test_existing_capture_directory_is_preserved_and_collision_is_recorded(self):
         state = self.manager.process_transition(transition(), NOW)
         token = state.encounter_id.replace(":", "_")

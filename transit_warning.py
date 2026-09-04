@@ -758,7 +758,8 @@ def observe_candidate_authoritative_transition(
                 candidate_storage_worker.enqueue_encounter(
                     state,
                     candidate_encounter_manager.capture_state(state.icao),
-                    observer_context)
+                    observer_context,
+                    now_utc)
             return state
     except Exception:
         pass
