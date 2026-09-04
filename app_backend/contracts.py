@@ -47,9 +47,13 @@ def serialize_observer_status(status):
 def serialize_live_state(snapshot):
     """Copy only the established public dashboard state into schema v1."""
     snapshot = snapshot if isinstance(snapshot, dict) else {}
+    body_source = snapshot.get("bodies")
+    if not isinstance(body_source, dict):
+        body_source = snapshot
     bodies = {}
     for body in ("sun", "moon"):
-        source = snapshot.get(body) if isinstance(snapshot.get(body), dict) else {}
+        source = (body_source.get(body)
+                  if isinstance(body_source.get(body), dict) else {})
         position = source.get("current_position")
         bodies[body] = {
             "current_position": (

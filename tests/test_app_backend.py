@@ -78,8 +78,28 @@ class ApplicationContractTests(unittest.TestCase):
         app = ApplicationStateStore()
         app.publish({
             "generated_at_utc": "2026-09-04T12:00:00Z",
-            "sun": {"current_position": None, "candidates": []},
-            "moon": {"current_position": None, "candidates": []},
+            "sun": {
+                "current_position": {
+                    "altitude_deg": 31.0, "azimuth_deg": 217.0,
+                    "evaluated_at_utc": "2026-09-04T12:00:00Z",
+                },
+                "candidates": [{
+                    "icao": "ABC123", "callsign": "SUN123",
+                    "body": "SUN", "separation_deg": 0.4,
+                    "observer_latitude": 51.0,
+                }],
+            },
+            "moon": {
+                "current_position": {
+                    "altitude_deg": 9.0, "azimuth_deg": 298.0,
+                    "evaluated_at_utc": "2026-09-04T12:00:00Z",
+                },
+                "candidates": [{
+                    "icao": "DEF456", "callsign": "MOON456",
+                    "body": "MOON", "separation_deg": 0.8,
+                    "private_manifest_path": "secret",
+                }],
+            },
             "recent_events": [], "presentation": {},
         })
         settings = RuntimeSettingsStore().snapshot()
@@ -91,11 +111,50 @@ class ApplicationContractTests(unittest.TestCase):
         self.assertEqual(1, result["live_revision"])
         self.assertEqual(0, result["settings_revision"])
         self.assertEqual("ACTIVE", result["health"])
+        self.assertEqual(
+            31.0, result["bodies"]["sun"]["current_position"][
+                "altitude_deg"])
+        self.assertEqual(
+            298.0, result["bodies"]["moon"]["current_position"][
+                "azimuth_deg"])
+        self.assertEqual(
+            "SUN123", result["bodies"]["sun"]["candidates"][0][
+                "callsign"])
+        self.assertEqual(
+            "MOON456", result["bodies"]["moon"]["candidates"][0][
+                "callsign"])
         encoded = json.dumps(result).lower()
         self.assertNotIn("latitude", encoded)
         self.assertNotIn("longitude", encoded)
         self.assertNotIn("buymeacoffee", encoded)
         self.assertNotIn("payment_id", encoded)
+
+    def test_live_serialization_is_idempotent_for_application_store_shape(self):
+        legacy = {
+            "generated_at_utc": "2026-09-04T12:00:00Z",
+            "sun": {
+                "current_position": {
+                    "altitude_deg": 12.0, "azimuth_deg": 34.0,
+                },
+                "candidates": [{
+                    "icao": "ABC123", "body": "SUN",
+                    "separation_deg": 1.2,
+                }],
+            },
+            "moon": {
+                "current_position": {
+                    "altitude_deg": 56.0, "azimuth_deg": 78.0,
+                },
+                "candidates": [{
+                    "icao": "DEF456", "body": "MOON",
+                    "separation_deg": 0.9,
+                }],
+            },
+            "recent_events": [], "presentation": {},
+        }
+        once = serialize_live_state(legacy)
+        twice = serialize_live_state(once)
+        self.assertEqual(once, twice)
 
 
 class ApplicationStateStoreTests(unittest.TestCase):

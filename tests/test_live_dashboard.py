@@ -398,6 +398,37 @@ class DashboardRuntimeTests(unittest.TestCase):
         self.assertNotIn("observer", encoded)
         self.assertNotIn("token", encoded)
 
+    def test_v1_bootstrap_matches_legacy_live_bodies_and_candidates(self):
+        runtime = dashboard.start_dashboard(
+            True, "127.0.0.1", 0, lambda: NOW)
+        try:
+            runtime.update_body_position("SUN", 31.0, 217.0, NOW)
+            runtime.update_body_position("MOON", 9.0, 298.0, NOW)
+            runtime.publish(candidate("SUN001", "SUN"))
+            runtime.publish(candidate("MON001", "MOON"))
+            port = runtime.server.server_address[1]
+            with urllib.request.urlopen(
+                    "http://127.0.0.1:{}/api/state".format(port),
+                    timeout=2) as response:
+                legacy = json.loads(response.read().decode("utf-8"))
+            with urllib.request.urlopen(
+                    "http://127.0.0.1:{}/api/v1/bootstrap".format(port),
+                    timeout=2) as response:
+                bootstrap = json.loads(response.read().decode("utf-8"))
+        finally:
+            runtime.close()
+        for body in ("sun", "moon"):
+            self.assertEqual(
+                legacy[body]["current_position"],
+                bootstrap["bodies"][body]["current_position"])
+            self.assertEqual(
+                [item["icao"] for item in legacy[body]["candidates"]],
+                [item["icao"]
+                 for item in bootstrap["bodies"][body]["candidates"]])
+        encoded = json.dumps(bootstrap).lower()
+        self.assertNotIn("latitude", encoded)
+        self.assertNotIn("longitude", encoded)
+
     def test_mobile_gps_endpoint_accepts_update_without_returning_coordinates(self):
         runtime = dashboard.start_dashboard(
             True, "127.0.0.1", 0, lambda: NOW,
