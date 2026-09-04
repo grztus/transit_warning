@@ -26,6 +26,7 @@ export function useBootstrap(
   pollIntervalMs = POLL_INTERVAL_MS,
   eventSourceFactory: EventSourceFactory | undefined = nativeEventSource,
   fallbackDelayMs = 6_000,
+  reconnectDelayMs = 2_000,
 ): BootstrapPollingState {
   const [snapshot, setSnapshot] = useState<BootstrapDto | null>(null);
   const snapshotRef = useRef<BootstrapDto | null>(null);
@@ -48,15 +49,19 @@ export function useBootstrap(
     let source: EventSourceLike | undefined;
     let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
     let pollTimer: ReturnType<typeof setTimeout> | undefined;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     let staleTimer: ReturnType<typeof setTimeout> | undefined;
     let fallbackActive = false;
-    let opened = false;
+    let connectionCount = 0;
 
     const pollFallback = async () => {
       if (cancelled || !fallbackActive) return;
       try {
-        await resync();
-        if (!cancelled && fallbackActive) setTransport("POLLING FALLBACK");
+        const next = await client();
+        if (!cancelled && fallbackActive) {
+          install(next);
+          setTransport("POLLING FALLBACK");
+        }
       } catch {
         if (!cancelled && fallbackActive) setTransport("OFFLINE");
       }
@@ -64,6 +69,7 @@ export function useBootstrap(
     };
     const startFallback = () => {
       if (fallbackActive || cancelled) return;
+      fallbackTimer = undefined;
       fallbackActive = true;
       setTransport("POLLING FALLBACK");
       void pollFallback();
@@ -107,25 +113,53 @@ export function useBootstrap(
           capabilities: update.payload.capabilities });
       } catch { void safeResync(); }
     };
+    const connect = () => {
+      if (cancelled || !eventSourceFactory || source) return;
+      let candidate: EventSourceLike;
+      try {
+        candidate = eventSourceFactory(STREAM_ENDPOINT);
+      } catch {
+        scheduleReconnect();
+        scheduleFallback();
+        return;
+      }
+      source = candidate;
+      connectionCount += 1;
+      setTransport("RECONNECTING");
+      candidate.addEventListener("live_state", applyLive);
+      candidate.addEventListener("settings", applySettings);
+      candidate.onopen = () => {
+        if (cancelled || source !== candidate) return;
+        fallbackActive = false;
+        if (pollTimer !== undefined) clearTimeout(pollTimer);
+        pollTimer = undefined;
+        if (fallbackTimer !== undefined) clearTimeout(fallbackTimer);
+        fallbackTimer = undefined;
+        setTransport("REALTIME");
+        if (connectionCount > 1) void safeResync();
+      };
+      candidate.onerror = () => {
+        if (cancelled || source !== candidate) return;
+        candidate.close();
+        source = undefined;
+        setTransport("RECONNECTING");
+        scheduleFallback();
+        scheduleReconnect();
+      };
+    };
+    const scheduleReconnect = () => {
+      if (cancelled || reconnectTimer !== undefined || !eventSourceFactory) return;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = undefined;
+        connect();
+      }, reconnectDelayMs);
+    };
     const start = async () => {
       try { await resync(); } catch { setTransport("OFFLINE"); }
       finally { if (!cancelled) setLoading(false); }
       if (cancelled) return;
       if (!eventSourceFactory) { startFallback(); return; }
-      source = eventSourceFactory(STREAM_ENDPOINT);
-      source.addEventListener("live_state", applyLive);
-      source.addEventListener("settings", applySettings);
-      source.onopen = () => {
-        const recovering = opened;
-        opened = true;
-        fallbackActive = false;
-        if (pollTimer !== undefined) clearTimeout(pollTimer);
-        if (fallbackTimer !== undefined) clearTimeout(fallbackTimer);
-        fallbackTimer = undefined;
-        setTransport("REALTIME");
-        if (recovering) void safeResync();
-      };
-      source.onerror = () => { setTransport("RECONNECTING"); scheduleFallback(); };
+      connect();
     };
     void start();
     return () => {
@@ -133,9 +167,10 @@ export function useBootstrap(
       source?.close();
       if (fallbackTimer !== undefined) clearTimeout(fallbackTimer);
       if (pollTimer !== undefined) clearTimeout(pollTimer);
+      if (reconnectTimer !== undefined) clearTimeout(reconnectTimer);
       if (staleTimer !== undefined) clearTimeout(staleTimer);
     };
-  }, [eventSourceFactory, fallbackDelayMs, pollIntervalMs, resync, install]);
+  }, [eventSourceFactory, fallbackDelayMs, pollIntervalMs, reconnectDelayMs, resync, install]);
 
   return { snapshot, lastSuccessfulRefresh, offline: transport === "OFFLINE", loading, transport };
 }

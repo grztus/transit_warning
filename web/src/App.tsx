@@ -15,6 +15,7 @@ interface AppProps {
   pollIntervalMs?: number;
   eventSourceFactory?: EventSourceFactory;
   fallbackDelayMs?: number;
+  reconnectDelayMs?: number;
 }
 
 const value = (number: number | undefined, suffix = "") =>
@@ -137,8 +138,10 @@ function EventCard({ event }: { event: RecentEventDto }) {
   );
 }
 
-export default function App({ client, pollIntervalMs, eventSourceFactory, fallbackDelayMs }: AppProps) {
-  const state = useBootstrap(client, pollIntervalMs, eventSourceFactory, fallbackDelayMs);
+export default function App({ client, pollIntervalMs, eventSourceFactory, fallbackDelayMs,
+  reconnectDelayMs }: AppProps) {
+  const state = useBootstrap(client, pollIntervalMs, eventSourceFactory, fallbackDelayMs,
+    reconnectDelayMs);
   const nowMs = useLiveClock();
   const snapshot = state.snapshot;
   const health = state.offline ? "OFFLINE" : snapshot?.health || "STALE";

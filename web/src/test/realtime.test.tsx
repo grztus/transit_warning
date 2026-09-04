@@ -22,17 +22,23 @@ class FakeEventSource implements EventSourceLike {
 }
 
 const setup = (client = vi.fn(async () => activeFixture), fallbackDelayMs = 50) => {
-  const source = new FakeEventSource();
-  const factory: EventSourceFactory = () => source;
-  render(<App client={client} pollIntervalMs={20} eventSourceFactory={factory}
-              fallbackDelayMs={fallbackDelayMs} />);
-  return { source, client };
+  const sources: FakeEventSource[] = [];
+  const factory = vi.fn(() => {
+    const source = new FakeEventSource();
+    sources.push(source);
+    return source;
+  });
+  const rendered = render(<App client={client} pollIntervalMs={20}
+    eventSourceFactory={factory as EventSourceFactory}
+    fallbackDelayMs={fallbackDelayMs} reconnectDelayMs={5} />);
+  return { sources, factory, client, ...rendered };
 };
 
 describe("SSE realtime transport", () => {
   it("bootstraps once, enters realtime and applies the next live revision", async () => {
-    const { source, client } = setup();
+    const { sources, client } = setup();
     await screen.findByText("TEST123");
+    const source = sources[0];
     act(() => source.onopen?.());
     await waitFor(() => expect(screen.getByText("REALTIME")).toBeInTheDocument());
     act(() => source.emit("live_state", {
@@ -47,8 +53,9 @@ describe("SSE realtime transport", () => {
   });
 
   it("ignores duplicate and older revisions", async () => {
-    const { source } = setup();
+    const { sources } = setup();
     await screen.findByText("TEST123");
+    const source = sources[0];
     for (const revision of [42, 41]) act(() => source.emit("live_state", {
       schema_version: 1, event: "live_state", live_revision: revision,
       payload: { ...activeFixture, bodies: { ...activeFixture.bodies, sun: {
@@ -62,8 +69,9 @@ describe("SSE realtime transport", () => {
       bodies: { ...activeFixture.bodies, sun: { ...activeFixture.bodies.sun,
         candidates: [{ ...activeFixture.bodies.sun.candidates[0], callsign: "RESYNC" }] } } };
     const client = vi.fn().mockResolvedValueOnce(activeFixture).mockResolvedValue(newer);
-    const { source } = setup(client);
+    const { sources } = setup(client);
     await screen.findByText("TEST123");
+    const source = sources[0];
     act(() => source.emit("live_state", { schema_version: 1, event: "live_state",
       live_revision: 45, payload: {} }));
     expect(await screen.findByText("RESYNC")).toBeInTheDocument();
@@ -74,22 +82,60 @@ describe("SSE realtime transport", () => {
   it("shows reconnecting, activates polling fallback, then recovers", async () => {
     vi.useFakeTimers();
     try {
-      const { source } = setup(undefined, 10);
+      const { sources } = setup(undefined, 10);
       await act(async () => { await Promise.resolve(); });
+      const source = sources[0];
       act(() => source.onerror?.());
       expect(screen.getByText("RECONNECTING")).toBeInTheDocument();
       await act(async () => { vi.advanceTimersByTime(10); await Promise.resolve(); });
       expect(screen.getByText("POLLING FALLBACK")).toBeInTheDocument();
-      act(() => source.onopen?.());
+      await act(async () => { vi.advanceTimersByTime(5); await Promise.resolve(); });
+      act(() => sources[1].onopen?.());
       expect(screen.getByText("REALTIME")).toBeInTheDocument();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("recreates the stream across repeated failures, stops polling, and cleans up", async () => {
+    vi.useFakeTimers();
+    try {
+      const { sources, factory, client, unmount } = setup(undefined, 10);
+      await act(async () => { await Promise.resolve(); });
+      act(() => sources[0].onopen?.());
+
+      act(() => sources[0].onerror?.());
+      expect(sources[0].closed).toBe(true);
+      await act(async () => { vi.advanceTimersByTime(5); await Promise.resolve(); });
+      expect(factory).toHaveBeenCalledTimes(2);
+      await act(async () => { vi.advanceTimersByTime(5); await Promise.resolve(); });
+      expect(screen.getByText("POLLING FALLBACK")).toBeInTheDocument();
+
+      act(() => sources[1].onopen?.());
+      await act(async () => { await Promise.resolve(); });
+      expect(screen.getByText("REALTIME")).toBeInTheDocument();
+      const callsAfterRecovery = client.mock.calls.length;
+      await act(async () => { vi.advanceTimersByTime(100); await Promise.resolve(); });
+      expect(client).toHaveBeenCalledTimes(callsAfterRecovery);
+      expect(factory).toHaveBeenCalledTimes(2);
+
+      act(() => sources[1].onerror?.());
+      await act(async () => { vi.advanceTimersByTime(5); await Promise.resolve(); });
+      expect(factory).toHaveBeenCalledTimes(3);
+      act(() => sources[2].onopen?.());
+      expect(screen.getByText("REALTIME")).toBeInTheDocument();
+
+      unmount();
+      expect(sources[2].closed).toBe(true);
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(factory).toHaveBeenCalledTimes(3);
     } finally { vi.useRealTimers(); }
   });
 
   it("can show stale backend data while transport remains realtime", async () => {
     vi.useFakeTimers();
     try {
-      const { source } = setup();
+      const { sources } = setup();
       await act(async () => { await Promise.resolve(); });
+      const source = sources[0];
       act(() => source.onopen?.());
       act(() => source.emit("live_state", { schema_version: 1, event: "live_state",
         live_revision: 43, payload: { generated_at_utc: "2026-09-04T10:00:01Z",
@@ -104,8 +150,9 @@ describe("SSE realtime transport", () => {
   });
 
   it("applies settings revisions to the read-only display", async () => {
-    const { source } = setup();
+    const { sources } = setup();
     await screen.findByText("TEST123");
+    const source = sources[0];
     act(() => source.emit("settings", { schema_version: 1, event: "settings",
       settings_revision: 4, payload: { schema_version: 1, revision: 4,
         values: {}, persistence: "RUNTIME_ONLY_RESET_TO_CONFIG_ON_RESTART",
