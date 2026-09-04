@@ -53,6 +53,39 @@ authoritative if this document becomes stale.
   stabilization, deduplication, and SUN/MOON switches. It is not the live UI.
 - Observer coordinates are not exposed by normal dashboard or Telegram paths.
 
+## App/Web architecture
+
+- Architecture Phase A0 accepted a gradual shared architecture for the current
+  dashboard and future web/mobile clients. React + TypeScript is planned for
+  the shared frontend, with PWA delivery and optional native packaging. Transit
+  Warning core and server/runtime state remain authoritative.
+- Phase A1 is complete at commit `355be81`. The `app_backend` package provides
+  privacy-safe schema-v1 contracts, a thread-safe immutable
+  `ApplicationStateStore`, monotonic live revisions, and one authoritative
+  `RuntimeSettingsStore` with monotonic settings revisions.
+- Runtime mutations use `expected_revision` compare-and-set. Stale writes are
+  rejected with HTTP 409 and the current authoritative state. Accepted
+  `command_id` retries are idempotent, validation precedes mutation, and a
+  fail-open accepted-state subscriber hook supports a future realtime channel.
+- Versioned endpoints are:
+  - `GET /api/v1/bootstrap`;
+  - `GET /api/v1/settings`;
+  - `PATCH /api/v1/settings`.
+- The legacy dashboard and endpoints remain operational and visually unchanged.
+  Legacy Telegram and observer writes use the same `RuntimeSettingsStore` as
+  `/api/v1`; there is no second operational settings authority.
+- Ordinary v1 responses exclude observer/MOBILE coordinates, private Candidate
+  Recorder context, filesystem paths, Telegram secrets, and other private
+  forensic information.
+
+### Phase A1 validation
+
+- Focused A1 tests: 18 passed.
+- Authoritative/recorder regressions: 102 passed.
+- Full suite: 820 run, 819 passed, with one known Windows dashboard HTTP
+  teardown error; the same test passed independently.
+- `py_compile`, `git diff --check`, and privacy/scope review passed.
+
 ## Snapshots and history
 
 - Snapshot schema v3 remains current and older supported records remain
@@ -192,13 +225,19 @@ authoritative if this document becomes stale.
 - Consumer migration is complete.
 - The TMUX table cleanup is complete; the table ends at `age` and uses a
   privacy-safe observer footer.
+- Candidate Auto-Recorder Phase 3 and its completed-capture reopen production
+  hotfix are complete.
+- App/Web Phase A1 is complete; the shared frontend is not yet implemented.
 
 ## Planned next work
 
-Candidate Auto-Recorder Phase 3 is complete. Optional downstream forensic work
-may consume `FULL_REFERENCE` markers to extract/reconstruct encounter windows
-from canonical FULL sessions, add replay/visualization/analysis tooling for
-candidate bundles, or provide a broader private forensic review UI. These are
-future tools, not missing Phase 3 implementation. They must preserve FULL
-recorder priority, authoritative encounter identity, fail-open isolation, and
-private observer-context rules.
+The next public technical checkpoint is App/Web Phase A2: a shared
+React/TypeScript frontend shell with a read-only LIVE display consuming
+`/api/v1/bootstrap`, initially coexisting with the legacy dashboard. A broader
+shared web/mobile client remains planned at a high level.
+
+Candidate Auto-Recorder Phase 3 remains complete. Optional downstream forensic
+tools may consume `FULL_REFERENCE` markers or candidate bundles, but are not
+unfinished Phase 3 work. They must preserve FULL-recorder priority,
+authoritative encounter identity, fail-open isolation, and private
+observer-context rules.

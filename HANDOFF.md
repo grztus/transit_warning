@@ -1,16 +1,52 @@
 # Current task
 
-Candidate Auto-Recorder Phase 3 is complete. Future work may add forensic
-tooling that consumes candidate bundles and `FULL_REFERENCE` markers, but this
-is not unfinished Phase 3 implementation.
+The next public technical checkpoint is App/Web Phase A2: add a shared
+React/TypeScript frontend shell with a read-only LIVE view consuming
+`GET /api/v1/bootstrap`. A2 must coexist with the visually unchanged legacy
+dashboard and must not migrate runtime controls yet.
 
 # Current baseline
 
 - Branch: `main`
-- Baseline: `97e888c`
-- Working tree was clean before this documentation update.
+- Baseline: `355be81` (`Add App/Web Phase A1 backend API foundation`)
+- Working tree was clean before this documentation checkpoint.
 - Authoritative TRUE_2D is deployed; the repository configuration default
   remains LEGACY for compatibility.
+- Candidate Auto-Recorder Phase 3 and the completed-capture reopen production
+  hotfix are complete and included in this baseline.
+
+# App/Web architecture
+
+- Architecture Phase A0 accepted a gradual shared architecture for the current
+  web dashboard and future web/mobile clients. A shared React + TypeScript
+  frontend is planned, with PWA delivery and optional native packaging.
+- Transit Warning core and server/runtime state remain authoritative. The
+  legacy dashboard remains available throughout the migration.
+- Phase A1 is complete at `355be81`. It introduced the `app_backend` package,
+  explicit privacy-safe schema-v1 contracts, a thread-safe
+  `ApplicationStateStore` with monotonic live revisions, and one authoritative
+  `RuntimeSettingsStore` with monotonic settings revisions.
+- Settings mutations support `expected_revision` compare-and-set, HTTP 409 for
+  stale writes, atomic validation, and idempotent `command_id` retries. A
+  fail-open accepted-state subscriber hook is available for a future realtime
+  update channel.
+- Versioned endpoints are `GET /api/v1/bootstrap`, `GET /api/v1/settings`, and
+  `PATCH /api/v1/settings`.
+- The legacy dashboard is visually unchanged and its existing endpoints remain
+  available. Legacy Telegram and observer mutations pass through the same
+  `RuntimeSettingsStore` as `/api/v1`; a second operational settings authority
+  must never be introduced.
+- Ordinary v1 responses exclude observer/MOBILE coordinates, private Candidate
+  Recorder context, filesystem paths, Telegram secrets, and other private
+  forensic information.
+
+## Accepted Phase A1 validation
+
+- Focused A1 tests: 18 passed.
+- Authoritative/recorder regressions: 102 passed.
+- Full suite: 820 run, 819 passed, with one known Windows dashboard HTTP
+  teardown error; the same test passed independently.
+- `py_compile`, `git diff --check`, and the privacy/scope review passed.
 
 # Candidate Auto-Recorder Phase 3 completion
 
@@ -85,5 +121,5 @@ privacy, geometry, and recorder constraints remain in force.
 # Working tree state
 
 Only `PROJECT_STATE.md` and `HANDOFF.md` should be modified by this documentation
-checkpoint. Candidate Auto-Recorder Phase 3 is committed and pushed; no Phase 3
-implementation is pending in the working tree.
+checkpoint. App/Web A2 and the broader shared web/mobile client remain planned,
+not implemented.
