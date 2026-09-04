@@ -9,6 +9,13 @@ import math
 import threading
 from urllib.parse import parse_qs, urlsplit
 
+from app_backend.contracts import serialize_bootstrap
+from app_backend.settings import (
+    RuntimeSettingsStore,
+    SettingsConflictError,
+    SettingsValidationError,
+)
+from app_backend.state import ApplicationStateStore
 from dashboard_history import (
     DEFAULT_PAGE_SIZE,
     DashboardHistoryStore,
@@ -429,8 +436,9 @@ class DashboardState:
 
 
 class DisabledDashboard:
-    def __init__(self, telegram_controls=None):
+    def __init__(self, telegram_controls=None, settings_store=None):
         self.telegram_controls = telegram_controls or TelegramBodyControls()
+        self.settings_store = settings_store
 
     def publish(self, candidate):
         return False
@@ -458,6 +466,11 @@ class DisabledDashboard:
         return self.telegram_controls.enabled(body)
 
     def set_telegram_enabled(self, body, enabled):
+        if self.settings_store is not None:
+            self.settings_store.legacy_update({
+                "telegram": {str(body).lower() + "_enabled": enabled},
+            })
+            return self.telegram_controls.snapshot()
         return self.telegram_controls.set_enabled(body, enabled)
 
     def invalidate_live(self):
@@ -469,44 +482,75 @@ class DisabledDashboard:
 
 class DashboardRuntime:
     def __init__(self, state, server=None, thread=None, mobile_gps_state=None,
-                 telegram_controls=None):
+                 telegram_controls=None, application_state_store=None,
+                 settings_store=None):
         self.state = state
         self.server = server
         self.thread = thread
         self.mobile_gps_state = mobile_gps_state
         self.telegram_controls = telegram_controls or TelegramBodyControls()
+        self.application_state_store = application_state_store
+        self.settings_store = settings_store
+
+    def _publish_application_state(self):
+        try:
+            if self.application_state_store is not None:
+                self.application_state_store.publish(self.state.snapshot())
+        except Exception:
+            pass
 
     def publish(self, candidate):
-        return self.state.publish(candidate)
+        result = self.state.publish(candidate)
+        self._publish_application_state()
+        return result
 
     def withdraw(self, icao, body, now_utc):
-        return self.state.withdraw(icao, body, now_utc)
+        result = self.state.withdraw(icao, body, now_utc)
+        self._publish_application_state()
+        return result
 
     def withdraw_aircraft(self, icao, now_utc):
-        return self.state.withdraw_aircraft(icao, now_utc)
+        result = self.state.withdraw_aircraft(icao, now_utc)
+        self._publish_application_state()
+        return result
 
     def mark_history_worthy(self, icao, body):
-        return self.state.mark_history_worthy(icao, body)
+        result = self.state.mark_history_worthy(icao, body)
+        self._publish_application_state()
+        return result
 
     def tick(self, now_utc):
-        return self.state.tick(now_utc)
+        result = self.state.tick(now_utc)
+        self._publish_application_state()
+        return result
 
     def update_body_position(self, body, altitude_deg, azimuth_deg,
                              evaluated_at_utc):
-        return self.state.update_body_position(
+        result = self.state.update_body_position(
             body, altitude_deg, azimuth_deg, evaluated_at_utc)
+        self._publish_application_state()
+        return result
 
     def clear_body_positions(self):
-        return self.state.clear_body_positions()
+        result = self.state.clear_body_positions()
+        self._publish_application_state()
+        return result
 
     def telegram_enabled(self, body):
         return self.telegram_controls.enabled(body)
 
     def set_telegram_enabled(self, body, enabled):
+        if self.settings_store is not None:
+            self.settings_store.legacy_update({
+                "telegram": {str(body).lower() + "_enabled": enabled},
+            })
+            return self.telegram_controls.snapshot()
         return self.telegram_controls.set_enabled(body, enabled)
 
     def invalidate_live(self):
-        return self.state.invalidate_live()
+        result = self.state.invalidate_live()
+        self._publish_application_state()
+        return result
 
     def close(self):
         if self.server is not None:
@@ -519,6 +563,7 @@ class DashboardRuntime:
 
 
 def _handler_factory(state, now_utc, mobile_gps_state, telegram_controls,
+                     application_state_store=None, settings_store=None,
                      observer_position_provider=None,
                      stale_warning_seconds=30.0,
                      critical_warning_seconds=300.0):
@@ -549,6 +594,13 @@ def _handler_factory(state, now_utc, mobile_gps_state, telegram_controls,
                 self._send("application/json; charset=utf-8", json.dumps(
                     state.snapshot(now_utc()), separators=(",", ":"),
                 ).encode("utf-8"))
+            elif path == "/api/v1/bootstrap":
+                self._send_json(serialize_bootstrap(
+                    application_state_store.snapshot(),
+                    settings_store.snapshot(), observer_diagnostics(),
+                    now_utc()))
+            elif path == "/api/v1/settings":
+                self._send_json(settings_store.snapshot())
             elif path == "/api/history":
                 query = self._history_query(parsed.query)
                 if query is None:
@@ -588,8 +640,13 @@ def _handler_factory(state, now_utc, mobile_gps_state, telegram_controls,
                     if (not isinstance(payload, dict)
                             or set(payload) != {"body", "enabled"}):
                         raise ValueError
-                    self._send_json(telegram_controls.set_enabled(
-                        payload["body"], payload["enabled"]))
+                    body = str(payload["body"]).upper()
+                    settings_store.legacy_update({
+                        "telegram": {
+                            body.lower() + "_enabled": payload["enabled"],
+                        },
+                    })
+                    self._send_json(telegram_controls.snapshot())
                 except (UnicodeDecodeError, json.JSONDecodeError,
                         TypeError, ValueError):
                     self._send_json(
@@ -607,18 +664,19 @@ def _handler_factory(state, now_utc, mobile_gps_state, telegram_controls,
                     payload = json.loads(self.rfile.read(length).decode("utf-8"))
                     if set(payload) - {"mode", "fallback_enabled"}:
                         raise ValueError
+                    if ("mode" in payload
+                            and str(payload["mode"]).upper() == "MOBILE"
+                            and not mobile_gps_state.enabled):
+                        self._send_json(
+                            {"error": "Mobile GPS is disabled"}, status=403)
+                        return
+                    observer_changes = {}
                     if "mode" in payload:
-                        if (str(payload["mode"]).upper() == "MOBILE"
-                                and not mobile_gps_state.enabled):
-                            self._send_json(
-                                {"error": "Mobile GPS is disabled"}, status=403)
-                            return
-                        observer_position_provider.set_mode(payload["mode"], now_utc())
+                        observer_changes["requested_mode"] = payload["mode"]
                     if "fallback_enabled" in payload:
-                        if not isinstance(payload["fallback_enabled"], bool):
-                            raise ValueError
-                        observer_position_provider.set_fallback_enabled(
-                            payload["fallback_enabled"], now_utc())
+                        observer_changes["fallback_enabled"] = payload[
+                            "fallback_enabled"]
+                    settings_store.legacy_update({"observer": observer_changes})
                     self._send_json(observer_diagnostics())
                 except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
                     self._send_json({"error": "Invalid observer control payload"}, status=400)
@@ -649,6 +707,38 @@ def _handler_factory(state, now_utc, mobile_gps_state, telegram_controls,
                     {"error": "Invalid mobile GPS payload"}, status=400)
                 return
             self._send_json(diagnostics)
+
+        def do_PATCH(self):
+            if urlsplit(self.path).path != "/api/v1/settings":
+                self.send_error(404)
+                return
+            if not self.headers.get("Content-Type", "").lower().startswith(
+                    "application/json"):
+                self._send_json(
+                    {"error": "Settings update requires JSON"}, status=415)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= MAX_MOBILE_GPS_REQUEST_BYTES:
+                    raise SettingsValidationError("Invalid request size")
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                if (not isinstance(payload, dict)
+                        or set(payload) != {
+                            "expected_revision", "command_id", "changes"}):
+                    raise SettingsValidationError("Invalid settings payload")
+                result = settings_store.update(
+                    payload["expected_revision"], payload["command_id"],
+                    payload["changes"])
+                self._send_json(result)
+            except SettingsConflictError as error:
+                self._send_json({
+                    "error": "settings_revision_conflict",
+                    "current": error.current,
+                }, status=409)
+            except (UnicodeDecodeError, json.JSONDecodeError, TypeError,
+                    SettingsValidationError, ValueError):
+                self._send_json(
+                    {"error": "Invalid settings mutation"}, status=400)
 
         def do_DELETE(self):
             if urlsplit(self.path).path != "/api/mobile-gps":
@@ -727,8 +817,44 @@ def start_dashboard(enabled, host, port, now_utc, error_handler=None,
                     telegram_body_change=None):
     telegram_controls = TelegramBodyControls(
         telegram_sun_enabled, telegram_moon_enabled, telegram_body_change)
+    mobile_gps_state = MobileGpsState(
+        enabled=mobile_gps_enabled,
+        fresh_seconds=mobile_gps_fresh_seconds)
+    if observer_position_provider is not None:
+        observer_position_provider.attach_mobile_state(mobile_gps_state)
+
+    def validate_settings(values):
+        if (values["observer"]["requested_mode"] == "MOBILE"
+                and not mobile_gps_state.enabled):
+            raise SettingsValidationError("Mobile GPS is disabled")
+
+    def apply_settings(values, previous):
+        for body in ("SUN", "MOON"):
+            key = body.lower() + "_enabled"
+            if values["telegram"][key] != previous["telegram"][key]:
+                telegram_controls.set_enabled(body, values["telegram"][key])
+        if observer_position_provider is not None:
+            observer = values["observer"]
+            old_observer = previous["observer"]
+            if observer["requested_mode"] != old_observer["requested_mode"]:
+                observer_position_provider.set_mode(
+                    observer["requested_mode"], now_utc())
+            if observer["fallback_enabled"] != old_observer["fallback_enabled"]:
+                observer_position_provider.set_fallback_enabled(
+                    observer["fallback_enabled"], now_utc())
+
+    initial_mode = (
+        observer_position_provider.resolve(now_utc()).requested_mode
+        if observer_position_provider is not None else "STATIC")
+    initial_fallback = (
+        observer_position_provider.resolve(now_utc()).fallback_enabled
+        if observer_position_provider is not None else False)
+    settings_store = RuntimeSettingsStore(
+        telegram_sun_enabled, telegram_moon_enabled,
+        initial_mode, initial_fallback,
+        apply_callback=apply_settings, validate_callback=validate_settings)
     if not enabled:
-        return DisabledDashboard(telegram_controls)
+        return DisabledDashboard(telegram_controls, settings_store)
     errors = error_handler or (lambda message: None)
     history_store = (
         DashboardHistoryStore(history_dir, errors)
@@ -740,17 +866,15 @@ def start_dashboard(enabled, host, port, now_utc, error_handler=None,
         history_store=history_store,
         new_transit_indicator_enabled=new_transit_indicator_enabled,
         new_transit_threshold_seconds=new_transit_threshold_seconds)
-    mobile_gps_state = MobileGpsState(
-        enabled=mobile_gps_enabled,
-        fresh_seconds=mobile_gps_fresh_seconds)
-    if observer_position_provider is not None:
-        observer_position_provider.attach_mobile_state(mobile_gps_state)
+    application_state_store = ApplicationStateStore()
     try:
         state.tick(now_utc())
+        application_state_store.publish(state.snapshot())
         server = server_factory(
             (host, port), _handler_factory(
                 state, now_utc, mobile_gps_state,
                 telegram_controls,
+                application_state_store, settings_store,
                 observer_position_provider,
                 mobile_gps_stale_warning_seconds,
                 mobile_gps_critical_warning_seconds))
@@ -759,7 +883,9 @@ def start_dashboard(enabled, host, port, now_utc, error_handler=None,
         thread.start()
         return DashboardRuntime(
             state, server, thread, mobile_gps_state=mobile_gps_state,
-            telegram_controls=telegram_controls)
+            telegram_controls=telegram_controls,
+            application_state_store=application_state_store,
+            settings_store=settings_store)
     except Exception as error:
         try:
             errors("Dashboard server failed: {}".format(type(error).__name__))
@@ -767,7 +893,9 @@ def start_dashboard(enabled, host, port, now_utc, error_handler=None,
             pass
         return DashboardRuntime(
             state, mobile_gps_state=mobile_gps_state,
-            telegram_controls=telegram_controls)
+            telegram_controls=telegram_controls,
+            application_state_store=application_state_store,
+            settings_store=settings_store)
 
 
 DASHBOARD_HTML = r"""<!doctype html>
