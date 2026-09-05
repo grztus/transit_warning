@@ -40,5 +40,9 @@ export const activeFixture: BootstrapDto = {
     callsign: "RECENT1", final_separation_deg: 0.8, outcome: "PASSED",
   }],
   presentation: { sep_green_max_deg: 3, sep_yellow_max_deg: 5, sep_visible_max_deg: 7 },
+  settings: {
+    telegram: { sun_enabled: true, moon_enabled: true },
+    observer: { requested_mode: "MOBILE", fallback_enabled: true },
+  },
   capabilities: { runtime_settings: { telegram_sun_enabled: true } },
 };

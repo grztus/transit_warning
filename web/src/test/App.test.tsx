@@ -29,7 +29,7 @@ describe("LIVE screen", () => {
     expect(screen.getByText("TEST123")).toBeInTheDocument();
     expect(screen.getByText("RECENT1")).toBeInTheDocument();
     expect(screen.getByText(/ALT 31.2° · AZ 217.4°/)).toBeInTheDocument();
-    expect(screen.getAllByText("MOBILE")).toHaveLength(2);
+    expect(screen.getAllByText("MOBILE")).toHaveLength(3);
     expect(screen.getByText("SEP 0.4°")).toHaveClass("sep-green");
     expect(screen.getByText("CANDIDATE")).toHaveClass("state-candidate");
     expect(screen.getByText("TELEGRAM RANGE")).toHaveClass("state-telegram-range");

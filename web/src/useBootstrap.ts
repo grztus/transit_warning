@@ -16,6 +16,7 @@ export interface BootstrapPollingState {
   offline: boolean;
   loading: boolean;
   transport: TransportState;
+  resync(): Promise<void>;
 }
 
 const nativeEventSource: EventSourceFactory | undefined = typeof EventSource === "undefined"
@@ -110,6 +111,7 @@ export function useBootstrap(
         if (update.settings_revision <= current.settings_revision) return;
         if (update.settings_revision !== current.settings_revision + 1) { void safeResync(); return; }
         install({ ...current, settings_revision: update.settings_revision,
+          settings: update.payload.values,
           capabilities: update.payload.capabilities });
       } catch { void safeResync(); }
     };
@@ -172,5 +174,6 @@ export function useBootstrap(
     };
   }, [eventSourceFactory, fallbackDelayMs, pollIntervalMs, reconnectDelayMs, resync, install]);
 
-  return { snapshot, lastSuccessfulRefresh, offline: transport === "OFFLINE", loading, transport };
+  return { snapshot, lastSuccessfulRefresh, offline: transport === "OFFLINE", loading, transport,
+    resync };
 }

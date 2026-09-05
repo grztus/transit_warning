@@ -353,6 +353,7 @@ class VersionedDashboardApiTests(unittest.TestCase):
         _, bootstrap = self.get_json("/api/v1/bootstrap")
         self.assertEqual(1, settings["schema_version"])
         self.assertEqual(settings["revision"], bootstrap["settings_revision"])
+        self.assertEqual(settings["values"], bootstrap["settings"])
         self.assertIn("bodies", bootstrap)
         self.assertIn("observer", bootstrap)
         encoded = json.dumps(bootstrap).lower()

@@ -152,15 +152,18 @@ describe("SSE realtime transport", () => {
     } finally { vi.useRealTimers(); }
   });
 
-  it("applies settings revisions to the read-only display", async () => {
+  it("applies authoritative settings revisions to the controls", async () => {
     const { sources } = setup();
     await screen.findByText("TEST123");
     const source = sources[0];
     act(() => source.emit("settings", { schema_version: 1, event: "settings",
       settings_revision: 4, payload: { schema_version: 1, revision: 4,
-        values: {}, persistence: "RUNTIME_ONLY_RESET_TO_CONFIG_ON_RESTART",
+        values: { telegram: { sun_enabled: false, moon_enabled: true },
+          observer: { requested_mode: "STATIC", fallback_enabled: false } },
+        persistence: "RUNTIME_ONLY_RESET_TO_CONFIG_ON_RESTART",
         capabilities: { runtime_settings: false } } }));
     expect(screen.getByText("Settings revision: 4")).toBeInTheDocument();
     expect(screen.getByText("Runtime settings API: unavailable")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "STATIC" })).toHaveAttribute("aria-pressed", "true");
   });
 });

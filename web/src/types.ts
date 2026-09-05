@@ -72,7 +72,13 @@ export interface BootstrapDto {
   };
   recent_events: RecentEventDto[];
   presentation: PresentationDto;
+  settings: RuntimeSettingsValuesDto;
   capabilities: Record<string, unknown>;
+}
+
+export interface RuntimeSettingsValuesDto {
+  telegram: { sun_enabled: boolean; moon_enabled: boolean };
+  observer: { requested_mode: "STATIC" | "MOBILE"; fallback_enabled: boolean };
 }
 
 export interface LiveStateEvent {
@@ -86,9 +92,18 @@ export interface LiveStateEvent {
 export interface SettingsSnapshotDto {
   schema_version: 1;
   revision: number;
-  values: Record<string, unknown>;
+  values: RuntimeSettingsValuesDto;
   capabilities: Record<string, unknown>;
   persistence: string;
+}
+
+export interface SettingsMutation {
+  expected_revision: number;
+  command_id: string;
+  changes: {
+    telegram?: Partial<RuntimeSettingsValuesDto["telegram"]>;
+    observer?: Partial<RuntimeSettingsValuesDto["observer"]>;
+  };
 }
 
 export interface SettingsEvent {

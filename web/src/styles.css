@@ -66,6 +66,17 @@ h2 { margin-bottom: 0; font-size: 1.05rem; letter-spacing: .08em; }
 .event-withdrawn { opacity: .82; }
 .read-only p { margin: .6rem 0 0; }
 .empty-state { text-align: center; padding: 3rem 1rem; }
+.control-row, .control-line { display: flex; gap: .55rem; align-items: center; }
+.control-row { margin: .7rem 0; }
+.control-line { justify-content: space-between; margin: .55rem 0; }
+.control-row button { flex: 1; }
+button { border: 1px solid #556174; border-radius: .45rem; padding: .5rem .8rem;
+  background: #202938; color: inherit; font-weight: 700; cursor: pointer; }
+button[aria-pressed="true"] { border-color: #72d5a2; background: #173b31; }
+button:disabled { cursor: wait; opacity: .65; }
+.degraded, .settings-message { margin: .7rem 0 0; padding: .55rem .7rem; border-radius: .4rem; }
+.degraded { background: #4a3717; }
+.settings-message { background: #49242a; }
 
 @media (min-width: 700px) {
   main { padding: 1.5rem; }

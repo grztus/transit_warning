@@ -105,6 +105,7 @@ def serialize_bootstrap(application_snapshot, settings, observer_status, now_utc
         "bodies": live["bodies"],
         "recent_events": live["recent_events"],
         "presentation": live["presentation"],
+        "settings": settings["values"],
         "capabilities": settings["capabilities"],
     }
     assert_public_payload(result)

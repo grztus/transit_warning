@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import type { BootstrapFetcher } from "./api";
+import { patchSettings, SettingsConflictError } from "./api";
+import type { BootstrapFetcher, SettingsMutator } from "./api";
 import type {
   BodyName,
   BodyStateDto,
@@ -16,6 +17,7 @@ interface AppProps {
   eventSourceFactory?: EventSourceFactory;
   fallbackDelayMs?: number;
   reconnectDelayMs?: number;
+  settingsMutator?: SettingsMutator;
 }
 
 const value = (number: number | undefined, suffix = "") =>
@@ -139,12 +141,33 @@ function EventCard({ event }: { event: RecentEventDto }) {
 }
 
 export default function App({ client, pollIntervalMs, eventSourceFactory, fallbackDelayMs,
-  reconnectDelayMs }: AppProps) {
+  reconnectDelayMs, settingsMutator = patchSettings }: AppProps) {
   const state = useBootstrap(client, pollIntervalMs, eventSourceFactory, fallbackDelayMs,
     reconnectDelayMs);
   const nowMs = useLiveClock();
   const snapshot = state.snapshot;
   const health = state.offline ? "OFFLINE" : snapshot?.health || "STALE";
+  const [pending, setPending] = useState<string | null>(null);
+  const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
+  const changeSetting = async (key: string, changes: Parameters<SettingsMutator>[0]["changes"]) => {
+    if (!snapshot || pending) return;
+    setPending(key);
+    setSettingsMessage(null);
+    try {
+      await settingsMutator({ expected_revision: snapshot.settings_revision,
+        command_id: crypto.randomUUID(), changes });
+      await state.resync();
+    } catch (error) {
+      if (error instanceof SettingsConflictError) {
+        setSettingsMessage("Setting changed on another client");
+        try { await state.resync(); } catch { /* transport status reports failure */ }
+      } else {
+        setSettingsMessage("Setting change failed");
+      }
+    } finally {
+      setPending(null);
+    }
+  };
 
   return (
     <main>
@@ -183,6 +206,26 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
 
           <section className="panel">
             <header><h2>Observer</h2></header>
+            <div className="control-row" aria-label="Observer mode">
+              {(["STATIC", "MOBILE"] as const).map((mode) => (
+                <button key={mode} type="button"
+                  aria-pressed={snapshot.settings.observer.requested_mode === mode}
+                  disabled={pending !== null}
+                  onClick={() => void changeSetting("observer-mode", { observer: { requested_mode: mode } })}>
+                  {pending === "observer-mode" ? "CHANGING…" : mode}
+                </button>
+              ))}
+            </div>
+            <div className="control-line">
+              <span>Fallback</span>
+              <button type="button" aria-pressed={snapshot.settings.observer.fallback_enabled}
+                aria-label="Observer fallback"
+                disabled={pending !== null}
+                onClick={() => void changeSetting("fallback", { observer: {
+                  fallback_enabled: !snapshot.settings.observer.fallback_enabled } })}>
+                {pending === "fallback" ? "CHANGING…" : snapshot.settings.observer.fallback_enabled ? "ON" : "OFF"}
+              </button>
+            </div>
             <dl className="compact-grid observer-grid">
               <dt>Requested</dt><dd>{snapshot.observer.requested_mode || "—"}</dd>
               <dt>Effective</dt><dd>{snapshot.observer.effective_source || "—"}</dd>
@@ -191,6 +234,28 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
               <dt>Accuracy</dt><dd>{value(snapshot.observer.mobile_accuracy_m ?? undefined, " m")}</dd>
               <dt>Fallback</dt><dd>{snapshot.observer.fallback_active ? "ACTIVE" : "OFF"}</dd>
             </dl>
+            {snapshot.settings.observer.requested_mode === "MOBILE" &&
+              snapshot.observer.effective_source !== "MOBILE" && (
+              <p className="degraded" role="status">MOBILE requested · effective {snapshot.observer.effective_source || "unavailable"}</p>
+            )}
+          </section>
+
+          <section className="panel settings-panel">
+            <header><h2>Telegram</h2><span>Revision {snapshot.settings_revision}</span></header>
+            {(["sun", "moon"] as const).map((body) => (
+              <div className="control-line" key={body}>
+                <span>{body.toUpperCase()}</span>
+                <button type="button" aria-pressed={snapshot.settings.telegram[`${body}_enabled`]}
+                  aria-label={`Telegram ${body.toUpperCase()}`}
+                  disabled={pending !== null}
+                  onClick={() => void changeSetting(`telegram-${body}`, { telegram: {
+                    [`${body}_enabled`]: !snapshot.settings.telegram[`${body}_enabled`] } })}>
+                  {pending === `telegram-${body}` ? "CHANGING…" :
+                    snapshot.settings.telegram[`${body}_enabled`] ? "ON" : "OFF"}
+                </button>
+              </div>
+            ))}
+            {settingsMessage && <p className="settings-message" role="alert">{settingsMessage}</p>}
           </section>
 
           <section className="panel">
@@ -205,7 +270,7 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
           </section>
 
           <section className="panel read-only">
-            <header><h2>Capabilities</h2><span>Read-only</span></header>
+            <header><h2>Capabilities</h2></header>
             <p>Runtime settings API: {snapshot.capabilities.runtime_settings ? "available" : "unavailable"}</p>
             <p>Settings revision: {snapshot.settings_revision}</p>
           </section>
