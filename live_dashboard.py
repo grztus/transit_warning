@@ -6,8 +6,10 @@ import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
+import mimetypes
+from pathlib import Path
 import threading
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from app_backend.contracts import serialize_bootstrap
 from app_backend.settings import (
@@ -607,7 +609,11 @@ def _handler_factory(state, now_utc, mobile_gps_state, telegram_controls,
                      sse_broker=None,
                      observer_position_provider=None,
                      stale_warning_seconds=30.0,
-                     critical_warning_seconds=300.0):
+                     critical_warning_seconds=300.0,
+                     frontend_dist_dir=None):
+    dist_dir = Path(frontend_dist_dir or (
+        Path(__file__).resolve().parent / "web" / "dist")).resolve()
+
     def observer_diagnostics():
         if observer_position_provider is None:
             return {"requested_mode": "STATIC", "effective_source": "STATIC"}
@@ -666,9 +672,19 @@ def _handler_factory(state, now_utc, mobile_gps_state, telegram_controls,
                 self._send_json(observer_diagnostics())
             elif path == "/api/telegram":
                 self._send_json(telegram_controls.snapshot())
-            elif path in ("/", "/index.html"):
+            elif path == "/legacy":
                 self._send("text/html; charset=utf-8",
                            DASHBOARD_HTML.encode("utf-8"))
+            elif path in ("/", "/index.html"):
+                index_path = dist_dir / "index.html"
+                if index_path.is_file():
+                    self._send("text/html; charset=utf-8",
+                               index_path.read_bytes())
+                else:
+                    self._send("text/html; charset=utf-8",
+                               DASHBOARD_HTML.encode("utf-8"))
+            elif path.startswith("/assets/"):
+                self._send_frontend_asset(path)
             else:
                 self.send_error(404)
 
@@ -836,6 +852,21 @@ def _handler_factory(state, now_utc, mobile_gps_state, telegram_controls,
                 json.dumps(value, separators=(",", ":")).encode("utf-8"),
                 status=status)
 
+        def _send_frontend_asset(self, request_path):
+            relative = unquote(request_path).lstrip("/")
+            try:
+                asset_path = (dist_dir / relative).resolve()
+                asset_path.relative_to(dist_dir)
+            except (OSError, ValueError):
+                self.send_error(404)
+                return
+            if not asset_path.is_file():
+                self.send_error(404)
+                return
+            content_type = mimetypes.guess_type(asset_path.name)[0]
+            self._send(content_type or "application/octet-stream",
+                       asset_path.read_bytes())
+
         def _send_sse(self):
             if sse_broker is None:
                 self.send_error(503)
@@ -893,7 +924,10 @@ def start_dashboard(enabled, host, port, now_utc, error_handler=None,
                         DEFAULT_NEW_TRANSIT_THRESHOLD_SECONDS),
                     telegram_sun_enabled=True,
                     telegram_moon_enabled=True,
-                    telegram_body_change=None):
+                    telegram_body_change=None,
+                    frontend_dist_dir=None):
+    if frontend_dist_dir is None:
+        frontend_dist_dir = Path(__file__).resolve().parent / "web" / "dist"
     telegram_controls = TelegramBodyControls(
         telegram_sun_enabled, telegram_moon_enabled, telegram_body_change)
     mobile_gps_state = MobileGpsState(
@@ -962,7 +996,8 @@ def start_dashboard(enabled, host, port, now_utc, error_handler=None,
                 sse_broker,
                 observer_position_provider,
                 mobile_gps_stale_warning_seconds,
-                mobile_gps_critical_warning_seconds))
+                mobile_gps_critical_warning_seconds,
+                frontend_dist_dir))
         thread = threading.Thread(
             target=server.serve_forever, name="transit-dashboard", daemon=True)
         thread.start()

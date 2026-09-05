@@ -446,7 +446,7 @@ class DashboardRuntimeTests(unittest.TestCase):
                     timeout=2) as response:
                 state = json.loads(response.read().decode("utf-8"))
             with urllib.request.urlopen(
-                    "http://127.0.0.1:{}/".format(port),
+                    "http://127.0.0.1:{}/legacy".format(port),
                     timeout=2) as response:
                 html = response.read().decode("utf-8")
         finally:
@@ -841,6 +841,71 @@ class DashboardRuntimeTests(unittest.TestCase):
             "function healthStatus", 1)[1].split(
                 "function renderHealth", 1)[0]
         self.assertNotIn("candidates", health_function)
+
+
+class ProductionFrontendServingTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.dist = self.root / "dist"
+        (self.dist / "assets").mkdir(parents=True)
+        (self.dist / "index.html").write_text(
+            "<!doctype html><title>production-react</title>", encoding="utf-8")
+        (self.dist / "assets" / "example.js").write_text(
+            "globalThis.productionReact = true;", encoding="utf-8")
+        self.runtime = dashboard.start_dashboard(
+            True, "127.0.0.1", 0, lambda: NOW,
+            history_enabled=False, frontend_dist_dir=self.dist)
+        self.base = "http://127.0.0.1:{}".format(
+            self.runtime.server.server_address[1])
+
+    def tearDown(self):
+        self.runtime.close()
+        self.temporary.cleanup()
+
+    def fetch(self, path):
+        with urllib.request.urlopen(self.base + path, timeout=2) as response:
+            return (response.status, response.headers,
+                    response.read().decode("utf-8"))
+
+    def test_root_and_index_serve_production_index(self):
+        for path in ("/", "/index.html"):
+            with self.subTest(path=path):
+                status, headers, body = self.fetch(path)
+                self.assertEqual(200, status)
+                self.assertIn("text/html", headers["Content-Type"])
+                self.assertIn("production-react", body)
+
+    def test_vite_asset_is_served_with_javascript_mime_type(self):
+        status, headers, body = self.fetch("/assets/example.js")
+        self.assertEqual(200, status)
+        self.assertIn("javascript", headers["Content-Type"])
+        self.assertIn("productionReact", body)
+
+    def test_legacy_always_serves_embedded_dashboard(self):
+        status, headers, body = self.fetch("/legacy")
+        self.assertEqual(200, status)
+        self.assertIn("text/html", headers["Content-Type"])
+        self.assertEqual(dashboard.DASHBOARD_HTML, body)
+
+    def test_root_falls_back_when_production_index_is_absent(self):
+        (self.dist / "index.html").unlink()
+        _, _, body = self.fetch("/")
+        self.assertEqual(dashboard.DASHBOARD_HTML, body)
+
+    def test_api_routes_take_precedence_when_dist_exists(self):
+        status, headers, body = self.fetch("/api/state")
+        self.assertEqual(200, status)
+        self.assertIn("application/json", headers["Content-Type"])
+        self.assertIn("sun", json.loads(body))
+
+    def test_asset_path_traversal_is_rejected(self):
+        (self.root / "secret.js").write_text("secret", encoding="utf-8")
+        request = urllib.request.Request(
+            self.base + "/assets/%2e%2e/secret.js")
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request, timeout=2)
+        self.assertEqual(404, raised.exception.code)
 
 
 class DashboardConfigTests(unittest.TestCase):
