@@ -4,6 +4,24 @@ import App, { formatCountdown } from "../App";
 import { activeFixture } from "./fixture";
 
 describe("LIVE screen", () => {
+  it("moves the active tab style with the displayed view", async () => {
+    render(<App client={async () => activeFixture} pollIntervalMs={60_000}
+      historyClient={async () => ({ records: [], offset: 0, limit: 25,
+        next_offset: null, has_more: false })} />);
+    const live = await screen.findByRole("button", { name: "LIVE" });
+    const history = screen.getByRole("button", { name: "HISTORY" });
+    expect(live).toHaveClass("active");
+    expect(history).not.toHaveClass("active");
+
+    fireEvent.click(history);
+    expect(history).toHaveClass("active");
+    expect(live).not.toHaveClass("active");
+
+    fireEvent.click(live);
+    expect(live).toHaveClass("active");
+    expect(history).not.toHaveClass("active");
+  });
+
   it("exposes a keyboard-accessible Standard edition tooltip without links", async () => {
     render(<App client={async () => activeFixture} pollIntervalMs={60_000} />);
     const badge = await screen.findByRole("button", { name: "STANDARD" });

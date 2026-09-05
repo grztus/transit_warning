@@ -236,6 +236,7 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
           <nav className="view-tabs" aria-label="Dashboard view">
             {(["LIVE", "HISTORY"] as const).map((name) => (
               <button key={name} type="button" aria-pressed={view === name}
+                className={view === name ? "active" : undefined}
                 onClick={() => setView(name)}>{name}</button>
             ))}
           </nav>

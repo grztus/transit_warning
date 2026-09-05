@@ -94,7 +94,9 @@ h2 { margin-bottom: 0; font-size: 1.05rem; letter-spacing: .08em; }
 .control-group button { padding: .32rem .58rem; min-width: 3.3rem; font-size: .76rem; }
 button { border: 1px solid #556174; border-radius: .45rem; padding: .5rem .8rem;
   background: #202938; color: inherit; font-weight: 700; cursor: pointer; }
-button[aria-pressed="true"] { border-color: #72d5a2; background: #173b31; }
+button[aria-pressed="true"], .view-tabs button.active {
+  border-color: #72d5a2; background: #173b31;
+}
 button:disabled { cursor: wait; opacity: .65; }
 .degraded, .settings-message { margin: .55rem 0 0; padding: .48rem .62rem; border-radius: .4rem; font-size: .78rem; }
 .degraded { background: #4a3717; }
