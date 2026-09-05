@@ -162,8 +162,8 @@ describe("SSE realtime transport", () => {
           observer: { requested_mode: "STATIC", fallback_enabled: false } },
         persistence: "RUNTIME_ONLY_RESET_TO_CONFIG_ON_RESTART",
         capabilities: { runtime_settings: false } } }));
-    expect(screen.getByText("Settings revision: 4")).toBeInTheDocument();
-    expect(screen.getByText("Runtime settings API: unavailable")).toBeInTheDocument();
+    expect(screen.getByText(/API unavailable · rev 4/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "STATIC" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText("RECENT1")).toBeInTheDocument();
   });
 });

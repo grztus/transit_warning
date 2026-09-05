@@ -1,9 +1,17 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import App, { formatCountdown } from "../App";
 import { activeFixture } from "./fixture";
 
 describe("LIVE screen", () => {
+  it("exposes a keyboard-accessible Standard edition tooltip without links", async () => {
+    render(<App client={async () => activeFixture} pollIntervalMs={60_000} />);
+    const badge = await screen.findByRole("button", { name: "STANDARD" });
+    expect(badge).toHaveAttribute("aria-describedby", "edition-tooltip");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Free operational dashboard");
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+  });
+
   it.each([undefined, null, "", "TEST123"])(
     "uses callsign or ICAO consistently in LIVE and HISTORY: %j", async (callsign) => {
       const fixture = {
@@ -14,28 +22,35 @@ describe("LIVE screen", () => {
         },
         recent_events: [{ icao: "ABC123", callsign }],
       };
-      const { container } = render(<App client={async () => fixture} pollIntervalMs={60_000} />);
+      const { container } = render(<App client={async () => fixture} pollIntervalMs={60_000}
+        historyClient={async () => ({ records: fixture.recent_events, offset: 0,
+          limit: 25, next_offset: null, has_more: false })} />);
       await screen.findByRole("status");
       await waitFor(() => expect(container.querySelector(".callsign")).toHaveTextContent(
         callsign?.trim() || "ABC123"));
-      expect(container.querySelector(".event-row strong")).toHaveTextContent(
-        callsign?.trim() || "ABC123");
+      fireEvent.click(screen.getByRole("button", { name: "HISTORY" }));
+      await waitFor(() => expect(container.querySelector(".event-row strong")).toHaveTextContent(
+        callsign?.trim() || "ABC123"));
       if (callsign?.trim()) expect(screen.queryByText("ABC123")).not.toBeInTheDocument();
     });
 
   it("renders ACTIVE live state, bodies, candidates, history and observer diagnostics", async () => {
-    render(<App client={async () => activeFixture} pollIntervalMs={60_000} />);
+    render(<App client={async () => activeFixture} pollIntervalMs={60_000}
+      historyClient={async () => ({ records: activeFixture.recent_events, offset: 0,
+        limit: 25, next_offset: null, has_more: false })} />);
     expect(await screen.findByRole("status")).toHaveTextContent("ACTIVE");
     expect(screen.getByText("TEST123")).toBeInTheDocument();
-    expect(screen.getByText("RECENT1")).toBeInTheDocument();
     expect(screen.getByText(/ALT 31.2° · AZ 217.4°/)).toBeInTheDocument();
-    expect(screen.getAllByText("MOBILE")).toHaveLength(3);
+    expect(screen.getByRole("button", { name: "MOBILE" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText(/Requested MOBILE · Effective MOBILE/)).toBeInTheDocument();
     expect(screen.getByText("SEP 0.4°")).toHaveClass("sep-green");
     expect(screen.getByText("CANDIDATE")).toHaveClass("state-candidate");
     expect(screen.getByText("TELEGRAM RANGE")).toHaveClass("state-telegram-range");
     expect(screen.getByText("SEP 1.2°")).toHaveClass("sep-yellow");
-    expect(screen.getByText("PASSED")).toHaveClass("state-passed");
     expect(screen.getByText("7:ABC123:SUN:2")).toHaveClass("encounter-id");
+    fireEvent.click(screen.getByRole("button", { name: "HISTORY" }));
+    expect(await screen.findByText("RECENT1")).toBeInTheDocument();
+    expect(screen.getByText("PASSED")).toHaveClass("state-passed");
   });
 
   it("keeps backend STALE distinct from fetch failure", async () => {
@@ -75,7 +90,7 @@ describe("LIVE screen", () => {
     };
     render(<App client={async () => sparse} pollIntervalMs={60_000} />);
     expect(await screen.findAllByText("NOCALL")).toHaveLength(2);
-    expect(screen.getByText("Runtime settings API: unavailable")).toBeInTheDocument();
+    expect(screen.getByText(/API unavailable/)).toBeInTheDocument();
   });
 
   it("updates the displayed countdown locally once per second", async () => {

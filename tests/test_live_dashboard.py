@@ -616,6 +616,23 @@ class DashboardRuntimeTests(unittest.TestCase):
         self.assertIn(
             "async function telegramRequest(body=null,enabled=null)", html)
 
+    def test_legacy_history_sends_body_and_max_sep_filters(self):
+        html = dashboard.DASHBOARD_HTML
+        self.assertIn('id="history-body"', html)
+        self.assertIn('id="history-max-sep"', html)
+        self.assertIn("q.set('max_sep_deg',m)", html)
+        self.assertIn("value.trim().replace(',','.')", html)
+        self.assertIn("'history-body','history-max-sep'", html)
+
+    def test_legacy_operational_active_states_are_green(self):
+        html = dashboard.DASHBOARD_HTML
+        self.assertIn(
+            "button.active{background:#173b31;color:#eef;border:1px solid #55d982}",
+            html)
+        self.assertIn(
+            ".observer-controls input[type=checkbox]{accent-color:#55d982}",
+            html)
+
     def test_candidate_countdown_and_identity_share_compact_mobile_row(self):
         html = dashboard.DASHBOARD_HTML
         self.assertIn(".candidate-heading{display:flex", html)

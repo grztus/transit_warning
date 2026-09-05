@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
-import { patchSettings, SettingsConflictError } from "./api";
-import type { BootstrapFetcher, SettingsMutator } from "./api";
+import { useEffect, useRef, useState } from "react";
+import { fetchHistory, normalizeHistoryMaxSep, patchSettings, SettingsConflictError } from "./api";
+import type { BootstrapFetcher, HistoryFetcher, SettingsMutator } from "./api";
 import type {
   BodyName,
   BodyStateDto,
   RecentEventDto,
+  HistoryEventDto,
   TransitCandidateDto,
 } from "./types";
 import { useBootstrap } from "./useBootstrap";
@@ -18,6 +19,7 @@ interface AppProps {
   fallbackDelayMs?: number;
   reconnectDelayMs?: number;
   settingsMutator?: SettingsMutator;
+  historyClient?: HistoryFetcher;
 }
 
 const value = (number: number | undefined, suffix = "") =>
@@ -67,6 +69,21 @@ function useLiveClock() {
 
 const className = (value: string | undefined) =>
   (value || "neutral").toLowerCase().replace(/[^a-z0-9_-]/g, "-");
+
+function EditionBadge() {
+  return (
+    <span className="edition-badge-wrap">
+      <button type="button" className="edition-badge" aria-describedby="edition-tooltip">
+        STANDARD
+      </button>
+      <span id="edition-tooltip" className="edition-tooltip" role="tooltip">
+        <strong>Standard Version</strong>
+        <span>Free operational dashboard.</span>
+        <span>Want the advanced tools? Support the project and help fund further development.</span>
+      </span>
+    </span>
+  );
+}
 
 function CandidateCard({ candidate, nowMs }: {
   candidate: TransitCandidateDto;
@@ -126,7 +143,7 @@ function BodyPanel({ name, state, nowMs }: {
   );
 }
 
-function EventCard({ event }: { event: RecentEventDto }) {
+function EventCard({ event }: { event: RecentEventDto | HistoryEventDto }) {
   const outcome = event.outcome || event.state || "—";
   return (
     <li className={`event-row event-${className(outcome)}`}>
@@ -136,12 +153,16 @@ function EventCard({ event }: { event: RecentEventDto }) {
       <span className={`sep sep-${className(event.separation_class)}`}>
         SEP {value(event.final_separation_deg ?? event.separation_deg, "°")}
       </span>
+      <span className="event-time">{time(event.predicted_event_utc)}</span>
+      {event.transit_distance_km != null && <span className="event-distance">
+        {value(event.transit_distance_km, " km")}
+      </span>}
     </li>
   );
 }
 
 export default function App({ client, pollIntervalMs, eventSourceFactory, fallbackDelayMs,
-  reconnectDelayMs, settingsMutator = patchSettings }: AppProps) {
+  reconnectDelayMs, settingsMutator = patchSettings, historyClient = fetchHistory }: AppProps) {
   const state = useBootstrap(client, pollIntervalMs, eventSourceFactory, fallbackDelayMs,
     reconnectDelayMs);
   const nowMs = useLiveClock();
@@ -149,6 +170,44 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
   const health = state.offline ? "OFFLINE" : snapshot?.health || "STALE";
   const [pending, setPending] = useState<string | null>(null);
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
+  const [view, setView] = useState<"LIVE" | "HISTORY">("LIVE");
+  const [historyDate, setHistoryDate] = useState("");
+  const [historyCallsign, setHistoryCallsign] = useState("");
+  const [historyBody, setHistoryBody] = useState<"ALL" | "SUN" | "MOON">("ALL");
+  const [historyMaxSep, setHistoryMaxSep] = useState("");
+  const [historyRecords, setHistoryRecords] = useState<HistoryEventDto[]>([]);
+  const [historyNextOffset, setHistoryNextOffset] = useState<number | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState(false);
+  const historyRequest = useRef(0);
+  const loadHistory = async (append = false) => {
+    const request = ++historyRequest.current;
+    setHistoryLoading(true);
+    setHistoryError(false);
+    if (!append) setHistoryRecords([]);
+    try {
+      const maxSepDeg = normalizeHistoryMaxSep(historyMaxSep);
+      const page = await historyClient({ date: historyDate || undefined,
+        callsign: historyCallsign.trim() || undefined,
+        body: historyBody, maxSepDeg,
+        offset: append ? historyNextOffset ?? 0 : 0, limit: 25 });
+      if (request !== historyRequest.current) return;
+      setHistoryRecords((current) => append ? current.concat(page.records) : page.records);
+      setHistoryNextOffset(page.has_more ? page.next_offset : null);
+    } catch {
+      if (request !== historyRequest.current) return;
+      setHistoryRecords([]);
+      setHistoryNextOffset(null);
+      setHistoryError(true);
+    } finally {
+      if (request === historyRequest.current) setHistoryLoading(false);
+    }
+  };
+  useEffect(() => {
+    if (view === "HISTORY") void loadHistory();
+  // Filters intentionally trigger the same immediate refresh as the legacy controls.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, historyDate, historyCallsign, historyBody, historyMaxSep, historyClient]);
   const changeSetting = async (key: string, changes: Parameters<SettingsMutator>[0]["changes"]) => {
     if (!snapshot || pending) return;
     setPending(key);
@@ -173,8 +232,13 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
     <main>
       <header className="app-header">
         <div>
-          <p className="eyebrow">Transit Warning</p>
-          <h1>LIVE</h1>
+          <p className="eyebrow brand-line"><span>Transit Warning</span><EditionBadge /></p>
+          <nav className="view-tabs" aria-label="Dashboard view">
+            {(["LIVE", "HISTORY"] as const).map((name) => (
+              <button key={name} type="button" aria-pressed={view === name}
+                onClick={() => setView(name)}>{name}</button>
+            ))}
+          </nav>
         </div>
         <div className={`health health-${health.toLowerCase()}`} role="status">
           <span className="health-dot" />{health}
@@ -199,14 +263,19 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
             <div><span>Last refresh</span><strong>{state.lastSuccessfulRefresh?.toLocaleTimeString() || "—"}</strong></div>
           </section>
 
-          <div className="body-grid">
+          {view === "LIVE" ? <>
+            <div className="body-grid">
             <BodyPanel name="SUN" state={snapshot.bodies.sun} nowMs={nowMs} />
             <BodyPanel name="MOON" state={snapshot.bodies.moon} nowMs={nowMs} />
-          </div>
+            </div>
 
-          <section className="panel">
-            <header><h2>Observer</h2></header>
-            <div className="control-row" aria-label="Observer mode">
+          <section className="panel controls-panel">
+            <header><h2>Controls</h2><span className="controls-meta">
+              API {snapshot.capabilities.runtime_settings ? "available" : "unavailable"} · rev {snapshot.settings_revision}
+            </span></header>
+            <div className="control-group observer-control-group">
+              <strong>Observer</strong>
+              <div className="control-row" aria-label="Observer mode">
               {(["STATIC", "MOBILE"] as const).map((mode) => (
                 <button key={mode} type="button"
                   aria-pressed={snapshot.settings.observer.requested_mode === mode}
@@ -215,9 +284,8 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
                   {pending === "observer-mode" ? "CHANGING…" : mode}
                 </button>
               ))}
-            </div>
-            <div className="control-line">
-              <span>Fallback</span>
+              </div>
+              <span className="control-label">Fallback</span>
               <button type="button" aria-pressed={snapshot.settings.observer.fallback_enabled}
                 aria-label="Observer fallback"
                 disabled={pending !== null}
@@ -226,24 +294,23 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
                 {pending === "fallback" ? "CHANGING…" : snapshot.settings.observer.fallback_enabled ? "ON" : "OFF"}
               </button>
             </div>
-            <dl className="compact-grid observer-grid">
-              <dt>Requested</dt><dd>{snapshot.observer.requested_mode || "—"}</dd>
-              <dt>Effective</dt><dd>{snapshot.observer.effective_source || "—"}</dd>
-              <dt>GPS</dt><dd>{snapshot.observer.gps_health || "—"}</dd>
-              <dt>Age</dt><dd>{value(snapshot.observer.mobile_age_seconds ?? undefined, " s")}</dd>
-              <dt>Accuracy</dt><dd>{value(snapshot.observer.mobile_accuracy_m ?? undefined, " m")}</dd>
-              <dt>Fallback</dt><dd>{snapshot.observer.fallback_active ? "ACTIVE" : "OFF"}</dd>
-            </dl>
+            <p className="observer-meta">
+              Requested {snapshot.observer.requested_mode || "—"} · Effective {snapshot.observer.effective_source || "—"}
+              {snapshot.settings.observer.requested_mode === "MOBILE" && <>
+                {" · "}GPS {snapshot.observer.gps_health || "—"}
+                {" · "}Age {value(snapshot.observer.mobile_age_seconds ?? undefined, " s")}
+                {" · "}Accuracy {value(snapshot.observer.mobile_accuracy_m ?? undefined, " m")}
+              </>}
+              {snapshot.observer.fallback_active && " · Fallback active"}
+            </p>
             {snapshot.settings.observer.requested_mode === "MOBILE" &&
               snapshot.observer.effective_source !== "MOBILE" && (
               <p className="degraded" role="status">MOBILE requested · effective {snapshot.observer.effective_source || "unavailable"}</p>
             )}
-          </section>
-
-          <section className="panel settings-panel">
-            <header><h2>Telegram</h2><span>Revision {snapshot.settings_revision}</span></header>
+            <div className="control-group telegram-control-group">
+              <strong>Telegram</strong>
             {(["sun", "moon"] as const).map((body) => (
-              <div className="control-line" key={body}>
+              <div className="inline-toggle" key={body}>
                 <span>{body.toUpperCase()}</span>
                 <button type="button" aria-pressed={snapshot.settings.telegram[`${body}_enabled`]}
                   aria-label={`Telegram ${body.toUpperCase()}`}
@@ -255,10 +322,10 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
                 </button>
               </div>
             ))}
+            </div>
             {settingsMessage && <p className="settings-message" role="alert">{settingsMessage}</p>}
           </section>
-
-          <section className="panel">
+          <section className="panel recent-panel">
             <header><h2>Recent events</h2></header>
             {snapshot.recent_events.length ? (
               <ul className="event-list">
@@ -268,12 +335,38 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
               </ul>
             ) : <p className="empty">No recent events</p>}
           </section>
-
-          <section className="panel read-only">
-            <header><h2>Capabilities</h2></header>
-            <p>Runtime settings API: {snapshot.capabilities.runtime_settings ? "available" : "unavailable"}</p>
-            <p>Settings revision: {snapshot.settings_revision}</p>
+          </> :
+          <section className="panel history-panel">
+            <header><h2>History</h2></header>
+            <div className="history-controls">
+              <label>Date <input type="date" aria-label="UTC date" value={historyDate}
+                onChange={(event) => setHistoryDate(event.target.value)} /></label>
+              <label>Callsign <input type="search" aria-label="Callsign filter"
+                placeholder="Callsign" value={historyCallsign}
+                onChange={(event) => setHistoryCallsign(event.target.value)} /></label>
+              <label>Body <select aria-label="Celestial body" value={historyBody}
+                onChange={(event) => setHistoryBody(event.target.value as "ALL" | "SUN" | "MOON")}>
+                <option value="ALL">ALL</option><option value="SUN">SUN</option>
+                <option value="MOON">MOON</option>
+              </select></label>
+              <label>SEP ≤ <span className="sep-input"><input type="text" pattern="[0-9]+([.,][0-9]+)?"
+                inputMode="decimal" aria-label="Maximum final separation" value={historyMaxSep}
+                onChange={(event) => setHistoryMaxSep(event.target.value)} /><span>°</span></span></label>
+            </div>
+            {historyLoading ? <p className="empty" role="status">Loading history…</p> :
+              historyError ? <p className="history-error" role="alert">History request failed.</p> :
+              historyRecords.length ? (
+              <ul className="event-list">
+                {historyRecords.map((event, index) => (
+                  <EventCard key={event.event_id || index} event={event} />
+                ))}
+              </ul>
+            ) : <p className="empty">No matching events</p>}
+            {!historyLoading && !historyError && historyNextOffset !== null &&
+              <button type="button" className="load-more"
+                onClick={() => void loadHistory(true)}>Load more</button>}
           </section>
+          }
         </>
       )}
     </main>

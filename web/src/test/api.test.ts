@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BOOTSTRAP_ENDPOINT, fetchBootstrap, patchSettings, SettingsConflictError } from "../api";
+import { BOOTSTRAP_ENDPOINT, fetchBootstrap, fetchHistory, normalizeHistoryMaxSep, patchSettings, SettingsConflictError } from "../api";
 import { activeFixture } from "./fixture";
 
 describe("bootstrap client", () => {
@@ -39,5 +39,29 @@ describe("bootstrap client", () => {
     await expect(patchSettings({ expected_revision: 3, command_id: "stale",
       changes: { telegram: { moon_enabled: false } } }))
       .rejects.toBeInstanceOf(SettingsConflictError);
+  });
+
+  it("queries the existing legacy history endpoint with public filters", async () => {
+    const result = { records: [], offset: 0, limit: 25, next_offset: null, has_more: false };
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => result });
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(fetchHistory({ date: "2026-09-03", callsign: " ABC ", body: "MOON",
+      maxSepDeg: "3.0", offset: 25,
+      limit: 25 })).resolves.toEqual(result);
+    const url = fetchMock.mock.calls[0][0] as string;
+    expect(url).toContain("/api/history?");
+    expect(url).toContain("date=2026-09-03");
+    expect(url).toContain("callsign=ABC");
+    expect(url).toContain("offset=25");
+    expect(url).toContain("limit=25");
+    expect(url).toContain("body=MOON");
+    expect(url).toContain("max_sep_deg=3.0");
+  });
+
+  it("normalizes localized history separation decimals", () => {
+    expect(normalizeHistoryMaxSep("0.8")).toBe("0.8");
+    expect(normalizeHistoryMaxSep("0,8")).toBe("0.8");
+    expect(normalizeHistoryMaxSep("")).toBeUndefined();
+    expect(() => normalizeHistoryMaxSep("-0.8")).toThrow("Invalid maximum separation");
   });
 });

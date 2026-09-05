@@ -93,6 +93,39 @@ class DashboardHistoryStoreTests(unittest.TestCase):
         self.assertFalse(final["has_more"])
         self.assertIsNone(final["next_offset"])
 
+    def test_max_sep_filter_is_inclusive_and_absent_is_unchanged(self):
+        boundary = record(1)
+        boundary["final_separation_deg"] = 3.0
+        above = record(2)
+        above["final_separation_deg"] = 3.000001
+        missing = record(3)
+        missing.pop("final_separation_deg")
+        invalid = record(4)
+        invalid["final_separation_deg"] = "invalid"
+        for value in (boundary, above, missing, invalid):
+            self.store.append(value)
+        self.assertEqual(4, len(self.store.query(limit=10)["records"]))
+        self.assertEqual(["ID0001"], [item["event_id"] for item in
+            self.store.query(limit=10, max_sep_deg=3.0)["records"]])
+
+    def test_max_sep_combines_with_filters_before_pagination(self):
+        for index in range(6):
+            value = record(index, date="2026-08-31",
+                           body="MOON" if index % 2 else "SUN",
+                           callsign="KEEP" if index >= 2 else "DROP")
+            value["final_separation_deg"] = float(index)
+            self.store.append(value)
+        first = self.store.query(
+            utc_date="2026-08-31", callsign="keep", body="MOON",
+            max_sep_deg=5.0, limit=1)
+        second = self.store.query(
+            utc_date="2026-08-31", callsign="keep", body="MOON",
+            max_sep_deg=5.0, offset=first["next_offset"], limit=1)
+        self.assertEqual(["ID0005"], [x["event_id"] for x in first["records"]])
+        self.assertEqual(["ID0003"], [x["event_id"] for x in second["records"]])
+        self.assertTrue(first["has_more"])
+        self.assertFalse(second["has_more"])
+
     def test_csv_quotes_values_and_empty_export_has_header(self):
         special = record(1, callsign='A,"B"')
         self.store.append(special)

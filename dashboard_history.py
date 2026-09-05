@@ -4,6 +4,7 @@ import csv
 import datetime
 import io
 import json
+import math
 from pathlib import Path
 import re
 import threading
@@ -43,7 +44,8 @@ def _utc_date_from_record(record):
     return parsed.astimezone(UTC).date().isoformat()
 
 
-def _matches(record, utc_date=None, callsign=None, body=None):
+def _matches(record, utc_date=None, callsign=None, body=None,
+             max_sep_deg=None):
     if utc_date is not None:
         timestamp = str(record.get("predicted_event_utc") or "")
         if not timestamp.startswith(utc_date):
@@ -53,6 +55,16 @@ def _matches(record, utc_date=None, callsign=None, body=None):
     if callsign:
         value = str(record.get("callsign") or "")
         if callsign.casefold() not in value.casefold():
+            return False
+    if max_sep_deg is not None:
+        value = record.get("final_separation_deg")
+        if isinstance(value, bool):
+            return False
+        try:
+            separation = float(value)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(separation) or separation > max_sep_deg:
             return False
     return True
 
@@ -144,22 +156,23 @@ class DashboardHistoryStore:
         except OSError:
             return []
 
-    def iter_records(self, utc_date=None, callsign=None, body="ALL"):
+    def iter_records(self, utc_date=None, callsign=None, body="ALL",
+                     max_sep_deg=None):
         body = str(body or "ALL").upper()
         for path in self._paths(utc_date):
             # One UTC partition is bounded; reverse only that day's records.
             records = list(self._read_file(path))
             for record in reversed(records):
-                if _matches(record, utc_date, callsign, body):
+                if _matches(record, utc_date, callsign, body, max_sep_deg):
                     yield record
 
     def query(self, utc_date=None, callsign=None, body="ALL", offset=0,
-              limit=DEFAULT_PAGE_SIZE):
+              limit=DEFAULT_PAGE_SIZE, max_sep_deg=None):
         offset = max(0, int(offset))
         limit = min(MAX_PAGE_SIZE, max(1, int(limit)))
         selected = []
         for index, record in enumerate(
-                self.iter_records(utc_date, callsign, body)):
+                self.iter_records(utc_date, callsign, body, max_sep_deg)):
             if index < offset:
                 continue
             selected.append(record)
@@ -175,8 +188,10 @@ class DashboardHistoryStore:
             "has_more": has_more,
         }
 
-    def export_csv(self, utc_date=None, callsign=None, body="ALL"):
-        return records_to_csv(self.iter_records(utc_date, callsign, body))
+    def export_csv(self, utc_date=None, callsign=None, body="ALL",
+                   max_sep_deg=None):
+        return records_to_csv(self.iter_records(
+            utc_date, callsign, body, max_sep_deg))
 
     def close(self):
         return None

@@ -38,6 +38,37 @@ export interface RecentEventDto extends TransitCandidateDto {
   outcome?: string;
 }
 
+export interface HistoryEventDto {
+  event_id?: string;
+  body?: string;
+  icao?: string;
+  callsign?: string | null;
+  predicted_event_utc?: string;
+  outcome?: string;
+  final_separation_deg?: number;
+  separation_deg?: number;
+  separation_class?: string;
+  state?: string;
+  transit_distance_km?: number | null;
+}
+
+export interface HistoryPageDto {
+  records: HistoryEventDto[];
+  offset: number;
+  limit: number;
+  next_offset: number | null;
+  has_more: boolean;
+}
+
+export interface HistoryQuery {
+  date?: string;
+  callsign?: string;
+  body?: "ALL" | "SUN" | "MOON";
+  maxSepDeg?: string;
+  offset?: number;
+  limit?: number;
+}
+
 export interface BodyStateDto {
   current_position: BodyPositionDto | null;
   candidates: TransitCandidateDto[];

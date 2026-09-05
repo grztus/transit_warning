@@ -361,6 +361,35 @@ class VersionedDashboardApiTests(unittest.TestCase):
                           "session_directory", "manifest_path"):
             self.assertNotIn(forbidden, encoded)
 
+    def test_history_rejects_invalid_max_separation(self):
+        for value in ("-0.1", "not-a-number", "NaN", "Infinity"):
+            with self.subTest(value=value):
+                request = urllib.request.Request(
+                    self.base + "/api/history?max_sep_deg=" + value)
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    urllib.request.urlopen(request, timeout=2)
+                self.assertEqual(400, raised.exception.code)
+
+    def test_history_http_max_separation_filters_the_actual_response(self):
+        for icao, separation, seconds in (("LOW040", 0.4, 1),
+                                           ("HIGH53", 5.3, 2)):
+            self.runtime.publish(dashboard.DashboardCandidate(
+                body="SUN", icao=icao, callsign=icao,
+                predicted_event_utc=NOW + datetime.timedelta(seconds=seconds),
+                separation_deg=separation, body_azimuth_deg=120.0,
+                body_elevation_deg=20.0, aircraft_elevation_deg=20.5,
+                distance_km=100.0, last_prediction_update_utc=NOW,
+                telegram_range=True))
+            self.runtime.tick(NOW + datetime.timedelta(seconds=seconds))
+
+        _, unfiltered = self.get_json("/api/history?body=ALL")
+        _, filtered = self.get_json(
+            "/api/history?offset=0&limit=25&body=ALL&max_sep_deg=0.8")
+        self.assertEqual([5.3, 0.4], [record["final_separation_deg"]
+                                     for record in unfiltered["records"]])
+        self.assertEqual([0.4], [record["final_separation_deg"]
+                                for record in filtered["records"]])
+
     def test_patch_success_conflict_and_idempotent_retry(self):
         payload = {
             "expected_revision": 0, "command_id": "client-a-1",
