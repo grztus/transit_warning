@@ -432,6 +432,19 @@ class VersionedDashboardApiTests(unittest.TestCase):
         self.assertTrue(settings["values"]["observer"]["fallback_enabled"])
         self.assertEqual(2, settings["revision"])
 
+    def test_legacy_telegram_get_reflects_external_sun_and_moon_changes(self):
+        patch_json(self.base + "/api/v1/settings", {
+            "expected_revision": 0, "command_id": "external-sun",
+            "changes": {"telegram": {"sun_enabled": False}},
+        })
+        patch_json(self.base + "/api/v1/settings", {
+            "expected_revision": 1, "command_id": "external-moon",
+            "changes": {"telegram": {"moon_enabled": False}},
+        })
+        _, legacy = self.get_json("/api/telegram")
+        self.assertFalse(legacy["sun_enabled"])
+        self.assertFalse(legacy["moon_enabled"])
+
     def test_v1_observer_update_controls_existing_provider(self):
         _, result = patch_json(self.base + "/api/v1/settings", {
             "expected_revision": 0, "command_id": "observer-1",

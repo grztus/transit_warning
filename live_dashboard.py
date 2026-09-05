@@ -1011,7 +1011,7 @@ async function refresh(){let controller=new AbortController(),timeout=setTimeout
 setInterval(()=>{document.querySelectorAll('[data-utc]').forEach(x=>x.textContent=countdown(x.dataset.utc));renderHealth()},1000);setInterval(refresh,3000);refresh();
 setInterval(refreshGpsStatus,3000);loadGpsAvailability();document.getElementById('gps-start').onclick=startGps;document.getElementById('gps-stop').onclick=stopGps;
 setInterval(()=>observerRequest().catch(()=>{}),3000);observerRequest().catch(()=>{});document.getElementById('observer-static').onclick=()=>observerRequest({mode:'STATIC'});document.getElementById('observer-mobile').onclick=()=>observerRequest({mode:'MOBILE'});document.getElementById('observer-fallback').onchange=e=>observerRequest({fallback_enabled:e.target.checked});
-telegramRequest().catch(()=>{});for(let body of ['sun','moon'])document.getElementById('telegram-'+body).onclick=e=>telegramRequest(body,!e.currentTarget.classList.contains('active'));
+setInterval(()=>telegramRequest().catch(()=>{}),3000);telegramRequest().catch(()=>{});for(let body of ['sun','moon'])document.getElementById('telegram-'+body).onclick=e=>telegramRequest(body,!e.currentTarget.classList.contains('active'));
 document.getElementById('live-tab').onclick=()=>{document.getElementById('live').classList.remove('hidden');document.getElementById('history').classList.add('hidden')};
 document.getElementById('history-tab').onclick=()=>{document.getElementById('history').classList.remove('hidden');document.getElementById('live').classList.add('hidden');loadHistory(true)};
 for(let id of ['history-date','history-search','history-body'])document.getElementById(id).onchange=()=>loadHistory(true);

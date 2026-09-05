@@ -609,6 +609,13 @@ class DashboardRuntimeTests(unittest.TestCase):
         self.assertIn("setInterval(refresh,3000)", html)
         self.assertIn("document.querySelectorAll('[data-utc]')", html)
 
+    def test_legacy_telegram_controls_refresh_external_changes(self):
+        html = dashboard.DASHBOARD_HTML
+        self.assertIn(
+            "setInterval(()=>telegramRequest().catch(()=>{}),3000)", html)
+        self.assertIn(
+            "async function telegramRequest(body=null,enabled=null)", html)
+
     def test_candidate_countdown_and_identity_share_compact_mobile_row(self):
         html = dashboard.DASHBOARD_HTML
         self.assertIn(".candidate-heading{display:flex", html)
