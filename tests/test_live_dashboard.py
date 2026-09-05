@@ -1,4 +1,5 @@
 import datetime
+from dataclasses import replace
 import json
 from pathlib import Path
 import tempfile
@@ -11,6 +12,10 @@ from unittest.mock import Mock, patch
 from config import ConfigurationError, load_installation_config
 import live_dashboard as dashboard
 from dashboard_history import DashboardHistoryStore
+from app_backend.state import ApplicationStateStore
+from app_backend.contracts import serialize_bootstrap
+from app_backend.settings import RuntimeSettingsStore
+from app_backend.sse import live_envelope
 import transit_warning as transit
 
 
@@ -31,6 +36,60 @@ def candidate(icao="A00001", body="SUN", seconds=120,
 
 
 class DashboardStateTests(unittest.TestCase):
+    def test_late_sbs_callsign_updates_open_candidates_before_history(self):
+        for geometry in ("LEGACY", "TRUE_2D"):
+            for message_type in ("1", "5"):
+                for outcome in ("PASSED", "WITHDRAWN"):
+                    with self.subTest(geometry=geometry, message_type=message_type,
+                                      outcome=outcome):
+                        state = dashboard.DashboardState()
+                        app = ApplicationStateStore()
+                        runtime = dashboard.DashboardRuntime(state, application_state_store=app)
+                        original = replace(candidate("ABC123", seconds=2),
+                                           callsign=None, prediction_geometry=geometry)
+                        runtime.publish(original)
+                        runtime.publish(replace(original, body="MOON"))
+                        before = state.snapshot(NOW)["sun"]["candidates"][0]
+                        with patch.multiple(transit, plane_dict={}, dashboard_runtime=runtime,
+                                            last_update_time=None), \
+                                patch.object(transit, "current_observer_context", return_value=SimpleNamespace(
+                                    position=SimpleNamespace(coordinates=(0.0, 0.0, 0.0)))), \
+                                patch.object(transit, "port_timestamp_to_utc", return_value=NOW), \
+                                patch.object(transit, "tabela_for_observer", return_value=(0, 0, 0, 0)), \
+                                patch.object(transit, "clean_dict"), \
+                                patch.object(transit, "clean_transit_dict"):
+                            line = ("MSG," + message_type + ",1,1,ABC123,1,"
+                                    "2026/08/31,12:00:00.000,2026/08/31,12:00:00.000, LATE123 ,")
+                            transit.process_line(line, transit.adsb_port)
+                            self.assertEqual("LATE123", transit.plane_dict["ABC123"][1])
+                        after = state.snapshot(NOW)["sun"]["candidates"][0]
+                        self.assertEqual({**before, "callsign": "LATE123"}, after)
+                        self.assertEqual(None, original.callsign)
+                        revision = app.snapshot()["revision"]
+                        self.assertFalse(runtime.update_callsign("ABC123", "   "))
+                        self.assertFalse(runtime.update_callsign("ABC123", "LATE123"))
+                        self.assertEqual(revision, app.snapshot()["revision"])
+
+                        def check_wire(history):
+                            snapshot = app.snapshot()
+                            bootstrap = serialize_bootstrap(snapshot,
+                                RuntimeSettingsStore().snapshot(), {}, NOW)
+                            for payload in (bootstrap, live_envelope(snapshot)["payload"]):
+                                records = payload["recent_events"] if history else [
+                                    payload["bodies"][body]["candidates"][0]
+                                    for body in ("sun", "moon")]
+                                self.assertEqual(["LATE123", "LATE123"],
+                                                 [row["callsign"] for row in records])
+                        check_wire(False)
+                        if outcome == "PASSED":
+                            runtime.tick(NOW + datetime.timedelta(seconds=2))
+                        else:
+                            runtime.withdraw_aircraft("ABC123", NOW)
+                        check_wire(True)
+                        self.assertFalse(runtime.update_callsign("ABC123", "LATER456"))
+                        self.assertEqual(["LATE123", "LATE123"], [
+                            row["callsign"] for row in state.query_history()["records"]])
+
     def setUp(self):
         self.state = dashboard.DashboardState(history_limit=3)
 

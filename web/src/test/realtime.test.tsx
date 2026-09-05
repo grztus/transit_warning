@@ -46,9 +46,12 @@ describe("SSE realtime transport", () => {
       payload: { generated_at_utc: activeFixture.generated_at_utc,
         bodies: { ...activeFixture.bodies, sun: { ...activeFixture.bodies.sun,
           candidates: [{ ...activeFixture.bodies.sun.candidates[0], callsign: "SSE123" }] } },
-        recent_events: activeFixture.recent_events, presentation: activeFixture.presentation },
+        recent_events: [{ ...activeFixture.recent_events[0], callsign: "SSEHISTORY" }],
+        presentation: activeFixture.presentation },
     }));
     expect(await screen.findByText("SSE123")).toBeInTheDocument();
+    expect(screen.getByText("SSEHISTORY")).toBeInTheDocument();
+    expect(screen.queryByText("RECENT1")).not.toBeInTheDocument();
     expect(client).toHaveBeenCalledTimes(1);
   });
 

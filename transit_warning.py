@@ -4461,6 +4461,12 @@ def process_line(line, port):
             if flight != '':
                 plane_dict[icao][1] = flight
 
+    if mtype in ("1", "5") and flight:
+        try:
+            dashboard_runtime.update_callsign(icao, flight)
+        except Exception:
+            pass
+
     if mtype == "4" or (mtype == "3" and a_m_type == "MLAT"):
         reported_velocity = parts[12].strip()
         track = parts[13].strip() if len(parts) > 13 else ''

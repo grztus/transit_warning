@@ -1,6 +1,7 @@
 import datetime
 import json
 import threading
+import tempfile
 import unittest
 import urllib.error
 import urllib.request
@@ -17,6 +18,8 @@ from app_backend.settings import (
     SettingsValidationError,
 )
 from app_backend.state import ApplicationStateStore
+from app_backend.sse import encode_sse, live_envelope
+from dashboard_history import DashboardHistoryStore
 import live_dashboard as dashboard
 from observer_position import ObserverPosition, RuntimeObserverPositionProvider
 
@@ -34,6 +37,50 @@ def patch_json(url, value):
 
 
 class ApplicationContractTests(unittest.TestCase):
+    def test_runtime_identity_survives_live_history_bootstrap_and_sse(self):
+        for geometry in ("LEGACY", "TRUE_2D"):
+            for callsign in ("TEST123", None, "", "   "):
+                for outcome in ("PASSED", "WITHDRAWN"):
+                    with self.subTest(geometry=geometry, callsign=callsign,
+                                      outcome=outcome), tempfile.TemporaryDirectory() as directory:
+                        history = DashboardHistoryStore(directory)
+                        state = dashboard.DashboardState(history_store=history)
+                        app = ApplicationStateStore()
+                        runtime = dashboard.DashboardRuntime(
+                            state, application_state_store=app)
+                        runtime.publish(dashboard.DashboardCandidate(
+                            body="SUN", icao="ABC123", callsign=callsign,
+                            predicted_event_utc=NOW + datetime.timedelta(seconds=2),
+                            separation_deg=0.5, body_azimuth_deg=120.0,
+                            body_elevation_deg=20.0, aircraft_elevation_deg=20.5,
+                            distance_km=100.0, last_prediction_update_utc=NOW,
+                            telegram_range=True, prediction_geometry=geometry))
+
+                        def check_identity(is_history):
+                            snapshot = app.snapshot()
+                            bootstrap = serialize_bootstrap(
+                                snapshot, RuntimeSettingsStore().snapshot(), {}, NOW)
+                            wire = encode_sse(live_envelope(snapshot))
+                            sse = json.loads(wire.split("data: ", 1)[1])["payload"]
+                            for payload in (bootstrap, sse):
+                                records = (payload["recent_events"] if is_history else
+                                           payload["bodies"]["sun"]["candidates"])
+                                self.assertEqual(1, len(records))
+                                self.assertEqual(callsign, records[0]["callsign"])
+                                self.assertEqual("ABC123", records[0]["icao"])
+                            self.assertEqual(bootstrap["bodies"], sse["bodies"])
+                            self.assertEqual(bootstrap["recent_events"], sse["recent_events"])
+
+                        check_identity(False)
+                        if outcome == "PASSED":
+                            runtime.tick(NOW + datetime.timedelta(seconds=2))
+                        else:
+                            runtime.withdraw("ABC123", "SUN", NOW)
+                        check_identity(True)
+                        record = history.query()["records"][0]
+                        self.assertEqual(callsign, record["callsign"])
+                        self.assertEqual(outcome, record["outcome"])
+
     def test_live_contract_is_explicit_detached_and_privacy_safe(self):
         source = {
             "generated_at_utc": "2026-09-04T12:00:00Z",
@@ -278,6 +325,28 @@ class VersionedDashboardApiTests(unittest.TestCase):
     def get_json(self, path):
         with urllib.request.urlopen(self.base + path, timeout=2) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
+
+    def test_late_callsign_matches_legacy_state_history_and_bootstrap_http(self):
+        self.runtime.publish(dashboard.DashboardCandidate(
+            body="SUN", icao="ABC123", callsign=None,
+            predicted_event_utc=NOW + datetime.timedelta(seconds=2),
+            separation_deg=0.5, body_azimuth_deg=120.0,
+            body_elevation_deg=20.0, aircraft_elevation_deg=20.5,
+            distance_km=100.0, last_prediction_update_utc=NOW,
+            telegram_range=True))
+        self.runtime.update_callsign("ABC123", "LATE123")
+        _, legacy = self.get_json("/api/state")
+        _, bootstrap = self.get_json("/api/v1/bootstrap")
+        row = legacy["sun"]["candidates"][0]
+        self.assertEqual("LATE123", row["callsign"])
+        self.assertEqual(row, bootstrap["bodies"]["sun"]["candidates"][0])
+        self.runtime.tick(NOW + datetime.timedelta(seconds=2))
+        _, legacy = self.get_json("/api/state")
+        _, history = self.get_json("/api/history")
+        _, bootstrap = self.get_json("/api/v1/bootstrap")
+        self.assertEqual("LATE123", history["records"][0]["callsign"])
+        self.assertEqual(history["records"], legacy["recent_events"])
+        self.assertEqual(history["records"], bootstrap["recent_events"])
 
     def test_bootstrap_and_settings_contracts(self):
         _, settings = self.get_json("/api/v1/settings")

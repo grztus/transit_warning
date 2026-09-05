@@ -1,7 +1,7 @@
 """Fail-open local web dashboard for already-computed transit predictions."""
 
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -266,6 +266,20 @@ class DashboardState:
                 self._live[body][key]["ever_visible"] = True
         return True
 
+    def update_callsign(self, icao, callsign):
+        """Refresh known identity on open rows without a new prediction."""
+        callsign = str(callsign or "").strip()
+        if not callsign:
+            return False
+        changed = False
+        with self._lock:
+            for items in self._live.values():
+                item = items.get(icao.upper())
+                if item is not None and item["candidate"].callsign != callsign:
+                    item["candidate"] = replace(item["candidate"], callsign=callsign)
+                    changed = True
+        return changed
+
     def mark_history_worthy(self, icao, body):
         with self._lock:
             item = self._live.get(body.upper(), {}).get(icao.upper())
@@ -444,6 +458,9 @@ class DisabledDashboard:
     def publish(self, candidate):
         return False
 
+    def update_callsign(self, icao, callsign):
+        return False
+
     def withdraw(self, icao, body, now_utc):
         return False
 
@@ -504,6 +521,12 @@ class DashboardRuntime:
         result = self.state.publish(candidate)
         self._publish_application_state()
         return result
+
+    def update_callsign(self, icao, callsign):
+        changed = self.state.update_callsign(icao, callsign)
+        if changed:
+            self._publish_application_state()
+        return changed
 
     def withdraw(self, icao, body, now_utc):
         result = self.state.withdraw(icao, body, now_utc)

@@ -4,6 +4,25 @@ import App, { formatCountdown } from "../App";
 import { activeFixture } from "./fixture";
 
 describe("LIVE screen", () => {
+  it.each([undefined, null, "", "TEST123"])(
+    "uses callsign or ICAO consistently in LIVE and HISTORY: %j", async (callsign) => {
+      const fixture = {
+        ...activeFixture,
+        bodies: {
+          sun: { current_position: null, candidates: [{ icao: "ABC123", callsign }] },
+          moon: { current_position: null, candidates: [] },
+        },
+        recent_events: [{ icao: "ABC123", callsign }],
+      };
+      const { container } = render(<App client={async () => fixture} pollIntervalMs={60_000} />);
+      await screen.findByRole("status");
+      await waitFor(() => expect(container.querySelector(".callsign")).toHaveTextContent(
+        callsign?.trim() || "ABC123"));
+      expect(container.querySelector(".event-row strong")).toHaveTextContent(
+        callsign?.trim() || "ABC123");
+      if (callsign?.trim()) expect(screen.queryByText("ABC123")).not.toBeInTheDocument();
+    });
+
   it("renders ACTIVE live state, bodies, candidates, history and observer diagnostics", async () => {
     render(<App client={async () => activeFixture} pollIntervalMs={60_000} />);
     expect(await screen.findByRole("status")).toHaveTextContent("ACTIVE");
