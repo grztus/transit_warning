@@ -69,6 +69,31 @@ describe("persistent HISTORY", () => {
       body: "MOON", maxSepDeg: undefined, offset: 0 })));
   });
 
+  it("builds CSV export from all active filters independently of pagination", async () => {
+    const historyClient = vi.fn().mockResolvedValue(page([]));
+    render(<App client={async () => activeFixture} historyClient={historyClient}
+      eventSourceFactory={quietStream} />);
+    fireEvent.click(await screen.findByRole("button", { name: "HISTORY" }));
+    fireEvent.change(screen.getByLabelText("UTC date"), {
+      target: { value: "2026-09-03" },
+    });
+    fireEvent.change(screen.getByLabelText("Callsign filter"), {
+      target: { value: "  FIN99  " },
+    });
+    fireEvent.change(screen.getByLabelText("Celestial body"), {
+      target: { value: "MOON" },
+    });
+    fireEvent.change(screen.getByLabelText("Maximum final separation"), {
+      target: { value: "0,8" },
+    });
+    const button = screen.getByRole("button", { name: "Export CSV" });
+    const form = button.closest("form") as HTMLFormElement;
+    expect(new URL(form.action).pathname).toBe("/api/history/export.csv");
+    expect(Object.fromEntries(new FormData(form).entries())).toEqual({
+      date: "2026-09-03", callsign: "FIN99", body: "MOON", max_sep_deg: "0.8",
+    });
+  });
+
   it("builds the exact filtered URL, replaces results, and normalizes comma decimals", async () => {
     const fetchMock = vi.fn(async (request: string) => ({ ok: true,
       json: async () => page(request.includes("max_sep_deg=") ? [] : [record]) }));
@@ -110,7 +135,10 @@ describe("persistent HISTORY", () => {
     const requestedUrls: string[] = [];
     const responseRecords: number[][] = [];
     const fetchMock = vi.fn(async (request: string) => {
-      requestedUrls.push(String(request));
+      if (String(request) === "/api/mobile-gps") {
+        return { ok: true, json: async () => ({ available: true, status: "OFF" }) };
+      }
+      if (String(request).startsWith("/api/history?")) requestedUrls.push(String(request));
       const filtered = String(request).includes("max_sep_deg=0.8");
       const response = filtered
         ? { ok: true, json: async () => {
@@ -193,7 +221,7 @@ describe("persistent HISTORY", () => {
       event: "settings", settings_revision: 4, payload: { schema_version: 1, revision: 4,
         values: activeFixture.settings, capabilities: activeFixture.capabilities,
         persistence: "RUNTIME_ONLY_RESET_TO_CONFIG_ON_RESTART" } }) } as MessageEvent<string>));
-    expect(screen.getByDisplayValue("HISTORY")).toBeInTheDocument();
+    expect(screen.getByLabelText("Callsign filter")).toHaveValue("HISTORY");
     expect(screen.getByText("HISTORY1")).toBeInTheDocument();
   });
 });

@@ -1,4 +1,4 @@
-import type { BootstrapDto, HistoryPageDto, HistoryQuery, SettingsMutation, SettingsSnapshotDto } from "./types";
+import type { BootstrapDto, HistoryPageDto, HistoryQuery, MobileGpsDiagnosticsDto, MobileGpsPositionDto, SettingsMutation, SettingsSnapshotDto } from "./types";
 
 export const BOOTSTRAP_ENDPOINT = "/api/v1/bootstrap";
 export const STREAM_ENDPOINT = "/api/v1/stream";
@@ -8,6 +8,11 @@ export const MAX_RETRY_INTERVAL_MS = 30_000;
 export type BootstrapFetcher = () => Promise<BootstrapDto>;
 export type SettingsMutator = (mutation: SettingsMutation) => Promise<SettingsSnapshotDto>;
 export type HistoryFetcher = (query: HistoryQuery) => Promise<HistoryPageDto>;
+export interface MobileGpsClient {
+  status: () => Promise<MobileGpsDiagnosticsDto>;
+  update: (position: MobileGpsPositionDto) => Promise<MobileGpsDiagnosticsDto>;
+  clear: () => Promise<MobileGpsDiagnosticsDto>;
+}
 
 export class SettingsConflictError extends Error {
   constructor() { super("Settings revision conflict"); }
@@ -65,6 +70,29 @@ export async function patchSettings(mutation: SettingsMutation): Promise<Setting
   }
   return await response.json() as SettingsSnapshotDto;
 }
+
+async function mobileGpsRequest(method: "GET" | "POST" | "DELETE",
+  position?: MobileGpsPositionDto): Promise<MobileGpsDiagnosticsDto> {
+  const response = await fetch("/api/mobile-gps", {
+    method,
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    ...(position ? { body: JSON.stringify(position) } : {}),
+    cache: "no-store",
+  });
+  let payload: { error?: unknown } & Partial<MobileGpsDiagnosticsDto> = {};
+  try { payload = await response.json(); } catch { /* Use status fallback below. */ }
+  if (!response.ok) {
+    throw new Error(typeof payload.error === "string" && payload.error.trim()
+      ? payload.error : `Mobile GPS request failed (${response.status})`);
+  }
+  return payload as MobileGpsDiagnosticsDto;
+}
+
+export const mobileGpsClient: MobileGpsClient = {
+  status: () => mobileGpsRequest("GET"),
+  update: (position) => mobileGpsRequest("POST", position),
+  clear: () => mobileGpsRequest("DELETE"),
+};
 
 export async function fetchHistory(query: HistoryQuery): Promise<HistoryPageDto> {
   const parameters = new URLSearchParams({

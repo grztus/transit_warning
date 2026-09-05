@@ -88,6 +88,24 @@ export interface ObserverStatusDto {
   manual_elevation_amsl_m?: number;
 }
 
+export interface MobileGpsDiagnosticsDto {
+  available: boolean;
+  status: string;
+  accuracy_m?: number;
+  altitude_available?: boolean;
+  altitude_accuracy_m?: number | null;
+  age_seconds?: number;
+}
+
+export interface MobileGpsPositionDto {
+  latitude: number;
+  longitude: number;
+  accuracy: number;
+  altitude: number | null;
+  altitudeAccuracy: number | null;
+  timestamp: number;
+}
+
 export interface PresentationDto {
   sep_green_max_deg?: number;
   sep_yellow_max_deg?: number;

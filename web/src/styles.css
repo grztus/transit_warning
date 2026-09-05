@@ -112,6 +112,8 @@ h2 { margin-bottom: 0; font-size: 1.05rem; letter-spacing: .08em; }
   font-size: .68rem; }
 .manual-observer input { width: 8rem; padding: .32rem .42rem; border: 1px solid #405163;
   border-radius: .4rem; background: #0b151e; color: inherit; }
+.gps-control { border-color: #405163; background: #162330; color: #b9cddd; }
+.gps-message { margin: .55rem 0 0 5.6rem; color: #ffd15a; font-size: .76rem; }
 .telegram-control-group { border-top: 1px solid #203344; padding-top: .55rem; }
 .inline-toggle { margin-right: .45rem; }
 .control-group button { padding: .32rem .58rem; min-width: 3.3rem; font-size: .76rem; }
@@ -133,7 +135,10 @@ button:disabled { cursor: wait; opacity: .65; }
   border: 1px solid #405163; border-radius: .4rem; background: #0b151e; color: inherit; }
 .sep-input { display: flex; align-items: center; gap: .3rem; }
 .history-error { color: #ffb2b2; }
-.load-more { margin-top: .65rem; }
+.history-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem;
+  margin-top: .65rem; }
+.load-more { margin: 0; }
+.export-csv { border-color: #405163; background: #162330; color: #b9cddd; }
 
 @media (min-width: 700px) {
   main { padding: 1.5rem; }
@@ -156,6 +161,7 @@ button:disabled { cursor: wait; opacity: .65; }
   .app-header { flex-wrap: wrap; }
   .control-group > strong { width: 100%; }
   .observer-meta { margin-left: 0; }
+  .gps-message { margin-left: 0; }
   .manual-observer { margin-left: 0; }
   .manual-observer label { flex: 1 1 5rem; }
   .manual-observer input { width: 100%; }

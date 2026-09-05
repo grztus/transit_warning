@@ -44,6 +44,18 @@ def _utc_date_from_record(record):
     return parsed.astimezone(UTC).date().isoformat()
 
 
+def _predicted_event_sort_key(record):
+    try:
+        value = record.get("predicted_event_utc")
+        parsed = datetime.datetime.fromisoformat(
+            str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError
+        return (1, parsed.astimezone(UTC))
+    except (AttributeError, TypeError, ValueError):
+        return (0, datetime.datetime.min.replace(tzinfo=UTC))
+
+
 def _matches(record, utc_date=None, callsign=None, body=None,
              max_sep_deg=None):
     if utc_date is not None:
@@ -160,9 +172,12 @@ class DashboardHistoryStore:
                      max_sep_deg=None):
         body = str(body or "ALL").upper()
         for path in self._paths(utc_date):
-            # One UTC partition is bounded; reverse only that day's records.
-            records = list(self._read_file(path))
-            for record in reversed(records):
+            # Partitions are defined by predicted UTC date. Sort each bounded
+            # day by the same event UTC displayed by both dashboards.
+            records = sorted(
+                self._read_file(path), key=_predicted_event_sort_key,
+                reverse=True)
+            for record in records:
                 if _matches(record, utc_date, callsign, body, max_sep_deg):
                     yield record
 

@@ -1,9 +1,17 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import App, { formatCountdown, settingsCommandId } from "../App";
+import App, { formatCountdown, geolocationErrorMessage, settingsCommandId } from "../App";
 import { activeFixture } from "./fixture";
 
 describe("LIVE screen", () => {
+  it.each([
+    [1, "permission was denied"],
+    [2, "position is unavailable"],
+    [3, "request timed out"],
+  ])("maps browser GPS error %i to a useful message", (code, message) => {
+    expect(geolocationErrorMessage({ code })).toContain(message);
+  });
+
   it("creates command ids when randomUUID is unavailable on HTTP origins", () => {
     const originalCrypto = globalThis.crypto;
     Object.defineProperty(globalThis, "crypto", { configurable: true, value: {

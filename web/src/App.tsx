@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { fetchHistory, normalizeHistoryMaxSep, patchSettings, SettingsConflictError } from "./api";
-import type { BootstrapFetcher, HistoryFetcher, SettingsMutator } from "./api";
+import { fetchHistory, mobileGpsClient as defaultMobileGpsClient, normalizeHistoryMaxSep, patchSettings, SettingsConflictError } from "./api";
+import type { BootstrapFetcher, HistoryFetcher, MobileGpsClient, SettingsMutator } from "./api";
 import type {
   BodyName,
   BodyStateDto,
@@ -20,6 +20,7 @@ interface AppProps {
   reconnectDelayMs?: number;
   settingsMutator?: SettingsMutator;
   historyClient?: HistoryFetcher;
+  gpsClient?: MobileGpsClient;
 }
 
 const value = (number: number | undefined, suffix = "") =>
@@ -45,6 +46,13 @@ export function settingsCommandId() {
     return `web-${Array.from(values, (item) => item.toString(16).padStart(8, "0")).join("")}`;
   }
   return `web-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+export function geolocationErrorMessage(error: Pick<GeolocationPositionError, "code">) {
+  if (error.code === 1) return "Browser GPS permission was denied";
+  if (error.code === 2) return "Browser GPS position is unavailable";
+  if (error.code === 3) return "Browser GPS request timed out";
+  return "Browser GPS acquisition failed";
 }
 
 const time = (timestamp: string | undefined) => {
@@ -187,7 +195,8 @@ function EventCard({ event }: { event: RecentEventDto | HistoryEventDto }) {
 }
 
 export default function App({ client, pollIntervalMs, eventSourceFactory, fallbackDelayMs,
-  reconnectDelayMs, settingsMutator = patchSettings, historyClient = fetchHistory }: AppProps) {
+  reconnectDelayMs, settingsMutator = patchSettings, historyClient = fetchHistory,
+  gpsClient = defaultMobileGpsClient }: AppProps) {
   const state = useBootstrap(client, pollIntervalMs, eventSourceFactory, fallbackDelayMs,
     reconnectDelayMs);
   const nowMs = useLiveClock();
@@ -198,6 +207,11 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
   const [manualDraft, setManualDraft] = useState({ lat: "", lon: "", elevation: "" });
   const [manualError, setManualError] = useState<string | null>(null);
   const [manualEditorOpen, setManualEditorOpen] = useState(false);
+  const [gpsAvailable, setGpsAvailable] = useState<boolean | null>(null);
+  const [gpsRunning, setGpsRunning] = useState(false);
+  const [gpsMessage, setGpsMessage] = useState<string | null>(null);
+  const gpsWatchId = useRef<number | null>(null);
+  const gpsActive = useRef(false);
   const [view, setView] = useState<"LIVE" | "HISTORY">("LIVE");
   const [historyDate, setHistoryDate] = useState("");
   const [historyCallsign, setHistoryCallsign] = useState("");
@@ -208,6 +222,28 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState(false);
   const historyRequest = useRef(0);
+  useEffect(() => {
+    let active = true;
+    void gpsClient.status().then((diagnostics) => {
+      if (active) setGpsAvailable(diagnostics.available);
+    }).catch(() => {
+      if (!active) return;
+      setGpsAvailable(false);
+    });
+    return () => {
+      active = false;
+      gpsActive.current = false;
+      if (gpsWatchId.current !== null && navigator.geolocation) {
+        navigator.geolocation.clearWatch(gpsWatchId.current);
+      }
+      gpsWatchId.current = null;
+    };
+  }, [gpsClient]);
+  useEffect(() => {
+    if (!gpsRunning) return;
+    const timer = window.setInterval(() => void state.resync(), 3_000);
+    return () => window.clearInterval(timer);
+  }, [gpsRunning, state.resync]);
   const loadHistory = async (append = false) => {
     const request = ++historyRequest.current;
     setHistoryLoading(true);
@@ -293,6 +329,64 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
     void changeSetting("observer-mode", { observer: { requested_mode: mode } });
   };
 
+  const startGps = () => {
+    if (gpsRunning || gpsAvailable !== true) return;
+    if (!navigator.geolocation) {
+      setGpsMessage("Browser GPS is unavailable; use HTTPS or a supported browser");
+      return;
+    }
+    gpsActive.current = true;
+    setGpsRunning(true);
+    setGpsMessage("Waiting for browser GPS position");
+    try {
+      gpsWatchId.current = navigator.geolocation.watchPosition(
+        (position) => {
+          if (!gpsActive.current) return;
+          const coordinates = position.coords;
+          void gpsClient.update({
+            latitude: coordinates.latitude,
+            longitude: coordinates.longitude,
+            accuracy: coordinates.accuracy,
+            altitude: coordinates.altitude,
+            altitudeAccuracy: coordinates.altitudeAccuracy,
+            timestamp: position.timestamp,
+          }).then(() => {
+            if (!gpsActive.current) return;
+            setGpsMessage(null);
+            void state.resync();
+          }).catch((error) => {
+            if (gpsActive.current) setGpsMessage(
+              error instanceof Error ? error.message : "Mobile GPS update failed");
+          });
+        },
+        (error) => {
+          if (gpsActive.current) setGpsMessage(geolocationErrorMessage(error));
+        },
+        { enableHighAccuracy: true, timeout: 10_000, maximumAge: 0 },
+      );
+    } catch {
+      gpsActive.current = false;
+      setGpsRunning(false);
+      setGpsMessage("Browser GPS is unavailable; use HTTPS or a supported browser");
+    }
+  };
+
+  const stopGps = async () => {
+    gpsActive.current = false;
+    if (gpsWatchId.current !== null && navigator.geolocation) {
+      navigator.geolocation.clearWatch(gpsWatchId.current);
+    }
+    gpsWatchId.current = null;
+    setGpsRunning(false);
+    setGpsMessage(null);
+    try {
+      await gpsClient.clear();
+      await state.resync();
+    } catch (error) {
+      setGpsMessage(error instanceof Error ? error.message : "Could not stop Mobile GPS");
+    }
+  };
+
   return (
     <main>
       <header className="app-header">
@@ -364,6 +458,11 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
                   fallback_enabled: !snapshot.settings.observer.fallback_enabled } })}>
                 {pending === "fallback" ? "CHANGING…" : snapshot.settings.observer.fallback_enabled ? "ON" : "OFF"}
               </button>
+              {snapshot.settings.observer.requested_mode === "MOBILE" && !gpsRunning &&
+                <button type="button" className="gps-control" disabled={gpsAvailable !== true}
+                  onClick={startGps}>Start GPS</button>}
+              {gpsRunning && <button type="button" className="gps-control"
+                onClick={() => void stopGps()}>Stop GPS</button>}
             </div>
             {(snapshot.settings.observer.requested_mode === "MANUAL" || manualEditorOpen) &&
               <div className="manual-observer" aria-label="Manual observer position">
@@ -380,6 +479,7 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
                   onClick={saveManualPosition}>SAVE</button>
               </div>}
             {manualError && <p className="settings-message" role="alert">{manualError}</p>}
+            {gpsMessage && <p className="gps-message" role="alert">{gpsMessage}</p>}
             <p className="observer-meta">
               Requested {snapshot.observer.requested_mode || "—"} · Effective {snapshot.observer.effective_source || "—"}
               {snapshot.settings.observer.requested_mode === "MOBILE" && <>
@@ -450,9 +550,19 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
                 ))}
               </ul>
             ) : <p className="empty">No matching events</p>}
-            {!historyLoading && !historyError && historyNextOffset !== null &&
-              <button type="button" className="load-more"
-                onClick={() => void loadHistory(true)}>Load more</button>}
+            <div className="history-actions">
+              {!historyLoading && !historyError && historyNextOffset !== null &&
+                <button type="button" className="load-more"
+                  onClick={() => void loadHistory(true)}>Load more</button>}
+              <form method="get" action="/api/history/export.csv">
+                <input type="hidden" name="date" value={historyDate} />
+                <input type="hidden" name="callsign" value={historyCallsign.trim()} />
+                <input type="hidden" name="body" value={historyBody} />
+                <input type="hidden" name="max_sep_deg"
+                  value={historyMaxSep.trim().replace(",", ".")} />
+                <button type="submit" className="export-csv">Export CSV</button>
+              </form>
+            </div>
           </section>
           }
         </>

@@ -380,6 +380,9 @@ class DashboardState:
                    and (body == "ALL" or str(
                        record.get("body") or "").upper() == body)
                    and self._history_sep_matches(record, max_sep_deg)]
+        records.sort(
+            key=lambda record: str(record.get("predicted_event_utc") or ""),
+            reverse=True)
         offset = max(0, int(offset))
         limit = max(1, min(100, int(limit)))
         page = records[offset:offset + limit]

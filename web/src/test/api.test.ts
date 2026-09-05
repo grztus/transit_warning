@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BOOTSTRAP_ENDPOINT, fetchBootstrap, fetchHistory, normalizeHistoryMaxSep, patchSettings, SettingsConflictError, SettingsRequestError } from "../api";
+import { BOOTSTRAP_ENDPOINT, fetchBootstrap, fetchHistory, mobileGpsClient, normalizeHistoryMaxSep, patchSettings, SettingsConflictError, SettingsRequestError } from "../api";
 import { activeFixture } from "./fixture";
 
 describe("bootstrap client", () => {
@@ -48,6 +48,18 @@ describe("bootstrap client", () => {
       changes: { observer: { requested_mode: "MANUAL" } } }))
       .rejects.toEqual(new SettingsRequestError(
         "Save a complete MANUAL observer position before activation"));
+  });
+
+  it("posts the legacy-compatible browser GPS payload to the existing endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200,
+      json: async () => ({ available: true, status: "ACTIVE" }) });
+    vi.stubGlobal("fetch", fetchMock);
+    const position = { latitude: 51.1, longitude: 21.2, accuracy: 5,
+      altitude: null, altitudeAccuracy: null, timestamp: 1234 };
+    await mobileGpsClient.update(position);
+    expect(fetchMock).toHaveBeenCalledWith("/api/mobile-gps", expect.objectContaining({
+      method: "POST", body: JSON.stringify(position), cache: "no-store",
+    }));
   });
 
   it("queries the existing legacy history endpoint with public filters", async () => {

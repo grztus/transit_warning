@@ -66,6 +66,16 @@ class DashboardHistoryStoreTests(unittest.TestCase):
         self.assertEqual("ID0124", combined[0]["event_id"])
         self.assertEqual("ID0000", combined[-1]["event_id"])
 
+    def test_rows_are_sorted_by_displayed_event_utc_not_append_order(self):
+        for index in (30, 50, 10, 40, 20):
+            self.store.append(record(index))
+        rows = self.store.query(limit=10)["records"]
+        displayed = [item["predicted_event_utc"] for item in rows]
+        self.assertEqual(sorted(displayed, reverse=True), displayed)
+        self.assertEqual(
+            ["ID0050", "ID0040", "ID0030", "ID0020", "ID0010"],
+            [item["event_id"] for item in rows])
+
     def test_date_callsign_body_and_combined_filters(self):
         self.store.append(record(1, "2026-08-30", "SUN", "Alpha123"))
         self.store.append(record(2, "2026-08-31", "MOON", "beta456"))

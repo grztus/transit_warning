@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import App from "../App";
 import { SettingsConflictError } from "../api";
-import type { SettingsSnapshotDto } from "../types";
+import type { MobileGpsPositionDto, SettingsSnapshotDto } from "../types";
 import type { EventSourceFactory } from "../useBootstrap";
 import { activeFixture } from "./fixture";
 
@@ -15,6 +15,72 @@ const quietStream: EventSourceFactory = () => ({ close() {}, addEventListener() 
   onopen: null, onerror: null });
 
 describe("synchronized operational controls", () => {
+  it("starts browser GPS, submits the existing payload, and stops cleanly", async () => {
+    let success!: PositionCallback;
+    const watchPosition = vi.fn((next: PositionCallback) => {
+      success = next;
+      return 17;
+    });
+    const clearWatch = vi.fn();
+    const original = navigator.geolocation;
+    Object.defineProperty(navigator, "geolocation", { configurable: true,
+      value: { watchPosition, clearWatch } });
+    const update = vi.fn().mockResolvedValue({ available: true, status: "ACTIVE" });
+    const clear = vi.fn().mockResolvedValue({ available: true, status: "OFF" });
+    const gpsClient = { status: vi.fn().mockResolvedValue({ available: true, status: "OFF" }),
+      update, clear };
+    const rendered = render(<App client={async () => activeFixture} gpsClient={gpsClient}
+      eventSourceFactory={quietStream} />);
+    try {
+      fireEvent.click(await screen.findByRole("button", { name: "Start GPS" }));
+      expect(watchPosition).toHaveBeenCalledWith(expect.any(Function), expect.any(Function),
+        { enableHighAccuracy: true, timeout: 10_000, maximumAge: 0 });
+      const payload: MobileGpsPositionDto = { latitude: 51.123456, longitude: 21.654321,
+        accuracy: 7.5, altitude: 240, altitudeAccuracy: 12, timestamp: 123456789 };
+      success({ coords: { ...payload, speed: null, heading: null } as unknown as GeolocationCoordinates,
+        timestamp: payload.timestamp } as GeolocationPosition);
+      await waitFor(() => expect(update).toHaveBeenCalledWith(payload));
+      expect(document.body).not.toHaveTextContent("51.123456");
+      expect(document.body).not.toHaveTextContent("21.654321");
+      fireEvent.click(screen.getByRole("button", { name: "Stop GPS" }));
+      await waitFor(() => expect(clear).toHaveBeenCalledTimes(1));
+      expect(clearWatch).toHaveBeenCalledWith(17);
+      expect(await screen.findByRole("button", { name: "Start GPS" })).toBeInTheDocument();
+    } finally {
+      rendered.unmount();
+      Object.defineProperty(navigator, "geolocation", {
+        configurable: true, value: original,
+      });
+    }
+  });
+
+  it("surfaces browser GPS permission errors and clears the watch on cleanup", async () => {
+    let failure!: PositionErrorCallback;
+    const watchPosition = vi.fn((_next: PositionCallback, error: PositionErrorCallback) => {
+      failure = error;
+      return 23;
+    });
+    const clearWatch = vi.fn();
+    const original = navigator.geolocation;
+    Object.defineProperty(navigator, "geolocation", { configurable: true,
+      value: { watchPosition, clearWatch } });
+    const gpsClient = { status: vi.fn().mockResolvedValue({ available: true, status: "OFF" }),
+      update: vi.fn(), clear: vi.fn() };
+    const rendered = render(<App client={async () => activeFixture} gpsClient={gpsClient}
+      eventSourceFactory={quietStream} />);
+    try {
+      fireEvent.click(await screen.findByRole("button", { name: "Start GPS" }));
+      failure({ code: 1 } as GeolocationPositionError);
+      expect(await screen.findByRole("alert")).toHaveTextContent("permission was denied");
+      rendered.unmount();
+      expect(clearWatch).toHaveBeenCalledWith(23);
+    } finally {
+      Object.defineProperty(navigator, "geolocation", {
+        configurable: true, value: original,
+      });
+    }
+  });
+
   it("sends STATIC to MOBILE and MOBILE to STATIC mode requests", async () => {
     const staticFixture = { ...activeFixture, settings: { ...activeFixture.settings,
       observer: { ...activeFixture.settings.observer, requested_mode: "STATIC" as const } } };
