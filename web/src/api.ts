@@ -13,6 +13,8 @@ export class SettingsConflictError extends Error {
   constructor() { super("Settings revision conflict"); }
 }
 
+export class SettingsRequestError extends Error {}
+
 export function normalizeHistoryMaxSep(value: string | undefined): string | undefined {
   const text = value?.trim();
   if (!text) return undefined;
@@ -51,7 +53,16 @@ export async function patchSettings(mutation: SettingsMutation): Promise<Setting
     body: JSON.stringify(mutation),
   });
   if (response.status === 409) throw new SettingsConflictError();
-  if (!response.ok) throw new Error(`Settings request failed (${response.status})`);
+  if (!response.ok) {
+    let message = `Settings request failed (${response.status})`;
+    try {
+      const payload = await response.json() as { error?: unknown };
+      if (typeof payload.error === "string" && payload.error.trim()) {
+        message = payload.error;
+      }
+    } catch { /* Retain the status fallback for non-JSON responses. */ }
+    throw new SettingsRequestError(message);
+  }
   return await response.json() as SettingsSnapshotDto;
 }
 

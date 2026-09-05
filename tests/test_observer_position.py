@@ -119,6 +119,21 @@ class ObserverPositionTests(unittest.TestCase):
         self.assertEqual("STATIC_FALLBACK", provider.resolve(
             NOW + datetime.timedelta(seconds=16)).effective_source)
 
+    def test_manual_mode_is_effective_and_survives_other_modes(self):
+        static = ObserverPosition(50.0, 20.0, 200.0)
+        manual = ObserverPosition(51.25, 21.5, 315.0)
+        provider = RuntimeObserverPositionProvider(static, manual_position=manual)
+        self.assertEqual("STATIC", provider.resolve(NOW).effective_source)
+        provider.set_mode("MANUAL", NOW)
+        context = provider.resolve(NOW)
+        self.assertEqual("MANUAL", context.requested_mode)
+        self.assertEqual("MANUAL", context.effective_source)
+        self.assertEqual(manual, context.position)
+        provider.set_mode("STATIC", NOW)
+        self.assertEqual(static, provider.resolve(NOW).position)
+        provider.set_mode("MANUAL", NOW)
+        self.assertEqual(manual, provider.resolve(NOW).position)
+
     def test_snapshot_uses_explicit_prediction_observer(self):
         manager = Mock()
         old_manager = transit.transit_snapshot_manager

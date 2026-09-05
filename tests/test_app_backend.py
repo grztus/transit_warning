@@ -1,5 +1,6 @@
 import datetime
 import json
+from pathlib import Path
 import threading
 import tempfile
 import unittest
@@ -120,6 +121,17 @@ class ApplicationContractTests(unittest.TestCase):
         self.assertEqual("MOBILE", result["requested_mode"])
         self.assertNotIn("latitude", result)
         self.assertNotIn("longitude", result)
+
+    def test_observer_contract_exposes_manual_values_only_in_manual_mode(self):
+        fields = {"manual_lat_deg": 51.25, "manual_lon_deg": 21.5,
+                  "manual_elevation_amsl_m": 315.0}
+        mobile = serialize_observer_status({
+            "requested_mode": "MOBILE", **fields})
+        manual = serialize_observer_status({
+            "requested_mode": "MANUAL", "effective_source": "MANUAL",
+            **fields})
+        self.assertNotIn("manual_lat_deg", mobile)
+        self.assertEqual(fields["manual_lat_deg"], manual["manual_lat_deg"])
 
     def test_bootstrap_contract_has_versions_and_no_private_state(self):
         app = ApplicationStateStore()
@@ -243,6 +255,42 @@ class RuntimeSettingsStoreTests(unittest.TestCase):
         self.assertTrue(result["values"]["observer"]["fallback_enabled"])
         self.assertEqual(1, len(self.applied))
 
+    def test_manual_observer_values_are_validated_and_persisted(self):
+        result = self.store.update(0, "manual", {"observer": {
+            "requested_mode": "MANUAL", "manual_lat_deg": 51.25,
+            "manual_lon_deg": 21.5, "manual_elevation_amsl_m": 315.0,
+        }})
+        self.assertEqual("MANUAL", result["values"]["observer"]["requested_mode"])
+        self.assertEqual(51.25, result["values"]["observer"]["manual_lat_deg"])
+        self.assertTrue(result["values"]["observer"]["manual_position_saved"])
+        switched = self.store.update(1, "static", {
+            "observer": {"requested_mode": "STATIC"}})
+        self.assertEqual(51.25, switched["values"]["observer"]["manual_lat_deg"])
+
+    def test_manual_mode_requires_an_explicit_complete_saved_position(self):
+        before = self.store.snapshot()
+        with self.assertRaisesRegex(
+                SettingsValidationError, "Save a complete MANUAL"):
+            self.store.update(0, "manual-without-position", {
+                "observer": {"requested_mode": "MANUAL"}})
+        self.assertEqual(before, self.store.snapshot())
+
+    def test_invalid_manual_coordinates_are_rejected(self):
+        for key, value in (("manual_lat_deg", 90.1),
+                           ("manual_lon_deg", -180.1),
+                           ("manual_elevation_amsl_m", "high")):
+            with self.subTest(key=key):
+                with self.assertRaises(SettingsValidationError):
+                    self.store.update(0, "invalid-" + key,
+                                      {"observer": {key: value}})
+
+    def test_incomplete_manual_position_is_rejected_atomically(self):
+        before = self.store.snapshot()
+        with self.assertRaises(SettingsValidationError):
+            self.store.update(0, "incomplete-manual", {
+                "observer": {"manual_lat_deg": 51.25}})
+        self.assertEqual(before, self.store.snapshot())
+
     def test_stale_revision_applies_nothing(self):
         self.store.update(0, "first", {"telegram": {"sun_enabled": False}})
         with self.assertRaises(SettingsConflictError) as raised:
@@ -307,20 +355,86 @@ class RuntimeSettingsStoreTests(unittest.TestCase):
         self.assertEqual(result, received[0])
 
 
+class ManualObserverRestartPersistenceTests(unittest.TestCase):
+    def test_valid_position_survives_restart_and_invalid_update_preserves_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings_path = Path(directory) / "dashboard_settings.json"
+            first_provider = RuntimeObserverPositionProvider(
+                ObserverPosition(51.0, 20.0, 200.0), mode="STATIC")
+            first = dashboard.start_dashboard(
+                False, "127.0.0.1", 0, lambda: NOW,
+                observer_position_provider=first_provider,
+                manual_settings_path=settings_path)
+            first.settings_store.update(0, "save-manual", {
+                "observer": {
+                    "manual_lat_deg": 51.25,
+                    "manual_lon_deg": 21.5,
+                    "manual_elevation_amsl_m": 315.0,
+                },
+            })
+            first.close()
+
+            restarted_provider = RuntimeObserverPositionProvider(
+                ObserverPosition(51.0, 20.0, 200.0), mode="STATIC")
+            restarted = dashboard.start_dashboard(
+                False, "127.0.0.1", 0, lambda: NOW,
+                observer_position_provider=restarted_provider,
+                manual_settings_path=settings_path)
+            restored = restarted.settings_store.snapshot()["values"]["observer"]
+            self.assertEqual("STATIC", restored["requested_mode"])
+            self.assertEqual(51.25, restored["manual_lat_deg"])
+            self.assertEqual(21.5, restored["manual_lon_deg"])
+            self.assertEqual(315.0, restored["manual_elevation_amsl_m"])
+            self.assertTrue(restored["manual_position_saved"])
+            restarted.settings_store.update(0, "select-manual", {
+                "observer": {"requested_mode": "MANUAL"},
+            })
+            self.assertEqual(
+                ObserverPosition(51.25, 21.5, 315.0),
+                restarted_provider.resolve(NOW).position)
+            with self.assertRaises(SettingsValidationError):
+                restarted.settings_store.update(1, "invalid-manual", {
+                    "observer": {
+                        "manual_lat_deg": 91.0,
+                        "manual_lon_deg": 22.0,
+                        "manual_elevation_amsl_m": 400.0,
+                    },
+                })
+            restarted.close()
+
+            final_provider = RuntimeObserverPositionProvider(
+                ObserverPosition(51.0, 20.0, 200.0), mode="STATIC")
+            final = dashboard.start_dashboard(
+                False, "127.0.0.1", 0, lambda: NOW,
+                observer_position_provider=final_provider,
+                manual_settings_path=settings_path)
+            final_observer = final.settings_store.snapshot()["values"]["observer"]
+            self.assertEqual(51.25, final_observer["manual_lat_deg"])
+            self.assertEqual(21.5, final_observer["manual_lon_deg"])
+            self.assertEqual(315.0, final_observer[
+                "manual_elevation_amsl_m"])
+            final.close()
+
+
 class VersionedDashboardApiTests(unittest.TestCase):
     def setUp(self):
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.manual_settings_path = (
+            Path(self.temporary_directory.name) / "dashboard_settings.json")
         self.provider = RuntimeObserverPositionProvider(
             ObserverPosition(51.0, 20.0, 200.0), mode="STATIC")
         self.runtime = dashboard.start_dashboard(
             True, "127.0.0.1", 0, lambda: NOW,
             observer_position_provider=self.provider,
             mobile_gps_enabled=True, history_enabled=False,
-            telegram_sun_enabled=True, telegram_moon_enabled=True)
+            telegram_sun_enabled=True, telegram_moon_enabled=True,
+            manual_settings_path=self.manual_settings_path)
         self.base = "http://127.0.0.1:{}".format(
             self.runtime.server.server_address[1])
 
     def tearDown(self):
         self.runtime.close()
+        self.temporary_directory.cleanup()
 
     def get_json(self, path):
         with urllib.request.urlopen(self.base + path, timeout=2) as response:
@@ -424,7 +538,7 @@ class VersionedDashboardApiTests(unittest.TestCase):
                 "expected_revision": 0, "command_id": "invalid",
                 "changes": {
                     "telegram": {"sun_enabled": False},
-                    "observer": {"requested_mode": "MANUAL"},
+                    "observer": {"requested_mode": "INVALID"},
                 },
             }).encode("utf-8"), method="PATCH",
             headers={"Content-Type": "application/json"})
@@ -485,6 +599,64 @@ class VersionedDashboardApiTests(unittest.TestCase):
         context = self.provider.resolve(NOW)
         self.assertEqual("MOBILE", context.requested_mode)
         self.assertTrue(context.fallback_enabled)
+        _, restored = patch_json(self.base + "/api/v1/settings", {
+            "expected_revision": 1, "command_id": "observer-static",
+            "changes": {"observer": {"requested_mode": "STATIC"}},
+        })
+        self.assertEqual("STATIC", restored["values"]["observer"][
+            "requested_mode"])
+        self.assertEqual("STATIC", self.provider.resolve(NOW).effective_source)
+
+    def test_first_manual_activation_returns_useful_validation_error(self):
+        request = urllib.request.Request(
+            self.base + "/api/v1/settings",
+            data=json.dumps({
+                "expected_revision": 0,
+                "command_id": "manual-without-saved-position",
+                "changes": {"observer": {"requested_mode": "MANUAL"}},
+            }).encode("utf-8"), method="PATCH",
+            headers={"Content-Type": "application/json"})
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request, timeout=2)
+        self.assertEqual(400, raised.exception.code)
+        error = json.loads(raised.exception.read().decode("utf-8"))
+        self.assertEqual(
+            "Save a complete MANUAL observer position before activation",
+            error["error"])
+        self.assertEqual("STATIC", self.provider.resolve(NOW).effective_source)
+
+    def test_manual_observer_update_is_effective_and_publicly_configurable(self):
+        payload = {
+            "expected_revision": 0, "command_id": "manual-observer",
+            "changes": {"observer": {
+                "requested_mode": "MANUAL", "manual_lat_deg": 51.25,
+                "manual_lon_deg": 21.5,
+                "manual_elevation_amsl_m": 315.0}},
+        }
+        status, settings = patch_json(self.base + "/api/v1/settings", payload)
+        self.assertEqual(200, status)
+        self.assertEqual("MANUAL", self.provider.resolve(NOW).effective_source)
+        self.assertEqual(ObserverPosition(51.25, 21.5, 315.0),
+                         self.provider.resolve(NOW).position)
+        _, bootstrap = self.get_json("/api/v1/bootstrap")
+        self.assertEqual("MANUAL", bootstrap["observer"]["effective_source"])
+        self.assertEqual(51.25, bootstrap["observer"]["manual_lat_deg"])
+        self.assertEqual(315.0, bootstrap["observer"][
+            "manual_elevation_amsl_m"])
+        self.assertNotIn("latitude", json.dumps(bootstrap).lower())
+        self.assertEqual(51.25, settings["values"]["observer"]["manual_lat_deg"])
+        _, switched = patch_json(self.base + "/api/v1/settings", {
+            "expected_revision": 1, "command_id": "manual-to-static",
+            "changes": {"observer": {"requested_mode": "STATIC"}},
+        })
+        _, restored = patch_json(self.base + "/api/v1/settings", {
+            "expected_revision": 2, "command_id": "manual-restored",
+            "changes": {"observer": {"requested_mode": "MANUAL"}},
+        })
+        self.assertEqual(51.25, switched["values"]["observer"]["manual_lat_deg"])
+        self.assertEqual(ObserverPosition(51.25, 21.5, 315.0),
+                         self.provider.resolve(NOW).position)
+        self.assertEqual(51.25, restored["values"]["observer"]["manual_lat_deg"])
 
     def test_disabled_dashboard_keeps_legacy_controls_and_has_one_store(self):
         runtime = dashboard.start_dashboard(

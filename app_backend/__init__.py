@@ -2,6 +2,7 @@
 
 from .state import ApplicationStateStore
 from .settings import (
+    ManualObserverSettingsFile,
     RuntimeSettingsStore,
     SettingsConflictError,
     SettingsValidationError,
@@ -9,6 +10,7 @@ from .settings import (
 
 __all__ = (
     "ApplicationStateStore",
+    "ManualObserverSettingsFile",
     "RuntimeSettingsStore",
     "SettingsConflictError",
     "SettingsValidationError",

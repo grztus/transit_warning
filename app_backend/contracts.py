@@ -28,7 +28,8 @@ _PRESENTATION_FIELDS = (
 _OBSERVER_FIELDS = (
     "requested_mode", "effective_source", "fallback_enabled",
     "fallback_active", "mobile_age_seconds", "mobile_accuracy_m",
-    "gps_health",
+    "gps_health", "effective_elevation_m", "manual_lat_deg",
+    "manual_lon_deg", "manual_elevation_amsl_m",
 )
 
 
@@ -40,6 +41,10 @@ def _select(source, fields):
 
 def serialize_observer_status(status):
     result = _select(status, _OBSERVER_FIELDS)
+    if result.get("requested_mode") != "MANUAL":
+        for field in ("manual_lat_deg", "manual_lon_deg",
+                      "manual_elevation_amsl_m"):
+            result.pop(field, None)
     assert_public_payload(result)
     return result
 

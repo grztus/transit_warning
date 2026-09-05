@@ -25,6 +25,28 @@ interface AppProps {
 const value = (number: number | undefined, suffix = "") =>
   number === undefined ? "—" : `${number.toFixed(1)}${suffix}`;
 
+const separation = (number: number | undefined) =>
+  number === undefined ? "—" : `${number.toFixed(2)}°`;
+
+const manualNumber = (text: string, minimum: number, maximum: number) => {
+  const canonical = text.trim().replace(",", ".");
+  if (!/^-?(?:\d+(?:\.\d*)?|\.\d+)$/.test(canonical)) return null;
+  const number = Number(canonical);
+  return Number.isFinite(number) && minimum <= number && number <= maximum
+    ? number : null;
+};
+
+export function settingsCommandId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    const values = crypto.getRandomValues(new Uint32Array(4));
+    return `web-${Array.from(values, (item) => item.toString(16).padStart(8, "0")).join("")}`;
+  }
+  return `web-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
 const time = (timestamp: string | undefined) => {
   if (!timestamp) return "—";
   const parsed = new Date(timestamp);
@@ -51,11 +73,8 @@ export function formatCountdown(timestamp: string | undefined, nowMs: number) {
   if (!timestamp) return null;
   const eventMs = Date.parse(timestamp);
   if (!Number.isFinite(eventMs)) return null;
-  const deltaMs = eventMs - nowMs;
-  const seconds = deltaMs >= 0
-    ? Math.ceil(deltaMs / 1000)
-    : Math.floor(Math.abs(deltaMs) / 1000);
-  return `${deltaMs < 0 ? "+" : ""}${duration(seconds)}`;
+  const seconds = Math.max(0, Math.floor((eventMs - nowMs) / 1000));
+  return duration(seconds);
 }
 
 function useLiveClock() {
@@ -100,10 +119,16 @@ function CandidateCard({ candidate, nowMs }: {
           <span className="event-time">{time(candidate.predicted_event_utc)}</span>
         </div>
         <span className={`sep sep-${className(candidate.separation_class)}`}>
-          SEP {value(candidate.separation_deg, "°")}
+          SEP {separation(candidate.separation_deg)}
         </span>
       </div>
-      <span className={`state-badge state-${className(state)}`}>{state}</span>
+      <div className="candidate-summary">
+        <span className={`state-badge state-${className(state)}`}>{state}</span>
+        {candidate.transit_distance_km != null &&
+          <span className="candidate-transit-distance">
+            Transit distance {value(candidate.transit_distance_km, " km")}
+          </span>}
+      </div>
       <dl className="compact-grid">
         <dt>Geometry</dt><dd>{candidate.prediction_geometry || "—"}</dd>
         <dt>Encounter</dt><dd className="encounter-id">{candidate.encounter_id || "—"}</dd>
@@ -148,10 +173,10 @@ function EventCard({ event }: { event: RecentEventDto | HistoryEventDto }) {
   return (
     <li className={`event-row event-${className(outcome)}`}>
       <strong>{event.callsign || event.icao || "NOCALL"}</strong>
-      <span>{event.body || "—"}</span>
+      <span className={`event-body body-${className(event.body)}`}>{event.body || "—"}</span>
       <span className={`state-badge state-${className(outcome)}`}>{outcome}</span>
       <span className={`sep sep-${className(event.separation_class)}`}>
-        SEP {value(event.final_separation_deg ?? event.separation_deg, "°")}
+        SEP {separation(event.final_separation_deg ?? event.separation_deg)}
       </span>
       <span className="event-time">{time(event.predicted_event_utc)}</span>
       {event.transit_distance_km != null && <span className="event-distance">
@@ -170,6 +195,9 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
   const health = state.offline ? "OFFLINE" : snapshot?.health || "STALE";
   const [pending, setPending] = useState<string | null>(null);
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
+  const [manualDraft, setManualDraft] = useState({ lat: "", lon: "", elevation: "" });
+  const [manualError, setManualError] = useState<string | null>(null);
+  const [manualEditorOpen, setManualEditorOpen] = useState(false);
   const [view, setView] = useState<"LIVE" | "HISTORY">("LIVE");
   const [historyDate, setHistoryDate] = useState("");
   const [historyCallsign, setHistoryCallsign] = useState("");
@@ -208,24 +236,61 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
   // Filters intentionally trigger the same immediate refresh as the legacy controls.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, historyDate, historyCallsign, historyBody, historyMaxSep, historyClient]);
+  useEffect(() => {
+    if (!snapshot || pending === "manual-position") return;
+    const manual = snapshot.settings.observer;
+    setManualDraft(manual.manual_position_saved
+      ? { lat: String(manual.manual_lat_deg), lon: String(manual.manual_lon_deg),
+        elevation: String(manual.manual_elevation_amsl_m) }
+      : { lat: "", lon: "", elevation: "" });
+  }, [snapshot?.settings.observer.manual_lat_deg,
+    snapshot?.settings.observer.manual_lon_deg,
+    snapshot?.settings.observer.manual_elevation_amsl_m,
+    snapshot?.settings.observer.manual_position_saved, pending]);
   const changeSetting = async (key: string, changes: Parameters<SettingsMutator>[0]["changes"]) => {
     if (!snapshot || pending) return;
     setPending(key);
     setSettingsMessage(null);
     try {
       await settingsMutator({ expected_revision: snapshot.settings_revision,
-        command_id: crypto.randomUUID(), changes });
+        command_id: settingsCommandId(), changes });
       await state.resync();
+      return true;
     } catch (error) {
       if (error instanceof SettingsConflictError) {
         setSettingsMessage("Setting changed on another client");
         try { await state.resync(); } catch { /* transport status reports failure */ }
       } else {
-        setSettingsMessage("Setting change failed");
+        setSettingsMessage(error instanceof Error ? error.message : "Setting change failed");
       }
     } finally {
       setPending(null);
     }
+    return false;
+  };
+  const saveManualPosition = async () => {
+    const lat = manualNumber(manualDraft.lat, -90, 90);
+    const lon = manualNumber(manualDraft.lon, -180, 180);
+    const elevation = manualNumber(manualDraft.elevation, -500, 10000);
+    if (lat === null || lon === null || elevation === null) {
+      setManualError("Enter valid LAT, LON, and elevation AMSL values");
+      return;
+    }
+    setManualError(null);
+    const saved = await changeSetting("manual-position", { observer: {
+      requested_mode: "MANUAL", manual_lat_deg: lat,
+      manual_lon_deg: lon, manual_elevation_amsl_m: elevation } });
+    if (saved) setManualEditorOpen(false);
+  };
+
+  const selectObserverMode = (mode: "STATIC" | "MOBILE" | "MANUAL") => {
+    if (mode === "MANUAL" && !snapshot?.settings.observer.manual_position_saved) {
+      setManualEditorOpen(true);
+      setManualError(null);
+      setSettingsMessage(null);
+      return;
+    }
+    void changeSetting("observer-mode", { observer: { requested_mode: mode } });
   };
 
   return (
@@ -265,10 +330,15 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
           </section>
 
           {view === "LIVE" ? <>
-            <div className="body-grid">
-            <BodyPanel name="SUN" state={snapshot.bodies.sun} nowMs={nowMs} />
-            <BodyPanel name="MOON" state={snapshot.bodies.moon} nowMs={nowMs} />
-            </div>
+            <section className="predictions-section" aria-labelledby="predictions-title">
+              <header className="predictions-header">
+                <h2 id="predictions-title">TRANSIT PREDICTIONS</h2>
+              </header>
+              <div className="body-grid">
+                <BodyPanel name="SUN" state={snapshot.bodies.sun} nowMs={nowMs} />
+                <BodyPanel name="MOON" state={snapshot.bodies.moon} nowMs={nowMs} />
+              </div>
+            </section>
 
           <section className="panel controls-panel">
             <header><h2>Controls</h2><span className="controls-meta">
@@ -277,11 +347,11 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
             <div className="control-group observer-control-group">
               <strong>Observer</strong>
               <div className="control-row" aria-label="Observer mode">
-              {(["STATIC", "MOBILE"] as const).map((mode) => (
+              {(["STATIC", "MOBILE", "MANUAL"] as const).map((mode) => (
                 <button key={mode} type="button"
                   aria-pressed={snapshot.settings.observer.requested_mode === mode}
                   disabled={pending !== null}
-                  onClick={() => void changeSetting("observer-mode", { observer: { requested_mode: mode } })}>
+                  onClick={() => selectObserverMode(mode)}>
                   {pending === "observer-mode" ? "CHANGING…" : mode}
                 </button>
               ))}
@@ -295,6 +365,21 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
                 {pending === "fallback" ? "CHANGING…" : snapshot.settings.observer.fallback_enabled ? "ON" : "OFF"}
               </button>
             </div>
+            {(snapshot.settings.observer.requested_mode === "MANUAL" || manualEditorOpen) &&
+              <div className="manual-observer" aria-label="Manual observer position">
+                <label>LAT <input aria-label="Manual latitude" inputMode="decimal"
+                  value={manualDraft.lat} onChange={(event) => setManualDraft({
+                    ...manualDraft, lat: event.target.value })} /></label>
+                <label>LON <input aria-label="Manual longitude" inputMode="decimal"
+                  value={manualDraft.lon} onChange={(event) => setManualDraft({
+                    ...manualDraft, lon: event.target.value })} /></label>
+                <label>ELEV AMSL <input aria-label="Manual elevation AMSL" inputMode="decimal"
+                  value={manualDraft.elevation} onChange={(event) => setManualDraft({
+                    ...manualDraft, elevation: event.target.value })} /></label>
+                <button type="button" disabled={pending !== null}
+                  onClick={saveManualPosition}>SAVE</button>
+              </div>}
+            {manualError && <p className="settings-message" role="alert">{manualError}</p>}
             <p className="observer-meta">
               Requested {snapshot.observer.requested_mode || "—"} · Effective {snapshot.observer.effective_source || "—"}
               {snapshot.settings.observer.requested_mode === "MOBILE" && <>
@@ -303,6 +388,8 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
                 {" · "}Accuracy {value(snapshot.observer.mobile_accuracy_m ?? undefined, " m")}
               </>}
               {snapshot.observer.fallback_active && " · Fallback active"}
+              {snapshot.observer.effective_elevation_m != null &&
+                <> · Elevation {value(snapshot.observer.effective_elevation_m, " m AMSL")}</>}
             </p>
             {snapshot.settings.observer.requested_mode === "MOBILE" &&
               snapshot.observer.effective_source !== "MOBILE" && (

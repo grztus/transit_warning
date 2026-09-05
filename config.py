@@ -51,6 +51,7 @@ class InstallationConfig:
     dashboard_port: int = 8765
     dashboard_history_enabled: bool = True
     dashboard_history_dir: str = "recordings/dashboard_history"
+    dashboard_settings_path: str = "recordings/dashboard_settings.json"
     dashboard_mobile_gps_enabled: bool = False
     dashboard_mobile_gps_fresh_seconds: float = 15.0
     observer_mode: str = "STATIC"
@@ -291,14 +292,18 @@ def load_installation_config(
         "DASHBOARD_HISTORY_DIR", "recordings/dashboard_history")).strip()
     if not dashboard_history_dir:
         errors.append("DASHBOARD_HISTORY_DIR must not be empty")
+    dashboard_settings_path = str(values.get(
+        "DASHBOARD_SETTINGS_PATH", "recordings/dashboard_settings.json")).strip()
+    if not dashboard_settings_path:
+        errors.append("DASHBOARD_SETTINGS_PATH must not be empty")
     dashboard_mobile_gps_enabled = _boolean(
         values, "DASHBOARD_MOBILE_GPS_ENABLED", False, errors)
     dashboard_mobile_gps_fresh_seconds = _optional_finite_float(
         values, "DASHBOARD_MOBILE_GPS_FRESH_SECONDS", 15.0, errors,
         minimum=0.0, maximum=3600.0)
     observer_mode = str(values.get("OBSERVER_MODE", "STATIC")).strip().upper()
-    if observer_mode not in ("STATIC", "MOBILE"):
-        errors.append("OBSERVER_MODE must be STATIC or MOBILE")
+    if observer_mode not in ("STATIC", "MOBILE", "MANUAL"):
+        errors.append("OBSERVER_MODE must be STATIC, MOBILE, or MANUAL")
     mobile_gps_stale_warning_seconds = _optional_finite_float(
         values, "MOBILE_GPS_STALE_WARNING_SECONDS", 30.0, errors,
         minimum=0.0, maximum=86400.0)
@@ -406,6 +411,7 @@ def load_installation_config(
         dashboard_port=dashboard_port,
         dashboard_history_enabled=dashboard_history_enabled,
         dashboard_history_dir=dashboard_history_dir,
+        dashboard_settings_path=dashboard_settings_path,
         dashboard_mobile_gps_enabled=dashboard_mobile_gps_enabled,
         dashboard_mobile_gps_fresh_seconds=(
             dashboard_mobile_gps_fresh_seconds),

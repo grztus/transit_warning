@@ -82,6 +82,10 @@ export interface ObserverStatusDto {
   mobile_age_seconds?: number | null;
   mobile_accuracy_m?: number | null;
   gps_health?: string;
+  effective_elevation_m?: number | null;
+  manual_lat_deg?: number;
+  manual_lon_deg?: number;
+  manual_elevation_amsl_m?: number;
 }
 
 export interface PresentationDto {
@@ -109,7 +113,14 @@ export interface BootstrapDto {
 
 export interface RuntimeSettingsValuesDto {
   telegram: { sun_enabled: boolean; moon_enabled: boolean };
-  observer: { requested_mode: "STATIC" | "MOBILE"; fallback_enabled: boolean };
+  observer: {
+    requested_mode: "STATIC" | "MOBILE" | "MANUAL";
+    fallback_enabled: boolean;
+    manual_lat_deg: number;
+    manual_lon_deg: number;
+    manual_elevation_amsl_m: number;
+    manual_position_saved?: boolean;
+  };
 }
 
 export interface LiveStateEvent {

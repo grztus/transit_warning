@@ -1,9 +1,55 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import App, { formatCountdown } from "../App";
+import App, { formatCountdown, settingsCommandId } from "../App";
 import { activeFixture } from "./fixture";
 
 describe("LIVE screen", () => {
+  it("creates command ids when randomUUID is unavailable on HTTP origins", () => {
+    const originalCrypto = globalThis.crypto;
+    Object.defineProperty(globalThis, "crypto", { configurable: true, value: {
+      getRandomValues: (values: Uint32Array) => values.fill(0x12345678),
+    } });
+    try {
+      expect(settingsCommandId()).toBe(
+        "web-12345678123456781234567812345678");
+    } finally {
+      Object.defineProperty(globalThis, "crypto", {
+        configurable: true, value: originalCrypto,
+      });
+    }
+  });
+
+  it("groups the separate SUN and MOON cards under Transit predictions", async () => {
+    const { container } = render(
+      <App client={async () => activeFixture} pollIntervalMs={60_000} />,
+    );
+    const predictions = await screen.findByRole("region", {
+      name: "TRANSIT PREDICTIONS",
+    });
+    expect(predictions.querySelectorAll(".body-panel")).toHaveLength(2);
+    expect(predictions).toContainElement(screen.getByRole("heading", { name: "SUN" }));
+    expect(predictions).toContainElement(screen.getByRole("heading", { name: "MOON" }));
+    expect(container.querySelectorAll(".predictions-section")).toHaveLength(1);
+  });
+
+  it("uses backend severity unchanged and formats identical SEP to two decimals", async () => {
+    const historyRecord = { event_id: "same-sep", body: "SUN", callsign: "SAME",
+      final_separation_deg: 5.03, separation_class: "RED", outcome: "PASSED" };
+    const fixture = { ...activeFixture, bodies: { ...activeFixture.bodies,
+      sun: { ...activeFixture.bodies.sun, candidates: [{
+        ...activeFixture.bodies.sun.candidates[0], callsign: "SAME",
+        separation_deg: 5.03, separation_class: "RED",
+      }] } } };
+    render(<App client={async () => fixture}
+      historyClient={async () => ({ records: [historyRecord], offset: 0, limit: 25,
+        next_offset: null, has_more: false })} />);
+    expect(await screen.findByText("SEP 5.03°")).toHaveClass("sep-red");
+    fireEvent.click(screen.getByRole("button", { name: "HISTORY" }));
+    expect(await screen.findByText("SEP 5.03°")).toHaveClass("sep-red");
+    expect(historyRecord.final_separation_deg).toBe(5.03);
+    expect(historyRecord.separation_class).toBe("RED");
+  });
+
   it("moves the active tab style with the displayed view", async () => {
     render(<App client={async () => activeFixture} pollIntervalMs={60_000}
       historyClient={async () => ({ records: [], offset: 0, limit: 25,
@@ -61,10 +107,11 @@ describe("LIVE screen", () => {
     expect(screen.getByText(/ALT 31.2° · AZ 217.4°/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "MOBILE" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByText(/Requested MOBILE · Effective MOBILE/)).toBeInTheDocument();
-    expect(screen.getByText("SEP 0.4°")).toHaveClass("sep-green");
+    expect(screen.getByText("SEP 0.42°")).toHaveClass("sep-green");
+    expect(screen.getByText("Transit distance 93.2 km")).toBeInTheDocument();
     expect(screen.getByText("CANDIDATE")).toHaveClass("state-candidate");
     expect(screen.getByText("TELEGRAM RANGE")).toHaveClass("state-telegram-range");
-    expect(screen.getByText("SEP 1.2°")).toHaveClass("sep-yellow");
+    expect(screen.getByText("SEP 1.20°")).toHaveClass("sep-yellow");
     expect(screen.getByText("7:ABC123:SUN:2")).toHaveClass("encounter-id");
     fireEvent.click(screen.getByRole("button", { name: "HISTORY" }));
     expect(await screen.findByText("RECENT1")).toBeInTheDocument();
@@ -131,14 +178,15 @@ describe("candidate countdown", () => {
 
   it("formats future events below one hour as MM:SS", () => {
     expect(formatCountdown("2026-09-04T10:00:55Z", now)).toBe("00:55");
+    expect(formatCountdown("2026-09-04T10:00:55.999Z", now)).toBe("00:55");
   });
 
   it("formats future events at least one hour away as H:MM:SS", () => {
     expect(formatCountdown("2026-09-04T11:01:01Z", now)).toBe("1:01:01");
   });
 
-  it("formats elapsed time with an explicit plus prefix", () => {
-    expect(formatCountdown("2026-09-04T09:59:57Z", now)).toBe("+00:03");
+  it("clamps elapsed events to zero", () => {
+    expect(formatCountdown("2026-09-04T09:59:57Z", now)).toBe("00:00");
   });
 
   it("returns no countdown for missing or invalid timestamps", () => {

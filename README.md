@@ -294,8 +294,9 @@ Schema-v1 bootstrap responses use explicit privacy-safe contracts and include
 monotonic live and settings revisions. Runtime mutation uses one authoritative
 settings store with expected-revision conflict handling and idempotent command
 identifiers. The A2 frontend consumes bootstrap only and does not mutate
-settings. Ordinary API/frontend payloads do not expose observer coordinates,
-Telegram credentials, private recorder paths, or private forensic context.
+settings. Ordinary API/frontend payloads expose explicitly configured MANUAL
+observer values only; they do not expose MOBILE coordinates, Telegram
+credentials, private recorder paths, or private forensic context.
 
 ## Observer modes and mobile GPS
 
@@ -342,9 +343,22 @@ Selecting STATIC does not stop a running GPS watch. Browser permission is
 required again after page reload, and mobile OS/browser backgrounding may pause
 updates.
 
-Dashboard mode/fallback controls are runtime-only. After restart, mobile
-coordinates are gone, mode returns to configured `OBSERVER_MODE`, fallback to
-its configured default, and no previous fix is restored.
+### MANUAL
+
+MANUAL uses runtime settings for latitude/longitude in decimal degrees and
+observer elevation AMSL in metres. The saved MANUAL position remains available
+when another mode is selected and becomes effective again when MANUAL is
+restored. The last complete, valid MANUAL position is stored in
+`recordings/dashboard_settings.json` by default and restored after process
+restart. Startup mode still comes from `OBSERVER_MODE`; when no saved MANUAL
+position exists, selecting MANUAL opens an empty editor and leaves the current
+observer effective until a complete valid position is saved and activated.
+Only these explicit MANUAL coordinates are exposed for dashboard editing;
+MOBILE coordinates remain private. Raw GNSS altitude is not used as AMSL.
+
+Other dashboard mode/fallback controls remain runtime-only. After restart,
+mobile coordinates are gone, mode returns to configured `OBSERVER_MODE`,
+fallback to its configured default, and no previous fix is restored.
 
 ### Mobile privacy
 
@@ -506,6 +520,7 @@ Dashboard/observer:
 | `DASHBOARD_HOST`, `DASHBOARD_PORT` | `127.0.0.1`, `8765` | Bind endpoint |
 | `DASHBOARD_HISTORY_ENABLED` | `true` | Persistent history |
 | `DASHBOARD_HISTORY_DIR` | `recordings/dashboard_history` | History path |
+| `DASHBOARD_SETTINGS_PATH` | `recordings/dashboard_settings.json` | Last valid MANUAL observer position |
 | `DASHBOARD_MOBILE_GPS_ENABLED` | `false` | Accept browser fixes |
 | `DASHBOARD_MOBILE_GPS_FRESH_SECONDS` | `15` | Fresh/fallback boundary |
 | `OBSERVER_MODE` | `STATIC` | Startup mode |

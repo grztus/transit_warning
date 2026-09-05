@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from app_backend.contracts import serialize_bootstrap
 from app_backend.settings import (
+    ManualObserverSettingsFile,
     RuntimeSettingsStore,
     SettingsConflictError,
     SettingsValidationError,
@@ -24,10 +25,13 @@ from dashboard_history import (
     DashboardHistoryStore,
     records_to_csv,
 )
+from observer_position import ObserverPosition
 
 
 UTC = datetime.timezone.utc
 DEFAULT_HISTORY_LIMIT = 100
+RECENT_EVENT_LIMIT = 5
+RECENT_EVENT_WINDOW_SECONDS = 60 * 60
 WITHDRAW_HISTORY_GRACE_SECONDS = 3.0
 DEFAULT_SEP_GREEN_MAX_DEG = 3.0
 DEFAULT_SEP_YELLOW_MAX_DEG = 5.0
@@ -184,7 +188,7 @@ class TelegramBodyControls:
 
 
 class DashboardState:
-    """Thread-safe live queues and bounded, non-persistent event history."""
+    """Thread-safe live queues with a bounded persistent-backed recent cache."""
 
     def __init__(self, history_limit=DEFAULT_HISTORY_LIMIT,
                  sep_green_max_deg=DEFAULT_SEP_GREEN_MAX_DEG,
@@ -207,6 +211,12 @@ class DashboardState:
         self._generated_at_utc = None
         self._body_positions = {"SUN": None, "MOON": None}
         self._lock = threading.RLock()
+        if self.history_store is not None:
+            try:
+                self._history = self.history_store.query(
+                    limit=self.history_limit)["records"]
+            except Exception:
+                self._history = []
 
     def update_body_position(self, body, altitude_deg, azimuth_deg,
                              evaluated_at_utc):
@@ -356,8 +366,11 @@ class DashboardState:
     def query_history(self, utc_date=None, callsign=None, body="ALL",
                       offset=0, limit=DEFAULT_PAGE_SIZE, max_sep_deg=None):
         if self.history_store is not None:
-            return self.history_store.query(
+            result = self.history_store.query(
                 utc_date, callsign, body, offset, limit, max_sep_deg)
+            result["records"] = self._history_records_with_classes(
+                result["records"])
+            return result
         body = str(body or "ALL").upper()
         records = [record for record in self._history
                    if (utc_date is None or str(record.get(
@@ -372,7 +385,8 @@ class DashboardState:
         page = records[offset:offset + limit]
         has_more = offset + limit < len(records)
         return {
-            "records": deepcopy(page), "offset": offset, "limit": limit,
+            "records": self._history_records_with_classes(page),
+            "offset": offset, "limit": limit,
             "next_offset": offset + len(page) if has_more else None,
             "has_more": has_more,
         }
@@ -402,6 +416,10 @@ class DashboardState:
         with self._lock:
             generated_at = self._generated_at_utc or now_utc
             snapshot_now = now_utc or generated_at
+            recent_now = generated_at
+            if (recent_now is None or (now_utc is not None
+                    and now_utc > recent_now)):
+                recent_now = now_utc
             result = {
                 "generated_at_utc": (
                     utc_text(generated_at) if generated_at is not None
@@ -414,7 +432,7 @@ class DashboardState:
                     "current_position": deepcopy(self._body_positions["MOON"]),
                     "candidates": self._body_snapshot_locked(
                         "MOON", snapshot_now)},
-                "recent_events": deepcopy(self._history),
+                "recent_events": self._recent_events_locked(recent_now),
                 "presentation": {
                     "sep_green_max_deg": self.sep_green_max_deg,
                     "sep_yellow_max_deg": self.sep_yellow_max_deg,
@@ -422,6 +440,42 @@ class DashboardState:
                 },
             }
         return result
+
+    def _history_records_with_classes(self, records):
+        result = deepcopy(records)
+        for record in result:
+            separation = record.get("final_separation_deg")
+            if separation is not None:
+                try:
+                    record["separation_class"] = self._separation_class(
+                        separation)
+                except (TypeError, ValueError):
+                    pass
+        return result
+
+    def _recent_events_locked(self, now_utc):
+        completed_records = []
+        for record in self._history:
+            if record.get("outcome") not in ("PASSED", "WITHDRAWN"):
+                continue
+            try:
+                completed = datetime.datetime.fromisoformat(str(
+                    record.get("history_recorded_at_utc") or "").replace(
+                        "Z", "+00:00")).astimezone(UTC)
+            except (TypeError, ValueError):
+                continue
+            completed_records.append((completed, record))
+        if not completed_records:
+            return []
+        reference = (now_utc.astimezone(UTC) if now_utc is not None
+                     else max(item[0] for item in completed_records))
+        cutoff = reference - datetime.timedelta(
+            seconds=RECENT_EVENT_WINDOW_SECONDS)
+        recent = [item for item in completed_records
+                  if cutoff <= item[0] <= reference]
+        recent.sort(key=lambda item: item[0], reverse=True)
+        return self._history_records_with_classes(
+            [item[1] for item in recent[:RECENT_EVENT_LIMIT]])
 
     def _body_snapshot_locked(self, body, now_utc):
         items = sorted(
@@ -625,7 +679,16 @@ def _handler_factory(state, now_utc, mobile_gps_state, telegram_controls,
             "fallback_active": context.fallback_active,
             "mobile_age_seconds": context.mobile_age_seconds,
             "mobile_accuracy_m": context.mobile_accuracy_m,
+            "effective_elevation_m": (
+                context.position.elevation_m if context.position else None),
         }
+        if context.requested_mode == "MANUAL":
+            manual = observer_position_provider.manual_position
+            result.update({
+                "manual_lat_deg": manual.coordinates[0],
+                "manual_lon_deg": manual.coordinates[1],
+                "manual_elevation_amsl_m": manual.elevation_m,
+            })
         age = context.mobile_age_seconds
         result["gps_health"] = (
             "NO_FIX" if age is None else
@@ -795,9 +858,10 @@ def _handler_factory(state, now_utc, mobile_gps_state, telegram_controls,
                     "current": error.current,
                 }, status=409)
             except (UnicodeDecodeError, json.JSONDecodeError, TypeError,
-                    SettingsValidationError, ValueError):
+                    SettingsValidationError, ValueError) as error:
                 self._send_json(
-                    {"error": "Invalid settings mutation"}, status=400)
+                    {"error": str(error) or "Invalid settings mutation"},
+                    status=400)
 
         def do_DELETE(self):
             if urlsplit(self.path).path != "/api/mobile-gps":
@@ -925,7 +989,8 @@ def start_dashboard(enabled, host, port, now_utc, error_handler=None,
                     telegram_sun_enabled=True,
                     telegram_moon_enabled=True,
                     telegram_body_change=None,
-                    frontend_dist_dir=None):
+                    frontend_dist_dir=None,
+                    manual_settings_path="recordings/dashboard_settings.json"):
     if frontend_dist_dir is None:
         frontend_dist_dir = Path(__file__).resolve().parent / "web" / "dist"
     telegram_controls = TelegramBodyControls(
@@ -949,6 +1014,16 @@ def start_dashboard(enabled, host, port, now_utc, error_handler=None,
         if observer_position_provider is not None:
             observer = values["observer"]
             old_observer = previous["observer"]
+            manual_keys = (
+                "manual_lat_deg", "manual_lon_deg",
+                "manual_elevation_amsl_m")
+            if any(observer[key] != old_observer[key]
+                   for key in manual_keys):
+                observer_position_provider.set_manual_position(
+                    ObserverPosition(
+                        observer["manual_lat_deg"],
+                        observer["manual_lon_deg"],
+                        observer["manual_elevation_amsl_m"]), now_utc())
             if observer["requested_mode"] != old_observer["requested_mode"]:
                 observer_position_provider.set_mode(
                     observer["requested_mode"], now_utc())
@@ -956,19 +1031,41 @@ def start_dashboard(enabled, host, port, now_utc, error_handler=None,
                 observer_position_provider.set_fallback_enabled(
                     observer["fallback_enabled"], now_utc())
 
+    errors = error_handler or (lambda message: None)
+    manual_persistence = (
+        ManualObserverSettingsFile(manual_settings_path, errors)
+        if manual_settings_path else None)
+    saved_manual = (
+        manual_persistence.load() if manual_persistence is not None else None)
     initial_mode = (
         observer_position_provider.resolve(now_utc()).requested_mode
         if observer_position_provider is not None else "STATIC")
     initial_fallback = (
         observer_position_provider.resolve(now_utc()).fallback_enabled
         if observer_position_provider is not None else False)
+    if saved_manual is not None:
+        initial_manual = ObserverPosition(
+            saved_manual["manual_lat_deg"],
+            saved_manual["manual_lon_deg"],
+            saved_manual["manual_elevation_amsl_m"])
+        if observer_position_provider is not None:
+            observer_position_provider.set_manual_position(
+                initial_manual, now_utc())
+    else:
+        initial_manual = (
+            observer_position_provider.manual_position
+            if observer_position_provider is not None
+            else ObserverPosition(0.0, 0.0, 0.0))
     settings_store = RuntimeSettingsStore(
         telegram_sun_enabled, telegram_moon_enabled,
         initial_mode, initial_fallback,
-        apply_callback=apply_settings, validate_callback=validate_settings)
+        initial_manual.coordinates[0], initial_manual.coordinates[1],
+        initial_manual.elevation_m,
+        apply_callback=apply_settings, validate_callback=validate_settings,
+        manual_persistence=manual_persistence,
+        observer_manual_position_saved=saved_manual is not None)
     if not enabled:
         return DisabledDashboard(telegram_controls, settings_store)
-    errors = error_handler or (lambda message: None)
     history_store = (
         DashboardHistoryStore(history_dir, errors)
         if history_enabled else None)

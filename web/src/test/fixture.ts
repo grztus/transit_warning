@@ -14,6 +14,7 @@ export const activeFixture: BootstrapDto = {
     mobile_age_seconds: 2.4,
     mobile_accuracy_m: 6.2,
     gps_health: "ACTIVE",
+    effective_elevation_m: 200,
   },
   bodies: {
     sun: {
@@ -21,6 +22,7 @@ export const activeFixture: BootstrapDto = {
       candidates: [{
         body: "SUN", icao: "ABC123", callsign: "TEST123",
         predicted_event_utc: "2026-09-04T10:02:30Z", separation_deg: 0.42,
+        transit_distance_km: 93.2,
         encounter_id: "7:ABC123:SUN:2", prediction_geometry: "TRUE_2D",
         state: "CANDIDATE", separation_class: "GREEN",
       }],
@@ -38,11 +40,14 @@ export const activeFixture: BootstrapDto = {
   recent_events: [{
     event_id: "event-public-1", body: "MOON", icao: "DEF456",
     callsign: "RECENT1", final_separation_deg: 0.8, outcome: "PASSED",
+    separation_class: "GREEN",
   }],
   presentation: { sep_green_max_deg: 3, sep_yellow_max_deg: 5, sep_visible_max_deg: 7 },
   settings: {
     telegram: { sun_enabled: true, moon_enabled: true },
-    observer: { requested_mode: "MOBILE", fallback_enabled: true },
+    observer: { requested_mode: "MOBILE", fallback_enabled: true,
+      manual_lat_deg: 50, manual_lon_deg: 20, manual_elevation_amsl_m: 200,
+      manual_position_saved: false },
   },
   capabilities: { runtime_settings: { telegram_sun_enabled: true } },
 };

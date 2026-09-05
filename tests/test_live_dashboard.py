@@ -36,6 +36,39 @@ def candidate(icao="A00001", body="SUN", seconds=120,
 
 
 class DashboardStateTests(unittest.TestCase):
+    def test_recent_events_restore_persisted_sixty_minute_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = DashboardHistoryStore(directory)
+            for event_id, outcome, minutes, separation in (
+                    ("old", "PASSED", 61, 0.5),
+                    ("passed", "PASSED", 10, 0.6),
+                    ("withdrawn", "WITHDRAWN", 2, 5.03),
+                    ("other", "CANDIDATE", 1, 1.0)):
+                timestamp = dashboard.utc_text(
+                    NOW - datetime.timedelta(minutes=minutes))
+                store.append({
+                    "event_id": event_id, "body": "SUN", "icao": event_id,
+                    "callsign": event_id.upper(), "predicted_event_utc": timestamp,
+                    "history_recorded_at_utc": timestamp, "outcome": outcome,
+                    "final_separation_deg": separation,
+                })
+            restarted = dashboard.DashboardState(history_store=store)
+            recent = restarted.snapshot(NOW)["recent_events"]
+        self.assertEqual(["withdrawn", "passed"],
+                         [item["event_id"] for item in recent])
+        self.assertEqual(["RED", "GREEN"],
+                         [item["separation_class"] for item in recent])
+
+    def test_history_severity_uses_configured_dashboard_thresholds(self):
+        state = dashboard.DashboardState(
+            sep_green_max_deg=1.0, sep_yellow_max_deg=2.0,
+            sep_visible_max_deg=3.0)
+        state.publish(candidate(seconds=1, separation=1.5))
+        state.tick(NOW + datetime.timedelta(seconds=1))
+        event = state.snapshot(NOW + datetime.timedelta(seconds=1))[
+            "recent_events"][0]
+        self.assertEqual("YELLOW", event["separation_class"])
+
     def test_late_sbs_callsign_updates_open_candidates_before_history(self):
         for geometry in ("LEGACY", "TRUE_2D"):
             for message_type in ("1", "5"):
@@ -137,7 +170,8 @@ class DashboardStateTests(unittest.TestCase):
                 "A00001", seconds=1, separation=separation))
         self.state.tick(NOW + datetime.timedelta(seconds=2))
         self.state.tick(NOW + datetime.timedelta(seconds=3))
-        self.assertEqual(1, len(self.state.snapshot(NOW)["recent_events"]))
+        self.assertEqual(1, len(self.state.snapshot(
+            NOW + datetime.timedelta(seconds=3))["recent_events"]))
 
     def test_early_withdrawal_is_removed_without_history(self):
         self.state.publish(candidate("A00001", seconds=120))
@@ -173,7 +207,8 @@ class DashboardStateTests(unittest.TestCase):
             update=NOW + datetime.timedelta(seconds=40)))
         self.state.withdraw(
             "A00001", "SUN", NOW + datetime.timedelta(seconds=40))
-        history = self.state.snapshot(NOW)["recent_events"]
+        history = self.state.snapshot(
+            NOW + datetime.timedelta(seconds=40))["recent_events"]
         self.assertEqual(1, len(history))
         event = history[0]
         self.assertEqual("WITHDRAWN", event["outcome"])
@@ -342,7 +377,8 @@ class DashboardStateTests(unittest.TestCase):
         old = candidate(seconds=1)
         self.state.publish(old)
         self.state.tick(NOW + datetime.timedelta(seconds=2))
-        history = self.state.snapshot(NOW)["recent_events"][0]
+        history = self.state.snapshot(
+            NOW + datetime.timedelta(seconds=2))["recent_events"][0]
         self.assertIsNone(history["transit_distance_km"])
 
 
@@ -525,6 +561,7 @@ class DashboardRuntimeTests(unittest.TestCase):
         finally:
             runtime.close()
         self.assertEqual("MOBILE_FRESH", result["effective_source"])
+        self.assertEqual(200.0, result["effective_elevation_m"])
         encoded = json.dumps(result).lower()
         self.assertNotIn("latitude", encoded)
         self.assertNotIn("longitude", encoded)

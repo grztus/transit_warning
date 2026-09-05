@@ -10,7 +10,8 @@ const page = (records: HistoryPageDto["records"]): HistoryPageDto => ({
 });
 const record = { event_id: "persistent-1", body: "MOON", icao: "ABC123",
   callsign: "HISTORY1", predicted_event_utc: "2026-09-03T20:15:00Z",
-  outcome: "PASSED", final_separation_deg: 0.41, transit_distance_km: 34.4 };
+  outcome: "PASSED", final_separation_deg: 0.41, transit_distance_km: 34.4,
+  separation_class: "GREEN" };
 const quietStream: EventSourceFactory = () => ({ close() {}, addEventListener() {},
   onopen: null, onerror: null });
 
@@ -23,7 +24,7 @@ describe("persistent HISTORY", () => {
     expect(await screen.findByText("HISTORY1")).toBeInTheDocument();
     expect(screen.getAllByText("MOON")).toHaveLength(2);
     expect(screen.getByText("PASSED")).toBeInTheDocument();
-    expect(screen.getByText("SEP 0.4°")).toBeInTheDocument();
+    expect(screen.getByText("SEP 0.41°")).toHaveClass("sep-green");
     expect(screen.getByText("34.4 km")).toBeInTheDocument();
     expect(historyClient).toHaveBeenCalledWith({ date: undefined, callsign: undefined,
       body: "ALL", maxSepDeg: undefined, offset: 0, limit: 25 });

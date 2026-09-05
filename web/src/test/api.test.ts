@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BOOTSTRAP_ENDPOINT, fetchBootstrap, fetchHistory, normalizeHistoryMaxSep, patchSettings, SettingsConflictError } from "../api";
+import { BOOTSTRAP_ENDPOINT, fetchBootstrap, fetchHistory, normalizeHistoryMaxSep, patchSettings, SettingsConflictError, SettingsRequestError } from "../api";
 import { activeFixture } from "./fixture";
 
 describe("bootstrap client", () => {
@@ -39,6 +39,15 @@ describe("bootstrap client", () => {
     await expect(patchSettings({ expected_revision: 3, command_id: "stale",
       changes: { telegram: { moon_enabled: false } } }))
       .rejects.toBeInstanceOf(SettingsConflictError);
+  });
+
+  it("propagates a useful settings API validation error", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 400,
+      json: async () => ({ error: "Save a complete MANUAL observer position before activation" }) }));
+    await expect(patchSettings({ expected_revision: 3, command_id: "manual",
+      changes: { observer: { requested_mode: "MANUAL" } } }))
+      .rejects.toEqual(new SettingsRequestError(
+        "Save a complete MANUAL observer position before activation"));
   });
 
   it("queries the existing legacy history endpoint with public filters", async () => {

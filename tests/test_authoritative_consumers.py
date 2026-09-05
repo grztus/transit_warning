@@ -154,7 +154,8 @@ class AuthoritativeConsumerTests(unittest.TestCase):
         self.assertEqual(1, len(live))
         self.assertTrue(live[0]["is_new_late_candidate"])
         state.withdraw("ABC123", "SUN", BASE + datetime.timedelta(seconds=70))
-        history = state.snapshot(BASE)["recent_events"]
+        history = state.snapshot(
+            BASE + datetime.timedelta(seconds=70))["recent_events"]
         self.assertEqual(1, len(history))
         self.assertEqual("7:ABC123:SUN:1", history[0]["event_id"])
 

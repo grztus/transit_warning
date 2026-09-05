@@ -37,10 +37,12 @@ class StaticObserverPositionProvider:
 class ObserverMode(str, Enum):
     STATIC = "STATIC"
     MOBILE = "MOBILE"
+    MANUAL = "MANUAL"
 
 
 class ObserverSource(str, Enum):
     STATIC = "STATIC"
+    MANUAL = "MANUAL"
     MOBILE_FRESH = "MOBILE_FRESH"
     MOBILE_LAST_KNOWN = "MOBILE_LAST_KNOWN"
     STATIC_FALLBACK = "STATIC_FALLBACK"
@@ -62,13 +64,17 @@ class ObserverContext:
 
 
 class RuntimeObserverPositionProvider:
-    """Resolve STATIC/MOBILE observer state without persisting phone location."""
+    """Resolve STATIC/MOBILE/MANUAL state without persisting phone location."""
 
     def __init__(self, static_position, mode="STATIC", fresh_seconds=15.0,
-                 fallback_enabled=False, change_handler=None):
+                 fallback_enabled=False, change_handler=None,
+                 manual_position=None):
         if not isinstance(static_position, ObserverPosition):
             raise TypeError("static_position must be an ObserverPosition")
         self._static_position = static_position
+        self._manual_position = manual_position or static_position
+        if not isinstance(self._manual_position, ObserverPosition):
+            raise TypeError("manual_position must be an ObserverPosition")
         self._mode = ObserverMode(str(mode).upper())
         self._fresh_seconds = float(fresh_seconds)
         self._fallback_enabled = bool(fallback_enabled)
@@ -85,6 +91,10 @@ class RuntimeObserverPositionProvider:
     @property
     def static_position(self):
         return self._static_position
+
+    @property
+    def manual_position(self):
+        return self._manual_position
 
     def set_change_handler(self, handler):
         with self._lock:
@@ -105,6 +115,9 @@ class RuntimeObserverPositionProvider:
             if self._mode is ObserverMode.STATIC:
                 resolved = self._static_position
                 source = ObserverSource.STATIC
+            elif self._mode is ObserverMode.MANUAL:
+                resolved = self._manual_position
+                source = ObserverSource.MANUAL
             elif position is None:
                 if self._fallback_enabled:
                     resolved = self._static_position
@@ -139,6 +152,23 @@ class RuntimeObserverPositionProvider:
                 fallback_active=source is ObserverSource.STATIC_FALLBACK,
                 epoch=self._epoch,
             )
+        if handler is not None:
+            handler(context)
+        return context
+
+    def set_manual_position(self, position, now_utc=None):
+        if not isinstance(position, ObserverPosition):
+            raise TypeError("position must be an ObserverPosition")
+        with self._lock:
+            changed = position != self._manual_position
+            self._manual_position = position
+            if changed and self._mode is ObserverMode.MANUAL:
+                self._effective_source = None
+                self._epoch += 1
+                handler = self._change_handler
+            else:
+                handler = None
+        context = self.resolve(now_utc)
         if handler is not None:
             handler(context)
         return context

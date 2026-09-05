@@ -82,6 +82,9 @@ class InstallationConfigTests(unittest.TestCase):
         self.assertEqual(300.0, result.mobile_gps_critical_warning_seconds)
         self.assertFalse(result.mobile_gps_static_fallback_enabled)
         self.assertEqual(
+            "recordings/dashboard_settings.json",
+            result.dashboard_settings_path)
+        self.assertEqual(
             (3.0, 5.0, 7.0),
             (result.tmux_sep_green_max_deg,
              result.tmux_sep_yellow_max_deg,
@@ -91,6 +94,18 @@ class InstallationConfigTests(unittest.TestCase):
             (result.dashboard_sep_green_max_deg,
              result.dashboard_sep_yellow_max_deg,
              result.dashboard_sep_visible_max_deg))
+
+    def test_manual_observer_mode_is_accepted_without_mobile_gps(self):
+        result = self.load({**REQUIRED, "OBSERVER_MODE": "MANUAL"})
+        self.assertEqual("MANUAL", result.observer_mode)
+
+    def test_dashboard_settings_path_is_configurable(self):
+        result = self.load({
+            **REQUIRED,
+            "DASHBOARD_SETTINGS_PATH": "/var/lib/transit/manual.json",
+        })
+        self.assertEqual(
+            "/var/lib/transit/manual.json", result.dashboard_settings_path)
 
     def test_presentation_threshold_sets_are_independently_configurable(self):
         result = self.load({

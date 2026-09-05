@@ -15,6 +15,117 @@ const quietStream: EventSourceFactory = () => ({ close() {}, addEventListener() 
   onopen: null, onerror: null });
 
 describe("synchronized operational controls", () => {
+  it("sends STATIC to MOBILE and MOBILE to STATIC mode requests", async () => {
+    const staticFixture = { ...activeFixture, settings: { ...activeFixture.settings,
+      observer: { ...activeFixture.settings.observer, requested_mode: "STATIC" as const } } };
+    const mobileMutate = vi.fn().mockResolvedValue(accepted(4));
+    render(<App client={async () => staticFixture} settingsMutator={mobileMutate}
+      eventSourceFactory={quietStream} />);
+    fireEvent.click(await screen.findByRole("button", { name: "MOBILE" }));
+    await waitFor(() => expect(mobileMutate).toHaveBeenCalledWith(expect.objectContaining({
+      expected_revision: 3, changes: { observer: { requested_mode: "MOBILE" } },
+    })));
+
+    const staticButton = screen.getByRole("button", { name: "STATIC" });
+    await waitFor(() => expect(staticButton).not.toBeDisabled());
+    fireEvent.click(staticButton);
+    await waitFor(() => expect(mobileMutate).toHaveBeenLastCalledWith(expect.objectContaining({
+      changes: { observer: { requested_mode: "STATIC" } },
+    })));
+  });
+
+  it("opens a blank editor without a request for first-ever MANUAL selection", async () => {
+    const staticFixture = { ...activeFixture, settings: { ...activeFixture.settings,
+      observer: { ...activeFixture.settings.observer, requested_mode: "STATIC" as const,
+        manual_position_saved: false } } };
+    const mutate = vi.fn();
+    render(<App client={async () => staticFixture} settingsMutator={mutate}
+      eventSourceFactory={quietStream} />);
+    fireEvent.click(await screen.findByRole("button", { name: "MANUAL" }));
+    expect(await screen.findByLabelText("Manual latitude")).toHaveValue("");
+    expect(screen.getByLabelText("Manual longitude")).toHaveValue("");
+    expect(screen.getByLabelText("Manual elevation AMSL")).toHaveValue("");
+    expect(mutate).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "MANUAL" }))
+      .toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("saves a complete first MANUAL tuple and activates it atomically", async () => {
+    const staticFixture = { ...activeFixture, settings: { ...activeFixture.settings,
+      observer: { ...activeFixture.settings.observer, requested_mode: "STATIC" as const,
+        manual_position_saved: false } } };
+    const mutate = vi.fn().mockResolvedValue(accepted(4));
+    render(<App client={async () => staticFixture} settingsMutator={mutate}
+      eventSourceFactory={quietStream} />);
+    fireEvent.click(await screen.findByRole("button", { name: "MANUAL" }));
+    fireEvent.change(screen.getByLabelText("Manual latitude"), { target: { value: "51,5" } });
+    fireEvent.change(screen.getByLabelText("Manual longitude"), { target: { value: "22.25" } });
+    fireEvent.change(screen.getByLabelText("Manual elevation AMSL"), { target: { value: "320" } });
+    fireEvent.click(screen.getByRole("button", { name: "SAVE" }));
+    await waitFor(() => expect(mutate).toHaveBeenCalledWith(expect.objectContaining({
+      changes: { observer: { requested_mode: "MANUAL", manual_lat_deg: 51.5,
+        manual_lon_deg: 22.25, manual_elevation_amsl_m: 320 } },
+    })));
+  });
+
+  it("activates an existing saved MANUAL tuple directly", async () => {
+    const staticFixture = { ...activeFixture, settings: { ...activeFixture.settings,
+      observer: { ...activeFixture.settings.observer, requested_mode: "STATIC" as const,
+        manual_position_saved: true } } };
+    const mutate = vi.fn().mockResolvedValue(accepted(4));
+    render(<App client={async () => staticFixture} settingsMutator={mutate}
+      eventSourceFactory={quietStream} />);
+    fireEvent.click(await screen.findByRole("button", { name: "MANUAL" }));
+    await waitFor(() => expect(mutate).toHaveBeenCalledWith(expect.objectContaining({
+      changes: { observer: { requested_mode: "MANUAL" } },
+    })));
+  });
+
+  it("edits validated MANUAL coordinates through authoritative settings", async () => {
+    const manualFixture = { ...activeFixture, observer: {
+      requested_mode: "MANUAL", effective_source: "MANUAL",
+      effective_elevation_m: 315, manual_lat_deg: 51.25,
+      manual_lon_deg: 21.5, manual_elevation_amsl_m: 315,
+    }, settings: { ...activeFixture.settings, observer: {
+      ...activeFixture.settings.observer, requested_mode: "MANUAL" as const,
+      manual_lat_deg: 51.25, manual_lon_deg: 21.5,
+      manual_elevation_amsl_m: 315, manual_position_saved: true,
+    } } };
+    const mutate = vi.fn().mockResolvedValue(accepted(4));
+    render(<App client={async () => manualFixture} settingsMutator={mutate}
+      eventSourceFactory={quietStream} />);
+    expect(await screen.findByLabelText("Manual latitude")).toHaveValue("51.25");
+    fireEvent.change(screen.getByLabelText("Manual latitude"), {
+      target: { value: "51,5" },
+    });
+    fireEvent.change(screen.getByLabelText("Manual longitude"), {
+      target: { value: "22.25" },
+    });
+    fireEvent.change(screen.getByLabelText("Manual elevation AMSL"), {
+      target: { value: "320" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "SAVE" }));
+    await waitFor(() => expect(mutate).toHaveBeenCalledWith(expect.objectContaining({
+      changes: { observer: { requested_mode: "MANUAL", manual_lat_deg: 51.5, manual_lon_deg: 22.25,
+        manual_elevation_amsl_m: 320 } },
+    })));
+  });
+
+  it("does not submit invalid MANUAL coordinates", async () => {
+    const manualFixture = { ...activeFixture, settings: { ...activeFixture.settings,
+      observer: { ...activeFixture.settings.observer, requested_mode: "MANUAL" as const,
+        manual_position_saved: true } } };
+    const mutate = vi.fn();
+    render(<App client={async () => manualFixture} settingsMutator={mutate}
+      eventSourceFactory={quietStream} />);
+    fireEvent.change(await screen.findByLabelText("Manual latitude"), {
+      target: { value: "91" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "SAVE" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("valid LAT");
+    expect(mutate).not.toHaveBeenCalled();
+  });
+
   it("renders authoritative values and sends current revision with unique command ids", async () => {
     const next = { ...activeFixture, settings_revision: 4, settings: {
       ...activeFixture.settings, telegram: { ...activeFixture.settings.telegram, sun_enabled: false },
@@ -78,9 +189,21 @@ describe("synchronized operational controls", () => {
       eventSourceFactory={quietStream} />);
     const sun = await screen.findByRole("button", { name: "Telegram SUN" });
     fireEvent.click(sun);
-    expect(await screen.findByRole("alert")).toHaveTextContent("failed");
+    expect(await screen.findByRole("alert")).toHaveTextContent("network");
     expect(sun).not.toBeDisabled();
     expect(sun).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("shows the useful API validation message", async () => {
+    const staticFixture = { ...activeFixture, settings: { ...activeFixture.settings,
+      observer: { ...activeFixture.settings.observer, requested_mode: "STATIC" as const } } };
+    const mutate = vi.fn().mockRejectedValue(
+      new Error("Mobile GPS is disabled"));
+    render(<App client={async () => staticFixture} settingsMutator={mutate}
+      eventSourceFactory={quietStream} />);
+    fireEvent.click(await screen.findByRole("button", { name: "MOBILE" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Mobile GPS is disabled");
   });
 
   it("shows requested MOBILE with authoritative STATIC fallback degradation", async () => {
