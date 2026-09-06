@@ -602,7 +602,7 @@ class Shadow2DDiagnosticWriter:
             self._last[key] = (signature, now)
         return True
 
-    def withdraw(self, icao, callsign, body, now_utc, reason):
+    def withdraw(self, icao, callsign, body, now_utc, reason, motion_freshness=None):
         """Persist one terminal lifecycle state only for a known shadow pair."""
         key = (str(icao), str(body).upper())
         with self._lock:
@@ -616,6 +616,8 @@ class Shadow2DDiagnosticWriter:
             "legacy_available": None, "shadow_only": None,
             "boundary_status": None,
         }
+        if reason == "MOTION_STALE" and motion_freshness is not None:
+            record["motion_freshness"] = motion_freshness
         written = self.record(record)
         if written:
             with self._lock:

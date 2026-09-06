@@ -565,6 +565,7 @@ class MotionFreshnessResult:
     position_groundspeed_delta: float | None
     reason_codes: tuple[str, ...]
     horizontal_source_coherent: bool
+    diagnostic: dict | None = field(default=None, compare=False, repr=False)
 
 
 def synchronized_plane_dict(function):
@@ -1630,6 +1631,40 @@ def assess_motion_freshness(motion_state, now_utc):
         }
         horizontal = len(sources) == 1 or non_stale_ages
 
+    diagnostic_fields = {}
+    for name, parameter_age in parameters.items():
+        parameter = getattr(motion_state, name.lower(), None)
+        details = {
+            "source": parameter.source if parameter is not None else None,
+            "updated_at_utc": (parameter.updated_at_utc.astimezone(datetime.timezone.utc)
+                               .isoformat().replace("+00:00", "Z")
+                               if parameter is not None else None),
+            "age_seconds": parameter_age,
+        }
+        # Retain the existing coordinate-free diagnostic boundary. These are
+        # aircraft inputs only; never consult an observer provider here.
+        if name != "POSITION":
+            value = parameter.value if parameter is not None else None
+            details["value"] = (value if type(value) in (int, float)
+                                and math.isfinite(value) else None)
+        diagnostic_fields[name.lower()] = details
+    diagnostic = {
+        "status": status.value,
+        "reason_codes": list(reasons),
+        "required_fields": [name.lower() for name in parameters],
+        "evaluated_at_utc": now_utc.astimezone(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+        "fields": diagnostic_fields,
+        "position_value_omitted": True,
+        "position_track_delta_seconds": position_track_delta,
+        "position_groundspeed_delta_seconds": position_groundspeed_delta,
+        "thresholds_seconds": {
+            "fresh_position": MOTION_FRESH_POSITION_SECONDS,
+            "fresh_parameter": MOTION_FRESH_PARAMETER_SECONDS,
+            "fresh_delta": MOTION_FRESH_DELTA_SECONDS,
+            "stale_age": MOTION_STALE_SECONDS,
+            "stale_delta": MOTION_STALE_DELTA_SECONDS,
+        },
+    }
     return MotionFreshnessResult(
         status=status,
         assessed_at_utc=now_utc,
@@ -1642,6 +1677,7 @@ def assess_motion_freshness(motion_state, now_utc):
         position_groundspeed_delta=position_groundspeed_delta,
         reason_codes=tuple(reasons),
         horizontal_source_coherent=horizontal,
+        diagnostic=diagnostic,
     )
 
 
@@ -2247,13 +2283,17 @@ def complete_shadow_2d(prepared, legacy_result, legacy_prediction_base_utc):
         return None
 
 
-def withdraw_shadow_2d(icao, callsign, now_utc, reason):
+def withdraw_shadow_2d(icao, callsign, now_utc, reason, freshness=None):
     writer = shadow_2d_diagnostics
     if writer is None:
         return
     for body in ("SUN", "MOON"):
         try:
-            writer.withdraw(icao, callsign, body, now_utc, reason)
+            if freshness is None:
+                writer.withdraw(icao, callsign, body, now_utc, reason)
+            else:
+                writer.withdraw(icao, callsign, body, now_utc, reason,
+                                motion_freshness=freshness.diagnostic)
         except Exception:
             pass
 
@@ -4668,7 +4708,7 @@ def process_line(line, port):
             plane_dict[icao][8] = "LEAVING"
         if motion_freshness.status == MotionFreshnessStatus.STALE:
             withdraw_shadow_2d(
-                icao, flight, clock.now_utc(), "MOTION_STALE")
+                icao, flight, clock.now_utc(), "MOTION_STALE", freshness=motion_freshness)
             cancel_pending_transit_notification(icao)
             try:
                 dashboard_runtime.withdraw_aircraft(icao, clock.now_utc())
