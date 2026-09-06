@@ -27,8 +27,8 @@ class ApplicationStateStore:
             self._revision += 1
             self._state = detached
             revision = self._revision
-            result = self._snapshot_locked()
             subscribers = tuple(self._subscribers)
+            result = self._snapshot_locked() if subscribers else None
         for callback in subscribers:
             try:
                 callback(deepcopy(result))

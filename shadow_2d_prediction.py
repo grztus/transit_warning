@@ -7,6 +7,9 @@ solver.  Callers provide frozen production motion inputs and geometry resolvers.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import wraps
 from types import MappingProxyType
 import datetime
 import json
@@ -26,6 +29,64 @@ from transit_prediction_model import (
 
 
 UTC = datetime.timezone.utc
+
+# Context-local, not a process/thread-wide result cache. The scope is installed
+# only for one process_line call and discarded even when that call fails.
+_aircraft_cache = ContextVar("shadow_message_aircraft_cache", default=None)
+
+
+@contextmanager
+def message_aircraft_cache(enabled=True):
+    cache = _MessageAircraftCache() if enabled else None
+    token = _aircraft_cache.set(cache)
+    try:
+        yield
+    finally:
+        _aircraft_cache.reset(token)
+        if cache is not None:
+            cache.clear()
+
+
+def reuse_aircraft_within_message(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        with message_aircraft_cache():
+            return function(*args, **kwargs)
+    return wrapped
+
+
+def _aircraft_key(context):
+    # Deliberately conservative: include provenance and the entire observer
+    # context as well as every numerical/frozen input. No rounded time keys.
+    return (context.icao, context.prediction_base_utc, context.observer_context,
+            context.latitude_deg, context.longitude_deg, context.track_deg,
+            context.groundspeed_kmh, context.current_altitude_m,
+            context.vertical_motion, context.vertical_intent, context.vertical_policy,
+            context.qnh_hpa, context.geometric_altitude_correction_m,
+            context.altitude_source, context.position_source, context.track_source,
+            context.aircraft_los_resolver)
+
+
+class _MessageAircraftCache:
+    def __init__(self):
+        self.contexts = {}
+        self.inputs = {}
+
+    def samples(self, context):
+        bound = self.contexts.get(id(context))
+        if bound is None:
+            try:
+                samples = self.inputs.setdefault(_aircraft_key(context), {})
+            except TypeError:
+                # Custom unhashable inputs retain the original uncached path.
+                samples = None
+            # Keep the immutable context alive: identity cannot be recycled.
+            bound = self.contexts[id(context)] = (context, samples)
+        return bound[1]
+
+    def clear(self):
+        self.contexts.clear()
+        self.inputs.clear()
 
 
 @dataclass(frozen=True)
@@ -197,9 +258,8 @@ def _relative_tangent_offset(aircraft, body, body_azimuth_deg,
             math.degrees(scale * _dot(aircraft, up)))
 
 
-def evaluate_shadow_geometry(context, dt_seconds):
-    """Evaluate the frozen production motion and exact LOS at arbitrary dt."""
-    dt_seconds = float(dt_seconds)
+def evaluate_aircraft_geometry(context, dt_seconds):
+    """Body-independent evaluation, retaining the original calculation order."""
     position = horizontal_position_from_t0(
         context.latitude_deg, context.longitude_deg, context.track_deg,
         context.groundspeed_kmh, dt_seconds)
@@ -229,6 +289,21 @@ def evaluate_shadow_geometry(context, dt_seconds):
     )
     observer = context.observer_context.position
     aircraft = context.aircraft_los_resolver(observer, position, altitude_m)
+    return position, vertical, altitude_m, frozen_vertical, aircraft
+
+
+def evaluate_shadow_geometry(context, dt_seconds):
+    """Evaluate body geometry using exact message-local aircraft reuse."""
+    dt_seconds = float(dt_seconds)
+    cache = _aircraft_cache.get()
+    samples = cache.samples(context) if cache is not None else None
+    value = samples.get(dt_seconds) if samples is not None else None
+    if value is None:
+        value = evaluate_aircraft_geometry(context, dt_seconds)
+        if samples is not None:
+            samples[dt_seconds] = value  # Never cache exceptions; no rounded keys.
+    position, vertical, altitude_m, frozen_vertical, aircraft = value
+    observer = context.observer_context.position
     when_utc = context.prediction_base_utc + datetime.timedelta(
         seconds=dt_seconds)
     body_position = context.body_position_resolver(

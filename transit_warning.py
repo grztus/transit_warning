@@ -184,6 +184,7 @@ from shadow_2d_prediction import (
     coarse_screen as shadow_coarse_screen,
     comparison_record as shadow_comparison_record,
     exact_refine as shadow_exact_refine,
+    reuse_aircraft_within_message,
 )
 
 # Ustawienia GUI / GUI settings
@@ -2136,6 +2137,13 @@ def select_geometric_altitude_for_prediction(
             baro_m, "geometric_selection_error")
 
 
+def _shadow_aircraft_los(observer, target_position, target_altitude_m):
+    """Stable resolver identity for the paired bodies in one message."""
+    return precise_aircraft_angular_position_from_observer(
+        observer.coordinates, observer.elevation_m,
+        target_position, target_altitude_m)
+
+
 def build_shadow_2d_context(
         icao, callsign, body, observer_context, position, track_parameter,
         groundspeed_kmh, current_altitude_m, prediction_base_utc):
@@ -2154,11 +2162,6 @@ def build_shadow_2d_context(
         altitude_now.altitude_m
         - vertical_now.prediction.predicted_altitude_m)
 
-    def aircraft_los(observer, target_position, target_altitude_m):
-        return precise_aircraft_angular_position_from_observer(
-            observer.coordinates, observer.elevation_m,
-            target_position, target_altitude_m)
-
     return ShadowEncounterContext(
         icao=str(icao), callsign=str(callsign or ""), body=body.upper(),
         prediction_base_utc=prediction_base_utc,
@@ -2176,7 +2179,7 @@ def build_shadow_2d_context(
         altitude_source=altitude_now.source.value,
         position_source=position.source,
         track_source=track_parameter.source,
-        aircraft_los_resolver=aircraft_los,
+        aircraft_los_resolver=_shadow_aircraft_los,
         body_position_resolver=body_position_at_utc,
     )
 
@@ -4363,6 +4366,7 @@ def read_mlat_beast_track(host, port, session_recorder=None):
 
 # Funkcja do przetwarzania linii danych / Function to process a line of data
 @synchronized_plane_dict
+@reuse_aircraft_within_message
 def process_line(line, port):
     global last_update_time, moon_alt, moon_az, sun_alt, sun_az, gatech
     global moon_body_angular_diameter_arcsec, sun_body_angular_diameter_arcsec
