@@ -364,10 +364,12 @@ class DashboardState:
                 pass
 
     def query_history(self, utc_date=None, callsign=None, body="ALL",
-                      offset=0, limit=DEFAULT_PAGE_SIZE, max_sep_deg=None):
+                      offset=0, limit=DEFAULT_PAGE_SIZE, max_sep_deg=None,
+                      from_date=None, to_date=None):
         if self.history_store is not None:
             result = self.history_store.query(
-                utc_date, callsign, body, offset, limit, max_sep_deg)
+                utc_date, callsign, body, offset, limit, max_sep_deg,
+                from_date, to_date)
             result["records"] = self._history_records_with_classes(
                 result["records"])
             return result
@@ -375,6 +377,10 @@ class DashboardState:
         records = [record for record in self._history
                    if (utc_date is None or str(record.get(
                        "predicted_event_utc") or "").startswith(utc_date))
+                   and (from_date is None or str(record.get(
+                       "predicted_event_utc") or "")[:10] >= from_date)
+                   and (to_date is None or str(record.get(
+                       "predicted_event_utc") or "")[:10] <= to_date)
                    and (not callsign or callsign.casefold() in str(
                        record.get("callsign") or "").casefold())
                    and (body == "ALL" or str(
@@ -408,12 +414,13 @@ class DashboardState:
         return math.isfinite(separation) and separation <= max_sep_deg
 
     def export_history_csv(self, utc_date=None, callsign=None, body="ALL",
-                           max_sep_deg=None):
+                           max_sep_deg=None, from_date=None, to_date=None):
         if self.history_store is not None:
             return self.history_store.export_csv(
-                utc_date, callsign, body, max_sep_deg)
+                utc_date, callsign, body, max_sep_deg, from_date, to_date)
         return records_to_csv(self.query_history(
-            utc_date, callsign, body, 0, 100, max_sep_deg)["records"])
+            utc_date, callsign, body, 0, 100, max_sep_deg,
+            from_date, to_date)["records"])
 
     def snapshot(self, now_utc=None):
         with self._lock:
@@ -876,6 +883,8 @@ def _handler_factory(state, now_utc, mobile_gps_state, telegram_controls,
         def _history_query(self, raw_query, export=False):
             values = parse_qs(raw_query, keep_blank_values=True)
             date = values.get("date", [""])[0].strip() or None
+            from_date = values.get("from_date", [""])[0].strip() or None
+            to_date = values.get("to_date", [""])[0].strip() or None
             callsign = values.get("callsign", [""])[0].strip() or None
             body = values.get("body", ["ALL"])[0].strip().upper() or "ALL"
             max_sep_text = values.get("max_sep_deg", [""])[0].strip()
@@ -885,12 +894,17 @@ def _handler_factory(state, now_utc, mobile_gps_state, telegram_controls,
                                           or date[7] != "-")):
                 self.send_error(400, "Invalid history filter")
                 return None
-            if date is not None:
+            for date_value in (date, from_date, to_date):
+                if date_value is None:
+                    continue
                 try:
-                    datetime.date.fromisoformat(date)
+                    datetime.date.fromisoformat(date_value)
                 except ValueError:
                     self.send_error(400, "Invalid history date")
                     return None
+            if from_date is not None and to_date is not None and from_date > to_date:
+                self.send_error(400, "Invalid history date range")
+                return None
             try:
                 max_sep_deg = (float(max_sep_text)
                                if max_sep_text else None)
@@ -902,7 +916,8 @@ def _handler_factory(state, now_utc, mobile_gps_state, telegram_controls,
                 self.send_error(400, "Invalid history separation")
                 return None
             result = {"utc_date": date, "callsign": callsign, "body": body,
-                      "max_sep_deg": max_sep_deg}
+                      "max_sep_deg": max_sep_deg, "from_date": from_date,
+                      "to_date": to_date}
             if not export:
                 try:
                     result["offset"] = int(values.get("offset", ["0"])[0])

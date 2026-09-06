@@ -15,7 +15,7 @@ DEFAULT_PAGE_SIZE = 25
 MAX_PAGE_SIZE = 100
 HISTORY_FILENAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.jsonl$")
 CSV_FIELDS = (
-    "event_id", "body", "icao", "callsign", "predicted_event_utc",
+    "event_id", "body", "icao", "icao_hex", "callsign", "predicted_event_utc",
     "outcome", "first_separation_deg", "minimum_separation_deg",
     "final_separation_deg", "first_seen_utc", "last_seen_utc",
     "history_recorded_at_utc", "body_azimuth_deg", "body_elevation_deg",
@@ -30,7 +30,10 @@ def records_to_csv(records):
                             extrasaction="ignore")
     writer.writeheader()
     for record in records:
-        writer.writerow({name: record.get(name) for name in CSV_FIELDS})
+        row = {name: record.get(name) for name in CSV_FIELDS}
+        if not row["icao_hex"] and record.get("icao"):
+            row["icao_hex"] = str(record["icao"]).upper()
+        writer.writerow(row)
     return output.getvalue().encode("utf-8-sig")
 
 
@@ -57,11 +60,15 @@ def _predicted_event_sort_key(record):
 
 
 def _matches(record, utc_date=None, callsign=None, body=None,
-             max_sep_deg=None):
+             max_sep_deg=None, from_date=None, to_date=None):
+    event_date = str(record.get("predicted_event_utc") or "")[:10]
     if utc_date is not None:
-        timestamp = str(record.get("predicted_event_utc") or "")
-        if not timestamp.startswith(utc_date):
+        if event_date != utc_date:
             return False
+    if from_date is not None and event_date < from_date:
+        return False
+    if to_date is not None and event_date > to_date:
+        return False
     if body and body != "ALL" and str(record.get("body") or "").upper() != body:
         return False
     if callsign:
@@ -154,7 +161,7 @@ class DashboardHistoryStore:
         except OSError:
             return
 
-    def _paths(self, utc_date=None):
+    def _paths(self, utc_date=None, from_date=None, to_date=None):
         if utc_date is not None:
             if re.fullmatch(r"\d{4}-\d{2}-\d{2}", utc_date) is None:
                 return []
@@ -163,31 +170,39 @@ class DashboardHistoryStore:
         try:
             return sorted(
                 (path for path in self.base_dir.iterdir()
-                 if path.is_file() and HISTORY_FILENAME_RE.match(path.name)),
+                 if path.is_file() and HISTORY_FILENAME_RE.match(path.name)
+                 and (from_date is None or path.stem >= from_date)
+                 and (to_date is None or path.stem <= to_date)),
                 reverse=True)
         except OSError:
             return []
 
     def iter_records(self, utc_date=None, callsign=None, body="ALL",
-                     max_sep_deg=None):
+                     max_sep_deg=None, from_date=None, to_date=None):
         body = str(body or "ALL").upper()
-        for path in self._paths(utc_date):
+        for path in self._paths(utc_date, from_date, to_date):
             # Partitions are defined by predicted UTC date. Sort each bounded
             # day by the same event UTC displayed by both dashboards.
             records = sorted(
                 self._read_file(path), key=_predicted_event_sort_key,
                 reverse=True)
             for record in records:
-                if _matches(record, utc_date, callsign, body, max_sep_deg):
-                    yield record
+                if _matches(record, utc_date, callsign, body, max_sep_deg,
+                            from_date, to_date):
+                    projected = dict(record)
+                    if not projected.get("icao_hex") and projected.get("icao"):
+                        projected["icao_hex"] = str(projected["icao"]).upper()
+                    yield projected
 
     def query(self, utc_date=None, callsign=None, body="ALL", offset=0,
-              limit=DEFAULT_PAGE_SIZE, max_sep_deg=None):
+              limit=DEFAULT_PAGE_SIZE, max_sep_deg=None, from_date=None,
+              to_date=None):
         offset = max(0, int(offset))
         limit = min(MAX_PAGE_SIZE, max(1, int(limit)))
         selected = []
         for index, record in enumerate(
-                self.iter_records(utc_date, callsign, body, max_sep_deg)):
+                self.iter_records(utc_date, callsign, body, max_sep_deg,
+                                  from_date, to_date)):
             if index < offset:
                 continue
             selected.append(record)
@@ -204,9 +219,9 @@ class DashboardHistoryStore:
         }
 
     def export_csv(self, utc_date=None, callsign=None, body="ALL",
-                   max_sep_deg=None):
+                   max_sep_deg=None, from_date=None, to_date=None):
         return records_to_csv(self.iter_records(
-            utc_date, callsign, body, max_sep_deg))
+            utc_date, callsign, body, max_sep_deg, from_date, to_date))
 
     def close(self):
         return None

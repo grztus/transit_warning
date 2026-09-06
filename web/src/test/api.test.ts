@@ -66,12 +66,15 @@ describe("bootstrap client", () => {
     const result = { records: [], offset: 0, limit: 25, next_offset: null, has_more: false };
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => result });
     vi.stubGlobal("fetch", fetchMock);
-    await expect(fetchHistory({ date: "2026-09-03", callsign: " ABC ", body: "MOON",
+    await expect(fetchHistory({ date: "2026-09-03", fromDate: "2026-09-01",
+      toDate: "2026-09-30", callsign: " ABC ", body: "MOON",
       maxSepDeg: "3.0", offset: 25,
       limit: 25 })).resolves.toEqual(result);
     const url = fetchMock.mock.calls[0][0] as string;
     expect(url).toContain("/api/history?");
     expect(url).toContain("date=2026-09-03");
+    expect(url).toContain("from_date=2026-09-01");
+    expect(url).toContain("to_date=2026-09-30");
     expect(url).toContain("callsign=ABC");
     expect(url).toContain("offset=25");
     expect(url).toContain("limit=25");

@@ -88,7 +88,10 @@ h2 { margin-bottom: 0; font-size: 1.05rem; letter-spacing: .08em; }
   grid-template-areas: "callsign body status" "sep distance time";
   align-items: center; gap: .25rem .55rem; padding: .45rem 0;
   border-top: 1px solid #203344; font-size: .82rem; }
-.event-row > strong { grid-area: callsign; overflow-wrap: anywhere; }
+.event-identity { grid-area: callsign; display: flex; align-items: baseline; gap: .45rem;
+  min-width: 0; overflow-wrap: anywhere; }
+.event-icao { color: #7895ad; font-size: .7rem; font-weight: 600;
+  letter-spacing: .05em; white-space: nowrap; }
 .event-body { grid-area: body; font-size: .76rem; font-weight: 700; }
 .event-row > .state-badge { grid-area: status; }
 .event-row > .sep { grid-area: sep; }
@@ -105,6 +108,8 @@ h2 { margin-bottom: 0; font-size: 1.05rem; letter-spacing: .08em; }
 .control-group { flex-wrap: wrap; margin-top: .55rem; }
 .control-group > strong { min-width: 5.2rem; font-size: .82rem; }
 .control-label, .inline-toggle span { color: #9fb2c2; font-size: .76rem; }
+.fallback-control-group { display: inline-flex; align-items: center; gap: .4rem;
+  white-space: nowrap; }
 .observer-meta { margin: .45rem 0 0 5.6rem; line-height: 1.35; }
 .manual-observer { display: flex; flex-wrap: wrap; align-items: end; gap: .4rem;
   margin: .55rem 0 0 5.6rem; }
@@ -139,6 +144,9 @@ button:disabled { cursor: wait; opacity: .65; }
   margin-top: .65rem; }
 .load-more { margin: 0; }
 .export-csv { border-color: #405163; background: #162330; color: #b9cddd; }
+.app-footer { padding: .7rem .25rem .2rem; color: #657d90; font-size: .68rem;
+  text-align: center; }
+.app-footer a { color: #7895ad; }
 
 @media (min-width: 700px) {
   main { padding: 1.5rem; }
@@ -147,7 +155,7 @@ button:disabled { cursor: wait; opacity: .65; }
   .status-strip div { display: block; }
   .status-strip span, .status-strip strong { display: block; }
   .status-strip strong { margin-top: .2rem; }
-  .history-controls { grid-template-columns: 1.15fr 1fr .7fr .8fr; }
+  .history-controls { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .event-list li { grid-template-columns: minmax(8rem, 1.3fr) .55fr .8fr .75fr .65fr 1fr;
     grid-template-areas: "callsign body status sep distance time"; gap: .65rem; }
 }

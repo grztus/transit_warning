@@ -99,6 +99,8 @@ export async function fetchHistory(query: HistoryQuery): Promise<HistoryPageDto>
     offset: String(query.offset ?? 0), limit: String(query.limit ?? 25), body: query.body ?? "ALL",
   });
   if (query.date) parameters.set("date", query.date);
+  if (query.fromDate) parameters.set("from_date", query.fromDate);
+  if (query.toDate) parameters.set("to_date", query.toDate);
   if (query.callsign?.trim()) parameters.set("callsign", query.callsign.trim());
   const maxSepDeg = normalizeHistoryMaxSep(query.maxSepDeg);
   if (maxSepDeg) parameters.set("max_sep_deg", maxSepDeg);

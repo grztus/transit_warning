@@ -176,11 +176,19 @@ function BodyPanel({ name, state, nowMs }: {
   );
 }
 
-function EventCard({ event }: { event: RecentEventDto | HistoryEventDto }) {
+function EventCard({ event, showIcao = false }: {
+  event: RecentEventDto | HistoryEventDto;
+  showIcao?: boolean;
+}) {
   const outcome = event.outcome || event.state || "—";
+  const icao = "icao_hex" in event ? event.icao_hex || event.icao : event.icao;
   return (
     <li className={`event-row event-${className(outcome)}`}>
-      <strong>{event.callsign || event.icao || "NOCALL"}</strong>
+      <span className="event-identity">
+        <strong>{event.callsign || icao || "NOCALL"}</strong>
+        {showIcao && event.callsign && icao &&
+          <span className="event-icao">{icao.toUpperCase()}</span>}
+      </span>
       <span className={`event-body body-${className(event.body)}`}>{event.body || "—"}</span>
       <span className={`state-badge state-${className(outcome)}`}>{outcome}</span>
       <span className={`sep sep-${className(event.separation_class)}`}>
@@ -214,6 +222,8 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
   const gpsActive = useRef(false);
   const [view, setView] = useState<"LIVE" | "HISTORY">("LIVE");
   const [historyDate, setHistoryDate] = useState("");
+  const [historyFromDate, setHistoryFromDate] = useState("");
+  const [historyToDate, setHistoryToDate] = useState("");
   const [historyCallsign, setHistoryCallsign] = useState("");
   const [historyBody, setHistoryBody] = useState<"ALL" | "SUN" | "MOON">("ALL");
   const [historyMaxSep, setHistoryMaxSep] = useState("");
@@ -252,6 +262,7 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
     try {
       const maxSepDeg = normalizeHistoryMaxSep(historyMaxSep);
       const page = await historyClient({ date: historyDate || undefined,
+        fromDate: historyFromDate || undefined, toDate: historyToDate || undefined,
         callsign: historyCallsign.trim() || undefined,
         body: historyBody, maxSepDeg,
         offset: append ? historyNextOffset ?? 0 : 0, limit: 25 });
@@ -271,7 +282,8 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
     if (view === "HISTORY") void loadHistory();
   // Filters intentionally trigger the same immediate refresh as the legacy controls.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, historyDate, historyCallsign, historyBody, historyMaxSep, historyClient]);
+  }, [view, historyDate, historyFromDate, historyToDate, historyCallsign,
+    historyBody, historyMaxSep, historyClient]);
   useEffect(() => {
     if (!snapshot || pending === "manual-position") return;
     const manual = snapshot.settings.observer;
@@ -450,14 +462,16 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
                 </button>
               ))}
               </div>
-              <span className="control-label">Fallback</span>
-              <button type="button" aria-pressed={snapshot.settings.observer.fallback_enabled}
-                aria-label="Observer fallback"
-                disabled={pending !== null}
-                onClick={() => void changeSetting("fallback", { observer: {
-                  fallback_enabled: !snapshot.settings.observer.fallback_enabled } })}>
-                {pending === "fallback" ? "CHANGING…" : snapshot.settings.observer.fallback_enabled ? "ON" : "OFF"}
-              </button>
+              <span className="fallback-control-group">
+                <span className="control-label">Fallback</span>
+                <button type="button" aria-pressed={snapshot.settings.observer.fallback_enabled}
+                  aria-label="Observer fallback"
+                  disabled={pending !== null}
+                  onClick={() => void changeSetting("fallback", { observer: {
+                    fallback_enabled: !snapshot.settings.observer.fallback_enabled } })}>
+                  {pending === "fallback" ? "CHANGING…" : snapshot.settings.observer.fallback_enabled ? "ON" : "OFF"}
+                </button>
+              </span>
               {snapshot.settings.observer.requested_mode === "MOBILE" && !gpsRunning &&
                 <button type="button" className="gps-control" disabled={gpsAvailable !== true}
                   onClick={startGps}>Start GPS</button>}
@@ -492,7 +506,8 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
                 <> · Elevation {value(snapshot.observer.effective_elevation_m, " m AMSL")}</>}
             </p>
             {snapshot.settings.observer.requested_mode === "MOBILE" &&
-              snapshot.observer.effective_source !== "MOBILE" && (
+              (snapshot.observer.fallback_active || !["MOBILE", "MOBILE_FRESH"].includes(
+                snapshot.observer.effective_source || "")) && (
               <p className="degraded" role="status">MOBILE requested · effective {snapshot.observer.effective_source || "unavailable"}</p>
             )}
             <div className="control-group telegram-control-group">
@@ -529,6 +544,10 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
             <div className="history-controls">
               <label>Date <input type="date" aria-label="UTC date" value={historyDate}
                 onChange={(event) => setHistoryDate(event.target.value)} /></label>
+              <label>From date <input type="date" aria-label="From date" value={historyFromDate}
+                onChange={(event) => setHistoryFromDate(event.target.value)} /></label>
+              <label>To date <input type="date" aria-label="To date" value={historyToDate}
+                onChange={(event) => setHistoryToDate(event.target.value)} /></label>
               <label>Callsign <input type="search" aria-label="Callsign filter"
                 placeholder="Callsign" value={historyCallsign}
                 onChange={(event) => setHistoryCallsign(event.target.value)} /></label>
@@ -546,7 +565,7 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
               historyRecords.length ? (
               <ul className="event-list">
                 {historyRecords.map((event, index) => (
-                  <EventCard key={event.event_id || index} event={event} />
+                  <EventCard key={event.event_id || index} event={event} showIcao />
                 ))}
               </ul>
             ) : <p className="empty">No matching events</p>}
@@ -556,6 +575,8 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
                   onClick={() => void loadHistory(true)}>Load more</button>}
               <form method="get" action="/api/history/export.csv">
                 <input type="hidden" name="date" value={historyDate} />
+                <input type="hidden" name="from_date" value={historyFromDate} />
+                <input type="hidden" name="to_date" value={historyToDate} />
                 <input type="hidden" name="callsign" value={historyCallsign.trim()} />
                 <input type="hidden" name="body" value={historyBody} />
                 <input type="hidden" name="max_sep_deg"
@@ -567,6 +588,10 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
           }
         </>
       )}
+      <footer className="app-footer">
+        Transit Warning · Grzegorz Tuszyński · <a href="https://github.com/grztus/transit_warning"
+          target="_blank" rel="noopener noreferrer">GitHub</a>
+      </footer>
     </main>
   );
 }

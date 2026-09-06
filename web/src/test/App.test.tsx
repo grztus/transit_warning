@@ -81,7 +81,18 @@ describe("LIVE screen", () => {
     const badge = await screen.findByRole("button", { name: "STANDARD" });
     expect(badge).toHaveAttribute("aria-describedby", "edition-tooltip");
     expect(screen.getByRole("tooltip")).toHaveTextContent("Free operational dashboard");
-    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+    expect(badge.parentElement?.querySelector("a")).toBeNull();
+  });
+
+  it("shows the subdued author footer with a safe GitHub link", async () => {
+    const { container } = render(<App client={async () => activeFixture} />);
+    await screen.findByRole("status");
+    const footer = container.querySelector(".app-footer");
+    expect(footer).toHaveTextContent("Transit Warning · Grzegorz Tuszyński · GitHub");
+    expect(screen.getByRole("link", { name: "GitHub" })).toHaveAttribute(
+      "href", "https://github.com/grztus/transit_warning");
+    expect(screen.getByRole("link", { name: "GitHub" })).toHaveAttribute(
+      "rel", "noopener noreferrer");
   });
 
   it.each([undefined, null, "", "TEST123"])(
@@ -103,7 +114,7 @@ describe("LIVE screen", () => {
       fireEvent.click(screen.getByRole("button", { name: "HISTORY" }));
       await waitFor(() => expect(container.querySelector(".event-row strong")).toHaveTextContent(
         callsign?.trim() || "ABC123"));
-      if (callsign?.trim()) expect(screen.queryByText("ABC123")).not.toBeInTheDocument();
+      if (callsign?.trim()) expect(screen.getByText("ABC123")).toHaveClass("event-icao");
     });
 
   it("renders ACTIVE live state, bodies, candidates, history and observer diagnostics", async () => {

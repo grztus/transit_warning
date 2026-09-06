@@ -42,6 +42,7 @@ export interface HistoryEventDto {
   event_id?: string;
   body?: string;
   icao?: string;
+  icao_hex?: string;
   callsign?: string | null;
   predicted_event_utc?: string;
   outcome?: string;
@@ -62,6 +63,8 @@ export interface HistoryPageDto {
 
 export interface HistoryQuery {
   date?: string;
+  fromDate?: string;
+  toDate?: string;
   callsign?: string;
   body?: "ALL" | "SUN" | "MOON";
   maxSepDeg?: string;

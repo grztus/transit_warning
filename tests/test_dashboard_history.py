@@ -92,6 +92,21 @@ class DashboardHistoryStoreTests(unittest.TestCase):
         self.assertEqual([], self.store.query(
             callsign="missing", limit=10)["records"])
 
+    def test_date_range_filters_before_pagination_and_export(self):
+        self.store.append(record(1, "2026-08-29", "SUN", "KEEP"))
+        self.store.append(record(2, "2026-08-30", "MOON", "KEEP"))
+        self.store.append(record(3, "2026-08-31", "MOON", "KEEP"))
+        page = self.store.query(
+            from_date="2026-08-30", to_date="2026-08-31",
+            callsign="keep", body="MOON", max_sep_deg=1.5, limit=1)
+        self.assertEqual(["ID0003"], [row["event_id"] for row in page["records"]])
+        self.assertTrue(page["has_more"])
+        exported = list(csv.DictReader(io.StringIO(self.store.export_csv(
+            from_date="2026-08-30", to_date="2026-08-31",
+            callsign="keep", body="MOON", max_sep_deg=1.5
+        ).decode("utf-8-sig"))))
+        self.assertEqual(["ID0003", "ID0002"], [row["event_id"] for row in exported])
+
     def test_pagination_is_bounded_and_reports_load_more(self):
         for index in range(30):
             self.store.append(record(index))
@@ -144,6 +159,7 @@ class DashboardHistoryStoreTests(unittest.TestCase):
         self.assertEqual('A,"B"', rows[0]["callsign"])
         self.assertEqual(list(CSV_FIELDS), list(rows[0]))
         self.assertEqual("34.4", rows[0]["transit_distance_km"])
+        self.assertEqual("A00001", rows[0]["icao_hex"])
         empty = DashboardHistoryStore(Path(self.temp.name) / "empty")
         self.assertEqual(1, len(empty.export_csv().decode(
             "utf-8-sig").splitlines()))
@@ -155,6 +171,15 @@ class DashboardHistoryStoreTests(unittest.TestCase):
         rows = list(csv.DictReader(io.StringIO(self.store.export_csv(
             callsign="keep").decode("utf-8-sig"))))
         self.assertEqual(115, len(rows))
+
+    def test_missing_icao_remains_readable_and_exports_blank_hex(self):
+        value = record(1)
+        value.pop("icao")
+        self.store.append(value)
+        self.assertNotIn("icao_hex", self.store.query(limit=10)["records"][0])
+        rows = list(csv.DictReader(io.StringIO(
+            self.store.export_csv().decode("utf-8-sig"))))
+        self.assertEqual("", rows[0]["icao_hex"])
 
     def test_duplicate_event_is_not_appended_twice(self):
         value = record(1)

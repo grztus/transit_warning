@@ -817,11 +817,13 @@ class DashboardRuntimeTests(unittest.TestCase):
                     runtime.tick(NOW + datetime.timedelta(seconds=index + 1))
                 port = runtime.server.server_address[1]
                 url = ("http://127.0.0.1:{}/api/history?body=SUN&limit=1"
+                       "&from_date=2026-08-31&to_date=2026-08-31"
                        .format(port))
                 with urllib.request.urlopen(url, timeout=2) as response:
                     page = json.loads(response.read().decode("utf-8"))
                 with urllib.request.urlopen(
                         "http://127.0.0.1:{}/api/history/export.csv?body=MOON"
+                        "&from_date=2026-08-31&to_date=2026-08-31"
                         .format(port), timeout=2) as response:
                     exported = response.read().decode("utf-8-sig")
                     disposition = response.headers["Content-Disposition"]
@@ -831,7 +833,21 @@ class DashboardRuntimeTests(unittest.TestCase):
         self.assertTrue(page["has_more"])
         self.assertIn("H00001", exported)
         self.assertNotIn("H00000", exported)
+        self.assertIn("icao_hex", exported.splitlines()[0])
         self.assertIn("attachment", disposition)
+
+    def test_history_http_rejects_reversed_date_range(self):
+        runtime = dashboard.start_dashboard(
+            True, "127.0.0.1", 0, lambda: NOW, history_enabled=False)
+        try:
+            port = runtime.server.server_address[1]
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(
+                    "http://127.0.0.1:{}/api/history?from_date=2026-09-01"
+                    "&to_date=2026-08-01".format(port), timeout=2)
+            self.assertEqual(400, caught.exception.code)
+        finally:
+            runtime.close()
 
     def test_health_is_active_with_empty_queues_and_fresh_heartbeat(self):
         state = dashboard.DashboardState()

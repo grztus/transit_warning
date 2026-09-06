@@ -26,7 +26,8 @@ describe("persistent HISTORY", () => {
     expect(screen.getByText("PASSED")).toBeInTheDocument();
     expect(screen.getByText("SEP 0.41°")).toHaveClass("sep-green");
     expect(screen.getByText("34.4 km")).toBeInTheDocument();
-    expect(historyClient).toHaveBeenCalledWith({ date: undefined, callsign: undefined,
+    expect(historyClient).toHaveBeenCalledWith({ date: undefined, fromDate: undefined,
+      toDate: undefined, callsign: undefined,
       body: "ALL", maxSepDeg: undefined, offset: 0, limit: 25 });
   });
 
@@ -42,6 +43,22 @@ describe("persistent HISTORY", () => {
     fireEvent.change(screen.getByLabelText("Callsign filter"), { target: { value: "  HIS  " } });
     await waitFor(() => expect(historyClient).toHaveBeenLastCalledWith(expect.objectContaining({
       date: "2026-09-03", callsign: "HIS" })));
+  });
+
+  it("applies From and To dates to History requests", async () => {
+    const historyClient = vi.fn().mockResolvedValue(page([]));
+    render(<App client={async () => activeFixture} historyClient={historyClient}
+      eventSourceFactory={quietStream} />);
+    fireEvent.click(await screen.findByRole("button", { name: "HISTORY" }));
+    fireEvent.change(screen.getByLabelText("From date"), {
+      target: { value: "2026-08-01" },
+    });
+    fireEvent.change(screen.getByLabelText("To date"), {
+      target: { value: "2026-08-31" },
+    });
+    await waitFor(() => expect(historyClient).toHaveBeenLastCalledWith(expect.objectContaining({
+      fromDate: "2026-08-01", toDate: "2026-08-31", offset: 0,
+    })));
   });
 
   it("sends body and SEP filters, removes blank SEP, and preserves filters for load more", async () => {
@@ -62,6 +79,7 @@ describe("persistent HISTORY", () => {
     await screen.findByText("HISTORY1");
     fireEvent.click(screen.getByRole("button", { name: "Load more" }));
     await waitFor(() => expect(historyClient).toHaveBeenLastCalledWith({ date: undefined,
+      fromDate: undefined, toDate: undefined,
       callsign: "HISTORY", body: "MOON", maxSepDeg: "3.0", offset: 25, limit: 25 }));
 
     fireEvent.change(screen.getByLabelText("Maximum final separation"), { target: { value: "" } });
@@ -77,6 +95,12 @@ describe("persistent HISTORY", () => {
     fireEvent.change(screen.getByLabelText("UTC date"), {
       target: { value: "2026-09-03" },
     });
+    fireEvent.change(screen.getByLabelText("From date"), {
+      target: { value: "2026-09-01" },
+    });
+    fireEvent.change(screen.getByLabelText("To date"), {
+      target: { value: "2026-09-30" },
+    });
     fireEvent.change(screen.getByLabelText("Callsign filter"), {
       target: { value: "  FIN99  " },
     });
@@ -90,8 +114,23 @@ describe("persistent HISTORY", () => {
     const form = button.closest("form") as HTMLFormElement;
     expect(new URL(form.action).pathname).toBe("/api/history/export.csv");
     expect(Object.fromEntries(new FormData(form).entries())).toEqual({
-      date: "2026-09-03", callsign: "FIN99", body: "MOON", max_sep_deg: "0.8",
+      date: "2026-09-03", from_date: "2026-09-01", to_date: "2026-09-30",
+      callsign: "FIN99", body: "MOON", max_sep_deg: "0.8",
     });
+  });
+
+  it("renders ICAO beside callsign and tolerates missing ICAO", async () => {
+    const historyClient = vi.fn().mockResolvedValue(page([
+      { ...record, icao_hex: "abc123" },
+      { ...record, event_id: "missing-icao", callsign: "NOHEX", icao: undefined },
+    ]));
+    render(<App client={async () => activeFixture} historyClient={historyClient}
+      eventSourceFactory={quietStream} />);
+    fireEvent.click(await screen.findByRole("button", { name: "HISTORY" }));
+    const callsign = await screen.findByText("HISTORY1");
+    expect(callsign.closest(".event-identity")).toHaveTextContent("HISTORY1ABC123");
+    expect(screen.getByText("ABC123")).toHaveClass("event-icao");
+    expect(screen.getByText("NOHEX")).toBeInTheDocument();
   });
 
   it("builds the exact filtered URL, replaces results, and normalizes comma decimals", async () => {

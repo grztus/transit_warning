@@ -160,7 +160,7 @@ describe("synchronized operational controls", () => {
     const mutate = vi.fn().mockResolvedValue(accepted(4));
     render(<App client={async () => manualFixture} settingsMutator={mutate}
       eventSourceFactory={quietStream} />);
-    expect(await screen.findByLabelText("Manual latitude")).toHaveValue("51.25");
+    await waitFor(() => expect(screen.getByLabelText("Manual latitude")).toHaveValue("51.25"));
     fireEvent.change(screen.getByLabelText("Manual latitude"), {
       target: { value: "51,5" },
     });
@@ -277,5 +277,26 @@ describe("synchronized operational controls", () => {
       effective_source: "STATIC", fallback_active: true, gps_health: "UNAVAILABLE" } };
     render(<App client={async () => degraded} eventSourceFactory={quietStream} />);
     expect(await screen.findByText(/MOBILE requested.*effective STATIC/)).toBeInTheDocument();
+  });
+
+  it("suppresses only the redundant healthy MOBILE banner", async () => {
+    const healthy = { ...activeFixture, observer: { ...activeFixture.observer,
+      effective_source: "MOBILE_FRESH" } };
+    const { container } = render(<App client={async () => healthy}
+      eventSourceFactory={quietStream} />);
+    await screen.findByRole("button", { name: "MOBILE" });
+    expect(container.querySelector(".observer-meta"))
+      .toHaveTextContent("Requested MOBILE · Effective MOBILE_FRESH");
+    expect(screen.queryByText(/MOBILE requested.*effective MOBILE_FRESH/))
+      .not.toBeInTheDocument();
+  });
+
+  it("keeps Fallback label and toggle in one responsive DOM group", async () => {
+    const { container } = render(<App client={async () => activeFixture}
+      eventSourceFactory={quietStream} />);
+    await screen.findByRole("button", { name: "Observer fallback" });
+    const group = container.querySelector(".fallback-control-group");
+    expect(group).toHaveTextContent("Fallback");
+    expect(group).toContainElement(screen.getByRole("button", { name: "Observer fallback" }));
   });
 });
