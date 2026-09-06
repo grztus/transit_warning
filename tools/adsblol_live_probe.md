@@ -12,7 +12,8 @@ From the repository root, with the existing Python requirements installed:
 
 ```powershell
 python tools/adsblol_live_probe.py --observer-mode STATIC --lat <authorized-latitude> --lon <authorized-longitude> --radius-nm 100
-python tools/adsblol_live_probe.py --observer-mode MANUAL --lat <authorized-latitude> --lon <authorized-longitude> --radius-nm 100 --json-output <new-private-report.json>
+New-Item -ItemType Directory -Force diagnostics/validation/adsblol/live_probes
+python tools/adsblol_live_probe.py --observer-mode MANUAL --lat <authorized-latitude> --lon <authorized-longitude> --radius-nm 100 --json-output diagnostics/validation/adsblol/live_probes/new-private-report.json
 python tools/adsblol_live_probe.py --icao 48AE25 --retries 0
 python tools/adsblol_live_probe.py --icao 48AE25 --count 3 --poll-seconds 10
 ```

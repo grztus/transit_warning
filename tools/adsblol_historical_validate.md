@@ -5,7 +5,7 @@ project Python dependencies (including matplotlib); Windows also needs IANA
 timezone data (`tzdata`) for local SBS timestamps.
 
 ```powershell
-python tools/adsblol_historical_validate.py --capture "<encounter manifest or capture directory>" --adsblol-trace "<trace_full_48ae25.json>" --output-dir "recordings/validation/new-report" --sbs-timezone Europe/Warsaw --geoid-pgm "<egm96-15.pgm>"
+python tools/adsblol_historical_validate.py --capture "<encounter manifest or capture directory>" --adsblol-trace "<trace_full_48ae25.json>" --sbs-timezone Europe/Warsaw --geoid-pgm "<egm96-15.pgm>"
 ```
 
 For a physical capture containing multiple encounters, add
@@ -15,6 +15,11 @@ Discovery requires exactly one matching candidate capture and never guesses
 between logical encounters. Defaults select the benchmark date/aircraft, not a
 machine-specific recording path. `--prediction latest|trigger` selects a stored
 prediction, default latest. No prediction is reconstructed.
+
+Generated output defaults to
+`diagnostics/validation/adsblol/events/<date>_<icao>/`. Supply
+`--output-dir <new directory>` to override it; explicit output directories may
+be located anywhere.
 
 Outputs in a **new** directory: `report.json` (schema version 1),
 `comparison.csv`, and `trajectories.png`. Existing directories are refused.

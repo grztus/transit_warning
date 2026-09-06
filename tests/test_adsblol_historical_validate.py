@@ -7,9 +7,24 @@ import unittest
 from tools.adsblol_validation import (Series, circular_difference, load_trace,
     timestamp, validate, write_report, resolve_capture, compare, metrics)
 from tools.adsblol_validation_plots import plot_report
+from tools.adsblol_historical_validate import build_parser, output_directory
 
 
 class HistoricalValidationTests(unittest.TestCase):
+    def test_cli_default_output_is_diagnostic_and_recordings_input_is_unchanged(self):
+        args = build_parser().parse_args([
+            '--adsblol-trace', 'trace.json', '--sbs-timezone', 'UTC'])
+        self.assertEqual(args.recordings_dir, Path('recordings'))
+        self.assertEqual(output_directory(args), Path(
+            'diagnostics/validation/adsblol/events/20260904_48ae25'))
+
+    def test_cli_custom_output_overrides_default(self):
+        custom = Path('elsewhere/custom-report')
+        args = build_parser().parse_args([
+            '--adsblol-trace', 'trace.json', '--sbs-timezone', 'UTC',
+            '--output-dir', str(custom)])
+        self.assertEqual(output_directory(args), custom)
+
     def assert_full_reference_rejected(self, directory_input):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
