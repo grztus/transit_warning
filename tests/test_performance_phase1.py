@@ -97,7 +97,7 @@ class MessageReuseTests(unittest.TestCase):
             'altitude_source': 'BAROMETRIC', 'position_source': 'adsb', 'track_source': 'adsb',
             'aircraft_los_resolver': lambda *args: ctx.aircraft_los_resolver(*args),
         }
-        self.assertEqual(set(changes), {f.name for f in fields(ctx)} - {'body', 'callsign', 'body_position_resolver'})
+        self.assertEqual(set(changes), {f.name for f in fields(ctx)} - {'body', 'callsign', 'body_position_resolver', 'fusion_provenance'})
         for name, value in changes.items():
             with self.subTest(name=name), shadow.message_aircraft_cache(), patch.object(
                     shadow, 'evaluate_aircraft_geometry', wraps=shadow.evaluate_aircraft_geometry) as aircraft:
@@ -108,6 +108,17 @@ class MessageReuseTests(unittest.TestCase):
             shadow.evaluate_shadow_geometry(ctx, 10)
             shadow.evaluate_shadow_geometry(ctx, 10 + 1e-12)
             self.assertEqual(aircraft.call_count, 2)
+
+    def test_provenance_does_not_invalidate_numerical_reuse(self):
+        ctx = context()
+        with shadow.message_aircraft_cache(), patch.object(
+                shadow, 'evaluate_aircraft_geometry',
+                wraps=shadow.evaluate_aircraft_geometry) as aircraft:
+            first = shadow.evaluate_shadow_geometry(ctx, 10)
+            second = shadow.evaluate_shadow_geometry(
+                replace(ctx, fusion_provenance={"source": "diagnostic"}), 10)
+        self.assertEqual(first, second)
+        self.assertEqual(1, aircraft.call_count)
 
     def test_scope_cleanup_and_no_cross_message_reuse(self):
         ctx = context()

@@ -19,6 +19,16 @@ BASE_URL = "https://api.adsb.lol"
 MAX_RADIUS_NM = 250
 MIN_POLL_SECONDS = 10  # Diagnostic request pacing, NOT measurement freshness.
 
+
+def clock_diagnostic(received_at, snapshot):
+    """Cross-clock evidence only, never a field-age or acquisition gate."""
+    offset = (received_at - snapshot).total_seconds()
+    magnitude = abs(offset)
+    return {"host_minus_provider_seconds": offset,
+            "severity": "SEVERE" if magnitude > 10 else "WARNING" if magnitude > 2 else "INFO",
+            "interpretation": "CROSS_CLOCK_OFFSET_INCLUDES_TRANSPORT_AND_CACHE_DELAY",
+            "informational_tolerance_seconds": 2, "severe_threshold_seconds": 10}
+
 # raw key: normalized name, unit, datum/semantic reference, kind
 FIELD_SPECS = {
     "hex": ("aircraft_address", None, "AIRCRAFT_ADDRESS", "address"),
@@ -208,7 +218,7 @@ def normalize_response(payload, received_at, received_monotonic):
                 pass
         warnings = []
         clock_delta = (received_at - snapshot).total_seconds()
-        if clock_delta < 0:
+        if clock_delta < -2:
             warnings.append("PROVIDER_SNAPSHOT_IN_FUTURE_OR_CLOCK_SKEW")
         aircraft.append({
             "icao": ac["hex"].upper() if not ac["hex"].startswith("~") else None,
@@ -216,8 +226,9 @@ def normalize_response(payload, received_at, received_monotonic):
             "address_namespace": "NON_ICAO" if ac["hex"].startswith("~") else "ICAO",
             "fields": fields,
             "latest_message_at_utc_estimate": last_message,
-            "apparent_position_age_at_receipt_seconds": (
-                pos["age_seconds"] + clock_delta if pos["age_seconds"] is not None else None),
+            # Retained key for diagnostic-report compatibility, not a cross-clock age.
+            "apparent_position_age_at_receipt_seconds": None,
+            "apparent_position_age_status": "UNAVAILABLE_INDEPENDENT_CLOCK_DOMAINS",
             "clock_uncertainty_seconds": None, "warnings": warnings,
             # Historical/rough positions remain segregated, never promoted.
             "extensions": _safe_json({k: v for k, v in ac.items()
@@ -228,6 +239,7 @@ def normalize_response(payload, received_at, received_monotonic):
         "provider_snapshot_at_utc": utc_text(snapshot),
         "provider_now_ms": payload["now"], "provider_ctime_ms": payload["ctime"],
         "provider_processing_ms": payload["ptime"], "provider_message": payload["msg"],
+        "clock_diagnostic": clock_diagnostic(received_at, snapshot),
     }
 
 
@@ -346,7 +358,8 @@ class AdsbLolProvider:
             report["attempts"].append(record)
             report.update(request_started_utc=record["started_utc"], request_finished_utc=record["finished_utc"],
                           http_status=record["http_status"], response_latency_seconds=record["latency_seconds"],
-                          retry_after_seconds=retry_after)
+                          retry_after_seconds=retry_after, request_started_monotonic=mono_start,
+                          request_finished_monotonic=mono_finished)
             if self.cancel.is_set():
                 report.update(status="CANCELLED", error="Acquisition cancelled.")
                 break

@@ -38,6 +38,7 @@ class RuntimeSettingsStore:
             "observer_requested_mode": True,
             "observer_fallback_enabled": True,
             "observer_manual_position": True,
+            "aircraft_source_requested_mode": True,
         },
     }
 
@@ -50,7 +51,8 @@ class RuntimeSettingsStore:
                  apply_callback=None,
                  validate_callback=None,
                  manual_persistence=None,
-                 observer_manual_position_saved=False):
+                 observer_manual_position_saved=False,
+                 aircraft_source_requested_mode="LOCAL"):
         self._values = {
             "telegram": {
                 "sun_enabled": bool(telegram_sun_enabled),
@@ -67,6 +69,10 @@ class RuntimeSettingsStore:
                     observer_manual_elevation_amsl_m, "manual elevation",
                     -500.0, 10000.0),
                 "manual_position_saved": bool(observer_manual_position_saved),
+            },
+            "aircraft_source": {
+                "requested_mode": self._aircraft_source_mode(
+                    aircraft_source_requested_mode),
             },
         }
         self._revision = 0
@@ -92,6 +98,13 @@ class RuntimeSettingsStore:
         if not math.isfinite(result) or not minimum <= result <= maximum:
             raise SettingsValidationError("Invalid {}".format(label))
         return result
+
+    @staticmethod
+    def _aircraft_source_mode(value):
+        mode = str(value).upper()
+        if mode not in ("LOCAL", "INTERNET", "AUTO"):
+            raise SettingsValidationError("Invalid aircraft source mode")
+        return mode
 
     def subscribe(self, callback):
         if not callable(callback):
@@ -206,7 +219,7 @@ class RuntimeSettingsStore:
     def _validate_changes(cls, changes):
         if not isinstance(changes, dict) or not changes:
             raise SettingsValidationError("Invalid settings changes")
-        if set(changes) - {"telegram", "observer"}:
+        if set(changes) - {"telegram", "observer", "aircraft_source"}:
             raise SettingsValidationError("Unknown settings group")
         result = {}
         for group, values in changes.items():
@@ -219,7 +232,7 @@ class RuntimeSettingsStore:
                 if any(not isinstance(value, bool) for value in values.values()):
                     raise SettingsValidationError("Invalid Telegram setting")
                 result[group] = dict(values)
-            else:
+            elif group == "observer":
                 allowed = {
                     "requested_mode", "fallback_enabled", "manual_lat_deg",
                     "manual_lon_deg", "manual_elevation_amsl_m",
@@ -247,6 +260,13 @@ class RuntimeSettingsStore:
                         observer[key] = cls._finite_number(
                             values[key], label, minimum, maximum)
                 result[group] = observer
+            else:
+                if set(values) != {"requested_mode"}:
+                    raise SettingsValidationError(
+                        "Unknown aircraft source setting")
+                result[group] = {"requested_mode":
+                                 cls._aircraft_source_mode(
+                                     values["requested_mode"])}
         return result
 
 

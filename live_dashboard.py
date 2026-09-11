@@ -61,6 +61,8 @@ class DashboardCandidate:
     transit_distance_km: float | None = None
     encounter_id: str | None = None
     prediction_geometry: str = "LEGACY"
+    aircraft_source_mode: str = "LOCAL"
+    fusion_provenance: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -211,6 +213,7 @@ class DashboardState:
         self._generated_at_utc = None
         self._body_positions = {"SUN": None, "MOON": None}
         self._lock = threading.RLock()
+        self._aircraft_source = None
         if self.history_store is not None:
             try:
                 self._history = self.history_store.query(
@@ -235,7 +238,14 @@ class DashboardState:
         with self._lock:
             self._body_positions = {"SUN": None, "MOON": None}
 
-    def publish(self, candidate):
+    def set_aircraft_source(self, diagnostic):
+        """Source health only; no query centre or observer coordinates."""
+        with self._lock:
+            self._aircraft_source = deepcopy(diagnostic)
+
+    def publish(self, candidate, *, source_owner=None):
+        if candidate.fusion_provenance is not None:
+            candidate = replace(candidate, fusion_provenance=deepcopy(candidate.fusion_provenance))
         body = candidate.body.upper()
         key = candidate.icao.upper()
         if body not in self._live:
@@ -255,6 +265,7 @@ class DashboardState:
                 else candidate.separation_deg)
             self._live[body][key] = {
                 "candidate": candidate,
+                "source_owner": source_owner,
                 "first_separation_deg": first_separation,
                 "minimum_separation_deg": minimum_separation,
                 "first_seen_utc": (
@@ -314,6 +325,22 @@ class DashboardState:
                 self._to_history_locked(item, now_utc, "WITHDRAWN")
         return True
 
+    def withdraw_source(self, icao, body, owner, now_utc):
+        """Withdraw only the candidate still owned by this provider bridge."""
+        with self._lock:
+            item = self._live.get(body.upper(), {}).get(icao.upper())
+            if item is None or item.get("source_owner") is not owner:
+                return False
+            return self.withdraw(icao, body, now_utc)
+
+    def invalidate_source(self, owner):
+        """Observer/source invalidation has no history output, as before."""
+        with self._lock:
+            for candidates in self._live.values():
+                for icao, item in list(candidates.items()):
+                    if item.get("source_owner") is owner:
+                        del candidates[icao]
+
     def withdraw_aircraft(self, icao, now_utc):
         changed = False
         for body in ("SUN", "MOON"):
@@ -343,7 +370,7 @@ class DashboardState:
             utc_text(candidate.predicted_event_utc))
         if any(event["event_id"] == event_id for event in self._history):
             return
-        record = self._candidate_dict(candidate)
+        record = self._candidate_dict(candidate, include_forensic=True)
         record.update({
             "event_id": event_id,
             "final_separation_deg": candidate.separation_deg,
@@ -449,6 +476,8 @@ class DashboardState:
                     "sep_visible_max_deg": self.sep_visible_max_deg,
                 },
             }
+            if self._aircraft_source is not None:
+                result["aircraft_source"] = deepcopy(self._aircraft_source)
         return result
 
     def _history_records_with_classes(self, records):
@@ -509,8 +538,11 @@ class DashboardState:
             result.append(candidate)
         return result
 
-    def _candidate_dict(self, candidate, include_live_fields=False):
+    def _candidate_dict(self, candidate, include_live_fields=False,
+                        include_forensic=False):
         result = asdict(candidate)
+        if not include_forensic:
+            result.pop("fusion_provenance", None)
         result["predicted_event_utc"] = utc_text(
             candidate.predicted_event_utc)
         result["last_prediction_update_utc"] = utc_text(
@@ -536,9 +568,26 @@ class DisabledDashboard:
     def __init__(self, telegram_controls=None, settings_store=None):
         self.telegram_controls = telegram_controls or TelegramBodyControls()
         self.settings_store = settings_store
+        self.state = self
+        self.aircraft_source = None
+
+    def set_aircraft_source(self, status):
+        self.aircraft_source = dict(status)
+
+    def _publish_application_state(self):
+        return None
 
     def publish(self, candidate):
         return False
+
+    def publish_authoritative(self, candidate, prediction, *, source_owner=None):
+        return False
+
+    def withdraw_source(self, icao, body, owner, now_utc):
+        return False
+
+    def invalidate_source(self, owner):
+        return None
 
     def update_callsign(self, icao, callsign):
         return False
@@ -603,6 +652,22 @@ class DashboardRuntime:
         result = self.state.publish(candidate)
         self._publish_application_state()
         return result
+
+    def publish_authoritative(self, candidate, prediction, *, source_owner=None):
+        """Publish provenance and private source ownership, without geometry storage."""
+        result = self.state.publish(replace(candidate, fusion_provenance=deepcopy(
+            getattr(prediction, "fusion_provenance", None))), source_owner=source_owner)
+        self._publish_application_state()
+        return result
+
+    def withdraw_source(self, icao, body, owner, now_utc):
+        result = self.state.withdraw_source(icao, body, owner, now_utc)
+        self._publish_application_state()
+        return result
+
+    def invalidate_source(self, owner):
+        self.state.invalidate_source(owner)
+        self._publish_application_state()
 
     def update_callsign(self, icao, callsign):
         changed = self.state.update_callsign(icao, callsign)
@@ -1007,6 +1072,8 @@ def start_dashboard(enabled, host, port, now_utc, error_handler=None,
                     telegram_sun_enabled=True,
                     telegram_moon_enabled=True,
                     telegram_body_change=None,
+                    aircraft_source_mode="LOCAL",
+                    aircraft_source_change=None,
                     frontend_dist_dir=None,
                     manual_settings_path="recordings/dashboard_settings.json"):
     if frontend_dist_dir is None:
@@ -1048,6 +1115,10 @@ def start_dashboard(enabled, host, port, now_utc, error_handler=None,
             if observer["fallback_enabled"] != old_observer["fallback_enabled"]:
                 observer_position_provider.set_fallback_enabled(
                     observer["fallback_enabled"], now_utc())
+        source = values["aircraft_source"]["requested_mode"]
+        if (source != previous["aircraft_source"]["requested_mode"]
+                and aircraft_source_change is not None):
+            aircraft_source_change(source)
 
     errors = error_handler or (lambda message: None)
     manual_persistence = (
@@ -1081,7 +1152,8 @@ def start_dashboard(enabled, host, port, now_utc, error_handler=None,
         initial_manual.elevation_m,
         apply_callback=apply_settings, validate_callback=validate_settings,
         manual_persistence=manual_persistence,
-        observer_manual_position_saved=saved_manual is not None)
+        observer_manual_position_saved=saved_manual is not None,
+        aircraft_source_requested_mode=aircraft_source_mode)
     if not enabled:
         return DisabledDashboard(telegram_controls, settings_store)
     history_store = (

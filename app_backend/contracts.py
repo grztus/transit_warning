@@ -15,12 +15,12 @@ _CANDIDATE_FIELDS = (
     "body_azimuth_deg", "body_elevation_deg", "aircraft_elevation_deg",
     "distance_km", "last_prediction_update_utc", "telegram_range",
     "transit_distance_km", "encounter_id", "prediction_geometry", "state",
-    "separation_class", "is_new_late_candidate",
+    "separation_class", "is_new_late_candidate", "aircraft_source_mode",
 )
 _HISTORY_FIELDS = _CANDIDATE_FIELDS + (
     "event_id", "final_separation_deg", "first_separation_deg",
     "minimum_separation_deg", "first_seen_utc", "last_seen_utc",
-    "history_recorded_at_utc", "outcome",
+    "history_recorded_at_utc", "outcome", "fusion_provenance",
 )
 _PRESENTATION_FIELDS = (
     "sep_green_max_deg", "sep_yellow_max_deg", "sep_visible_max_deg",
@@ -81,6 +81,13 @@ def serialize_live_state(snapshot):
         "presentation": _select(
             snapshot.get("presentation"), _PRESENTATION_FIELDS),
     }
+    if isinstance(snapshot.get("aircraft_source"), dict):
+        result["aircraft_source"] = _select(snapshot["aircraft_source"], (
+            "mode", "requested_mode", "effective_mode", "provider",
+            "status", "trust_policy", "aircraft_count",
+            "max_position_age_seconds", "poll_seconds", "prediction_failures",
+            "enrichment", "internet_aircraft_count", "fused_aircraft_count",
+            "snapshot_lease_seconds"))
     assert_public_payload(result)
     return result
 
@@ -113,5 +120,7 @@ def serialize_bootstrap(application_snapshot, settings, observer_status, now_utc
         "settings": settings["values"],
         "capabilities": settings["capabilities"],
     }
+    if "aircraft_source" in live:
+        result["aircraft_source"] = live["aircraft_source"]
     assert_public_payload(result)
     return result

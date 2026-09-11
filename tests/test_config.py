@@ -78,6 +78,7 @@ class InstallationConfigTests(unittest.TestCase):
         self.assertEqual(result.mlat_beast_host, result.mlat_host)
         self.assertEqual(result.mlat_beast_port, 30105)
         self.assertEqual("STATIC", result.observer_mode)
+        self.assertEqual("LOCAL", result.aircraft_source_mode)
         self.assertEqual(30.0, result.mobile_gps_stale_warning_seconds)
         self.assertEqual(300.0, result.mobile_gps_critical_warning_seconds)
         self.assertFalse(result.mobile_gps_static_fallback_enabled)
@@ -94,6 +95,12 @@ class InstallationConfigTests(unittest.TestCase):
             (result.dashboard_sep_green_max_deg,
              result.dashboard_sep_yellow_max_deg,
              result.dashboard_sep_visible_max_deg))
+
+    def test_aircraft_source_mode_is_canonical(self):
+        self.assertEqual("INTERNET", self.load({
+            **REQUIRED, "AIRCRAFT_SOURCE_MODE": "internet"}).aircraft_source_mode)
+        with self.assertRaisesRegex(ConfigurationError, "AIRCRAFT_SOURCE_MODE"):
+            self.load({**REQUIRED, "AIRCRAFT_SOURCE_MODE": "hybrid"})
 
     def test_manual_observer_mode_is_accepted_without_mobile_gps(self):
         result = self.load({**REQUIRED, "OBSERVER_MODE": "MANUAL"})

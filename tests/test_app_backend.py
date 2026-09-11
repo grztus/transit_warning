@@ -255,6 +255,17 @@ class RuntimeSettingsStoreTests(unittest.TestCase):
         self.assertTrue(result["values"]["observer"]["fallback_enabled"])
         self.assertEqual(1, len(self.applied))
 
+    def test_aircraft_source_default_validation_and_runtime_update(self):
+        self.assertEqual("LOCAL", self.store.snapshot()["values"]
+                         ["aircraft_source"]["requested_mode"])
+        result = self.store.update(0, "source", {
+            "aircraft_source": {"requested_mode": "internet"}})
+        self.assertEqual("INTERNET", result["values"]
+                         ["aircraft_source"]["requested_mode"])
+        with self.assertRaises(SettingsValidationError):
+            self.store.update(1, "bad-source", {
+                "aircraft_source": {"requested_mode": "FAILOVER"}})
+
     def test_manual_observer_values_are_validated_and_persisted(self):
         result = self.store.update(0, "manual", {"observer": {
             "requested_mode": "MANUAL", "manual_lat_deg": 51.25,

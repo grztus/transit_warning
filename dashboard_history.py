@@ -20,8 +20,62 @@ CSV_FIELDS = (
     "final_separation_deg", "first_seen_utc", "last_seen_utc",
     "history_recorded_at_utc", "body_azimuth_deg", "body_elevation_deg",
     "aircraft_elevation_deg", "distance_km", "transit_distance_km",
-    "telegram_range", "prediction_geometry",
+    "telegram_range", "prediction_geometry", "aircraft_source_mode",
+    "position_source", "position_age_seconds", "position_freshness",
+    "position_selection_reason",
+    "track_value", "track_source", "track_age_seconds", "track_freshness",
+    "track_selection_reason",
+    "groundspeed_value", "groundspeed_source", "groundspeed_age_seconds",
+    "groundspeed_freshness", "groundspeed_selection_reason",
+    "altitude_value", "altitude_source", "altitude_age_seconds",
+    "altitude_freshness", "altitude_datum", "altitude_selection_reason",
+    "fusion_provenance_json",
 )
+
+
+def _fusion_field(record, name):
+    fusion = record.get("fusion_provenance")
+    if not isinstance(fusion, dict):
+        return {}, None
+    field = fusion.get("fields", {}).get(name)
+    if not isinstance(field, dict):
+        return {}, None
+    selected = field.get("selected")
+    return (selected if isinstance(selected, dict) else {},
+            field.get("selection_reason"))
+
+
+def _forensic_csv_values(record):
+    result = {}
+    for prefix, field_name in (
+            ("position", "position"), ("track", "ground_track"),
+            ("groundspeed", "groundspeed")):
+        selected, reason = _fusion_field(record, field_name)
+        result[prefix + "_source"] = (selected.get("source_id")
+                                              or selected.get("source"))
+        result[prefix + "_age_seconds"] = selected.get("age_seconds")
+        result[prefix + "_freshness"] = selected.get("freshness_state")
+        result[prefix + "_selection_reason"] = reason
+        if prefix != "position":
+            result[prefix + "_value"] = selected.get("value")
+    altitude, altitude_reason = {}, None
+    for field_name in ("predictor_altitude", "geometric_altitude",
+                       "production_altitude", "barometric_altitude"):
+        altitude, altitude_reason = _fusion_field(record, field_name)
+        if altitude:
+            break
+    result["altitude_source"] = (altitude.get("source_id")
+                                 or altitude.get("source"))
+    result["altitude_age_seconds"] = altitude.get("age_seconds")
+    result["altitude_freshness"] = altitude.get("freshness_state")
+    result["altitude_selection_reason"] = altitude_reason
+    result["altitude_value"] = altitude.get("value")
+    result["altitude_datum"] = altitude.get("datum_or_reference")
+    fusion = record.get("fusion_provenance")
+    result["fusion_provenance_json"] = (
+        json.dumps(fusion, separators=(",", ":"), sort_keys=True,
+                   allow_nan=False) if isinstance(fusion, dict) else None)
+    return result
 
 
 def records_to_csv(records):
@@ -31,6 +85,7 @@ def records_to_csv(records):
     writer.writeheader()
     for record in records:
         row = {name: record.get(name) for name in CSV_FIELDS}
+        row.update(_forensic_csv_values(record))
         if not row["icao_hex"] and record.get("icao"):
             row["icao_hex"] = str(record["icao"]).upper()
         writer.writerow(row)

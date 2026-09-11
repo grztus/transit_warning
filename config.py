@@ -76,6 +76,7 @@ class InstallationConfig:
     shadow_2d_safety_margin_deg: float = 0.052
     shadow_2d_refinement_target_deg: float = 7.0
     authoritative_prediction_geometry: str = "LEGACY"
+    aircraft_source_mode: str = "LOCAL"
 
 
 def _required(values, name, errors):
@@ -304,6 +305,10 @@ def load_installation_config(
     observer_mode = str(values.get("OBSERVER_MODE", "STATIC")).strip().upper()
     if observer_mode not in ("STATIC", "MOBILE", "MANUAL"):
         errors.append("OBSERVER_MODE must be STATIC, MOBILE, or MANUAL")
+    aircraft_source_mode = str(values.get(
+        "AIRCRAFT_SOURCE_MODE", "LOCAL")).strip().upper()
+    if aircraft_source_mode not in ("LOCAL", "INTERNET", "AUTO"):
+        errors.append("AIRCRAFT_SOURCE_MODE must be LOCAL, INTERNET, or AUTO")
     mobile_gps_stale_warning_seconds = _optional_finite_float(
         values, "MOBILE_GPS_STALE_WARNING_SECONDS", 30.0, errors,
         minimum=0.0, maximum=86400.0)
@@ -440,4 +445,5 @@ def load_installation_config(
         shadow_2d_safety_margin_deg=shadow_2d_safety_margin_deg,
         shadow_2d_refinement_target_deg=shadow_2d_refinement_target_deg,
         authoritative_prediction_geometry=authoritative_prediction_geometry,
+        aircraft_source_mode=aircraft_source_mode,
     )

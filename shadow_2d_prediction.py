@@ -121,6 +121,7 @@ class ShadowEncounterContext:
     track_source: str | None
     aircraft_los_resolver: object
     body_position_resolver: object
+    fusion_provenance: object | None = None
 
     def __post_init__(self):
         if self.prediction_base_utc.tzinfo is None:

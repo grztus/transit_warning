@@ -48,6 +48,28 @@ def provider(session=None, **kwargs):
 
 
 class NormalizationTests(unittest.TestCase):
+    def test_metadata_from_real_lisbon_sample_and_small_offset_is_informational(self):
+        # Redacted timing-only values from the user's lisbon_timing_probe.json.
+        payload = fixture()
+        payload.update(now=1788717673500, ctime=1788717673500)
+        finish = dt.datetime.fromisoformat("2026-09-06T18:01:13.217810+00:00")
+        normalized = normalize_response(payload, finish, 100)
+        diagnostic = normalized["clock_diagnostic"]
+        self.assertAlmostEqual(diagnostic["host_minus_provider_seconds"], -.282190)
+        self.assertEqual(diagnostic["severity"], "INFO")
+        self.assertEqual(normalized["provider_snapshot_at_utc"], "2026-09-06T18:01:13.500000Z")
+        self.assertEqual(normalized["provider_ctime_ms"], normalized["provider_now_ms"])
+        self.assertEqual(normalized["aircraft"][0]["warnings"], [])
+
+    def test_clock_diagnostic_severity_boundaries_are_not_freshness_thresholds(self):
+        for offset, severity in ((-20, "SEVERE"), (-3, "WARNING"), (-2, "INFO"),
+                                 (-.93, "INFO"), (0, "INFO"), (2, "INFO"),
+                                 (3, "WARNING"), (10, "WARNING"), (11, "SEVERE")):
+            data = self.normalize(received=NOW + dt.timedelta(seconds=offset))
+            self.assertEqual(data["clock_diagnostic"]["severity"], severity)
+            self.assertEqual(data["aircraft"][0]["fields"]["position"]["age_seconds"], 2.5)
+            self.assertIsNone(data["aircraft"][0]["fields"]["ground_track"]["age_seconds"])
+
     def normalize(self, payload=None, received=None):
         return normalize_response(payload if payload is not None else fixture(),
                                   received or NOW + dt.timedelta(seconds=1), 123)
@@ -88,7 +110,7 @@ class NormalizationTests(unittest.TestCase):
                 self.assertIsNone(field["age_seconds"], name)
                 self.assertIsNone(field["observed_at_utc"], name)
         self.assertEqual(ac["fields"]["aircraft_message_age"]["value"], .2)
-        self.assertEqual(ac["apparent_position_age_at_receipt_seconds"], 3.5)
+        self.assertIsNone(ac["apparent_position_age_at_receipt_seconds"])
         for name in ("ground_track", "barometric_altitude", "geometric_altitude", "groundspeed"):
             self.assertEqual(ac["fields"][name]["freshness_state"], "UNKNOWN")
 
@@ -144,7 +166,7 @@ class NormalizationTests(unittest.TestCase):
         self.assertEqual(a["observed_at_utc"], b["observed_at_utc"])
         self.assertNotEqual(a["received_at_utc"], b["received_at_utc"])
         skew = self.normalize(received=NOW - dt.timedelta(seconds=10))["aircraft"][0]
-        self.assertLess(skew["apparent_position_age_at_receipt_seconds"], 0)
+        self.assertIsNone(skew["apparent_position_age_at_receipt_seconds"])
         self.assertIn("PROVIDER_SNAPSHOT_IN_FUTURE_OR_CLOCK_SKEW", skew["warnings"])
 
     def test_malformed_envelopes_and_seconds_not_milliseconds(self):

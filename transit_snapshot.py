@@ -374,6 +374,7 @@ class TransitSnapshotManager:
                         for sample in self._buffers.get(event["icao"], ())
                         if window_start <= sample["timestamp_utc"] <= window_end]
         observations.sort(key=lambda item: item["timestamp_utc"])
+        final_prediction = deepcopy(event["prediction_updates"][-1])
         return {
             "schema_version": SCHEMA_VERSION,
             "event_id": event["event_id"],
@@ -400,6 +401,17 @@ class TransitSnapshotManager:
             },
             "trigger_prediction": deepcopy(event["trigger_prediction"]),
             "prediction_updates": deepcopy(event["prediction_updates"]),
+            "final_prediction": final_prediction,
+            "final_prediction_binding": {
+                "event_id": event["event_id"],
+                "encounter_id": final_prediction.get("encounter_id"),
+                "body": event["body"],
+                "prediction_revision_index": (
+                    len(event["prediction_updates"]) - 1),
+                "predicted_transit_utc": final_prediction.get(
+                    "predicted_transit_utc"),
+                "recorded_at_utc": final_prediction.get("recorded_at_utc"),
+            },
             "observations": [self._serialize_observation(item)
                              for item in observations],
         }

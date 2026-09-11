@@ -1,6 +1,7 @@
 """Model-neutral authoritative transit prediction lifecycle."""
 
 from dataclasses import dataclass
+from copy import deepcopy
 import datetime
 from enum import Enum
 import threading
@@ -49,6 +50,7 @@ class AuthoritativeTransitPrediction:
     boundary_status: str
     lifecycle_state: str
     updated_at_utc: datetime.datetime
+    fusion_provenance: object | None = None
 
 
 @dataclass(frozen=True)
@@ -232,4 +234,6 @@ class AuthoritativeTransitLifecycle:
             boundary_status=str(exact.boundary_status),
             lifecycle_state=AuthoritativeLifecycleState.ACTIVE.value,
             updated_at_utc=now_utc,
+            fusion_provenance=deepcopy(
+                getattr(context, "fusion_provenance", None)),
         )

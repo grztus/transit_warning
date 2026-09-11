@@ -60,6 +60,7 @@ USA.
 # Importowanie niezbędnych bibliotek / Importing necessary libraries
 from __future__ import print_function
 import argparse
+from copy import deepcopy
 import io
 import os
 from pathlib import Path
@@ -145,6 +146,11 @@ from live_dashboard import (
     DisabledDashboard,
     start_dashboard,
 )
+from tools.adsblol_standalone_runtime import SnapshotPoller, StandaloneBridge, scope as source_scope
+from auto_fusion import (
+    FieldCandidate, ProviderSnapshotCache, fuse_aircraft, fuse_local_aircraft,
+    predictor_view, serialize_fused_state, serialize_predictor_provenance,
+)
 from transit_prediction_model import (
     AngularPosition,
     INTENT_FRESHNESS_SECONDS,
@@ -166,6 +172,7 @@ from transit_prediction_model import (
     VerticalPredictionResult,
     VerticalStateAtTime,
     angular_position_from_observer,
+    horizontal_position_from_t0,
     legacy_flat_angular_position_from_observer,
     clamp_vertical_prediction_to_intent_state as shared_clamp_vertical,
     current_vertical_prediction_policy,
@@ -241,6 +248,10 @@ environment_replay = None
 raw_diagnostic_replay = None
 telegram_notifier = None
 dashboard_runtime = DisabledDashboard()
+aircraft_source_mode = "LOCAL"
+aircraft_source_lock = threading.RLock()
+internet_source_poller = None
+internet_source_bridge = None
 environment_recorder = None
 daily_environment_recorder = None
 adsb_timestamp_validator = None
@@ -309,6 +320,9 @@ mlat_beast_tracks = {}
 mlat_coarse_tracks = {}
 aircraft_intent_states = {}
 aircraft_motion_freshness_status = {}
+adsblol_auto_cache = ProviderSnapshotCache()
+fused_aircraft_states = {}
+auto_source_scope = None
 sun_prediction_last_valid = {}
 moon_prediction_last_valid = {}
 sun_predicted_transit_utc = {}
@@ -1067,7 +1081,10 @@ def _motion_state_for_update(icao):
     return aircraft_motion_states.setdefault(icao, AircraftMotionState())
 
 
+@synchronized_plane_dict
 def _update_motion_parameter(icao, name, value, updated_at_utc, port):
+    if not local_aircraft_source_enabled():
+        return
     source = _motion_source_for_port(port)
     if source is None:
         return
@@ -1081,8 +1098,11 @@ def _update_motion_parameter(icao, name, value, updated_at_utc, port):
         _reconcile_mlat_beast_track(icao, parameter, updated_at_utc)
 
 
+@synchronized_plane_dict
 def _update_motion_position(
         icao, latitude, longitude, updated_at_utc, port):
+    if not local_aircraft_source_enabled():
+        return
     source = _motion_source_for_port(port)
     if source is None:
         return
@@ -1093,6 +1113,8 @@ def _update_motion_position(
 def update_raw_adsb_track(decoded, updated_at_utc):
     """Store a separate high-precision RAW track without replacing SBS/MLAT."""
     with plane_dict_lock:
+        if not local_aircraft_source_enabled():
+            return
         coarse = aircraft_motion_states.get(decoded.icao)
         coarse = coarse.track if coarse is not None else None
         coarse_age = (
@@ -1116,6 +1138,8 @@ def _adsb_datum_for_version(adsb_version):
 def update_raw_adsb_version(decoded, updated_at_utc):
     """Store diagnostic ADS-B version without affecting motion state."""
     with plane_dict_lock:
+        if not local_aircraft_source_enabled():
+            return
         raw_adsb_versions[decoded.icao] = RawAdsbVersionState(
             adsb_version=int(decoded.adsb_version),
             updated_at_utc=updated_at_utc,
@@ -1126,6 +1150,8 @@ def update_raw_adsb_version(decoded, updated_at_utc):
 def update_gnss_altitude_diagnostic(decoded, updated_at_utc):
     """Store diagnostic TC19 altitude difference; never select altitude."""
     with plane_dict_lock:
+        if not local_aircraft_source_enabled():
+            return
         gnss_altitude_states[decoded.icao] = GnssAltitudeDiagnosticState(
             gnss_minus_baro_ft=decoded.gnss_minus_baro_ft,
             raw_encoded_value=int(decoded.gnss_minus_baro_raw),
@@ -1414,6 +1440,8 @@ def _held_precision_is_valid(state, precise_value, precise_updated_at,
 def update_mlat_beast_track(decoded, updated_at_utc):
     """Store a pending precision track and confirm it against fresh 30106."""
     with plane_dict_lock:
+        if not local_aircraft_source_enabled():
+            return
         state = MlatBeastTrackState(
             precise_value_deg=decoded.track_deg,
             received_at_utc=updated_at_utc,
@@ -2032,6 +2060,8 @@ def predict_transit_altitude(current_altitude_m, motion_state, now_utc,
 def update_aircraft_intent(intent, received_at_utc):
     """Store one valid TC29 intent sample independently from motion state."""
     with plane_dict_lock:
+        if not local_aircraft_source_enabled():
+            return
         state = aircraft_intent_states.setdefault(
             intent.icao, AircraftIntentState())
         selected = IntentParameter(
@@ -2198,6 +2228,12 @@ def build_shadow_2d_context(
         altitude_now.altitude_m
         - vertical_now.prediction.predicted_altitude_m)
 
+    fusion = None
+    if aircraft_source_mode in ("LOCAL", "AUTO"):
+        fusion = fuse_local_aircraft(
+            str(icao), local_fusion_fields(str(icao), prediction_base_utc),
+            evaluated_at_utc=_snapshot_utc_text(prediction_base_utc),
+            evaluated_at_monotonic=time.monotonic())
     return ShadowEncounterContext(
         icao=str(icao), callsign=str(callsign or ""), body=body.upper(),
         prediction_base_utc=prediction_base_utc,
@@ -2217,6 +2253,7 @@ def build_shadow_2d_context(
         track_source=track_parameter.source,
         aircraft_los_resolver=_shadow_aircraft_los,
         body_position_resolver=body_position_at_utc,
+        fusion_provenance=serialize_fused_state(fusion),
     )
 
 
@@ -2624,6 +2661,7 @@ def publish_dashboard_prediction(icao, callsign, celestial_body,
             last_prediction_update_utc=now_utc,
             telegram_range=(separation < telegram_alert_separation_deg),
             transit_distance_km=transit_distance_km,
+            aircraft_source_mode=aircraft_source_mode,
         ))
     except Exception:
         return False
@@ -2654,6 +2692,8 @@ def publish_authoritative_dashboard_prediction(prediction, now_utc,
             transit_distance_km=prediction.slant_range_km,
             encounter_id=prediction.encounter_id,
             prediction_geometry=prediction.model,
+            aircraft_source_mode=aircraft_source_mode,
+            fusion_provenance=deepcopy(getattr(prediction, "fusion_provenance", None)),
         ))
     except Exception:
         return False
@@ -2706,7 +2746,7 @@ def _authoritative_frozen_prediction_state(prediction, context,
         motion.vertical_rate_history[-frozen.policy.stability_sample_count:]
         if motion is not None else ())
     details = dict(frozen.intent_details)
-    return {
+    result = {
         "horizontal": {
             "origin_lat": context.latitude_deg,
             "origin_lon": context.longitude_deg,
@@ -2764,6 +2804,10 @@ def _authoritative_frozen_prediction_state(prediction, context,
             "angular_diameter_arcsec": prediction.body_radius_deg * 7200.0,
         },
     }
+    if prediction.fusion_provenance is not None:
+        result["fusion_provenance"] = deepcopy(
+            prediction.fusion_provenance)
+    return result
 
 
 def capture_authoritative_transit_prediction(prediction, context, now_utc):
@@ -2974,6 +3018,329 @@ def invalidate_observer_dependent_state(observer_context=None):
             transit_snapshot_manager.invalidate_active_predictions()
     except Exception:
         pass
+
+
+def local_aircraft_source_enabled():
+    """LOCAL ingest remains enabled while AUTO enriches it asynchronously."""
+    return aircraft_source_mode in ("LOCAL", "AUTO")
+
+
+def _source_status(mode, status="HEALTHY"):
+    effective = "LOCAL+ADSBLOL" if mode == "AUTO" else mode
+    result = {
+        "mode": mode,
+        "requested_mode": mode,
+        "effective_mode": effective,
+        "provider": ("LOCAL_FEEDS+ADSBLOL" if mode == "AUTO" else
+                     "LOCAL_FEEDS" if effective == "LOCAL" else "ADSBLOL"),
+        "status": status,
+        "trust_policy": ("PER_FIELD_LOCAL_PRIORITY_UNKNOWN_REMOTE_AGES"
+                         if mode == "AUTO" else "LOCAL_EXISTING_PRIORITY"
+                         if effective == "LOCAL" else
+                         "DEGRADED_UNKNOWN_FIELD_AGES_FROZEN_ALTITUDE"),
+        "aircraft_count": len(plane_dict) if mode != "INTERNET" else 0,
+    }
+    return result
+
+
+@synchronized_plane_dict
+def _clear_aircraft_source_state():
+    """End the old source generation before another provider can publish."""
+    global auto_source_scope
+    auto_source_scope = None
+    invalidate_observer_dependent_state()
+    plane_dict.clear()
+    altitude_sources.clear()
+    aircraft_motion_states.clear()
+    raw_adsb_tracks.clear()
+    raw_adsb_versions.clear()
+    gnss_altitude_states.clear()
+    mlat_beast_tracks.clear()
+    mlat_coarse_tracks.clear()
+    aircraft_intent_states.clear()
+    aircraft_motion_freshness_status.clear()
+    adsblol_auto_cache.clear()
+    fused_aircraft_states.clear()
+
+
+def set_aircraft_source_mode(mode):
+    """Atomically route production ingest and own the ADSB.lol worker."""
+    global aircraft_source_mode, internet_source_poller, internet_source_bridge
+    requested = str(mode).upper()
+    if requested not in ("LOCAL", "INTERNET", "AUTO"):
+        raise ValueError("Invalid aircraft source mode")
+    old_poller = None
+    try:
+        with aircraft_source_lock:
+            old_poller = internet_source_poller
+            if old_poller is not None:
+                old_poller.stop.set()
+            internet_source_poller = None
+            internet_source_bridge = None
+            with plane_dict_lock:
+                aircraft_source_mode = requested
+                _clear_aircraft_source_state()
+            if requested in ("INTERNET", "AUTO"):
+                if requested == "INTERNET" and aircraft_los_geoid_provider is None:
+                    dashboard_runtime.state.set_aircraft_source(
+                        _source_status(requested, "ERROR"))
+                    dashboard_runtime._publish_application_state()
+                    return
+                internet_source_poller = SnapshotPoller(observer_position_provider)
+                if requested == "INTERNET":
+                    internet_source_bridge = StandaloneBridge(
+                        internet_source_poller, dashboard_runtime,
+                        aircraft_los_geoid_provider, source="ADSBLOL",
+                        source_mode="INTERNET")
+                else:
+                    if aircraft_los_geoid_provider is not None:
+                        internet_source_bridge = AutoFusionBridge(
+                            internet_source_poller, dashboard_runtime,
+                            aircraft_los_geoid_provider)
+                internet_source_poller.start()
+                if requested == "INTERNET" and internet_source_bridge is not None:
+                    internet_source_bridge.step()
+                else:
+                    dashboard_runtime.state.set_aircraft_source(
+                        _source_status("AUTO", "WAITING"))
+                    dashboard_runtime._publish_application_state()
+            else:
+                dashboard_runtime.state.set_aircraft_source(
+                    _source_status(requested))
+                dashboard_runtime._publish_application_state()
+
+    finally:
+        if old_poller is not None:
+            old_poller.close()
+
+
+def step_internet_aircraft_source():
+    with aircraft_source_lock:
+        if internet_source_bridge is not None:
+            internet_source_bridge.step()
+
+
+def _local_fusion_candidate(name, value, source, updated_at, now_utc,
+                            unit=None, datum=None, derivation="DIRECT"):
+    if value is None or updated_at is None:
+        return None
+    source_text = str(source)
+    transport = (
+        "RAW_ADSB" if source_text.startswith("RAW_ADSB") else
+        "MLAT_BEAST" if source_text.startswith("MLAT_BEAST") else
+        "BEAST" if "TC29" in source_text else
+        "SBS_MLAT" if source_text.lower() == "mlat" else "SBS_ADSB")
+    return FieldCandidate(
+        field_name=name, value=value, source=source,
+        source_family="LOCAL", unit=unit, datum_or_reference=datum,
+        freshness_state="KNOWN",
+        age_seconds=max(0.0, (now_utc - updated_at).total_seconds()),
+        observed_at_utc=_snapshot_utc_text(updated_at),
+        observed_at_basis="LOCAL_FIELD_TIMESTAMP",
+        provenance={"provider": "LOCAL", "transport": transport,
+                    "derivation": derivation})
+
+
+def local_fusion_fields(icao, now_utc):
+    """Return independent local candidates without changing production state."""
+    state = aircraft_motion_states.get(icao)
+    result = {}
+    if state is not None:
+        if state.position is not None:
+            result["position"] = _local_fusion_candidate(
+                "position", {"lat": state.position.latitude,
+                             "lon": state.position.longitude},
+                state.position.source, state.position.updated_at_utc, now_utc,
+                "deg", "WGS84_LAT_LON")
+        for name, attr, unit, datum in (
+                ("groundspeed", "groundspeed", "km/h", "GROUND_SPEED"),
+                ("barometric_vertical_rate", "vertical_rate", "ft/min", "PRESSURE_RATE")):
+            parameter = getattr(state, attr)
+            if parameter is not None:
+                result[name] = _local_fusion_candidate(
+                    name, parameter.value, parameter.source,
+                    parameter.updated_at_utc, now_utc, unit, datum)
+        track = effective_track_parameter(icao, None, now_utc)
+        if track is not None:
+            result["ground_track"] = _local_fusion_candidate(
+                "ground_track", track.value, track.source,
+                track.updated_at_utc, now_utc, "deg", "TRUE_NORTH")
+    pressure = _latest_pressure_altitude_measurement(icao)
+    if pressure is not None:
+        result["barometric_altitude"] = _local_fusion_candidate(
+            "barometric_altitude", pressure.altitude_baro_ft,
+            pressure.source, pressure.timestamp_utc, now_utc, "ft", "PRESSURE")
+        result["production_altitude"] = _local_fusion_candidate(
+            "production_altitude", pressure.altitude_corrected_m,
+            pressure.source + "_QNH_CORRECTED", pressure.timestamp_utc,
+            now_utc, "m", "EGM96_AMSL")
+    gnss = gnss_altitude_states.get(icao)
+    version = raw_adsb_versions.get(icao)
+    if (gnss is not None and gnss.available and version is not None
+            and version.datum == "WGS84_HAE" and pressure is not None
+            and gnss.gnss_minus_baro_ft is not None
+            and max(0.0, (now_utc - gnss.updated_at_utc).total_seconds())
+            <= MOTION_FRESH_PARAMETER_SECONDS
+            and max(0.0, (now_utc - pressure.timestamp_utc).total_seconds())
+            <= MOTION_FRESH_PARAMETER_SECONDS
+            and abs((gnss.updated_at_utc
+                     - pressure.timestamp_utc).total_seconds())
+            <= MOTION_FRESH_PARAMETER_SECONDS):
+        result["geometric_altitude"] = _local_fusion_candidate(
+            "geometric_altitude",
+            (pressure.altitude_baro_ft + gnss.gnss_minus_baro_ft) * 0.3048,
+            "RAW_ADSB_TC19_DERIVED", gnss.updated_at_utc, now_utc,
+            "m", "WGS84_HAE", "DERIVED")
+    intent = aircraft_intent_states.get(icao)
+    if intent is not None:
+        if intent.selected_altitude is not None:
+            result["selected_altitude_mcp"] = _local_fusion_candidate(
+                "selected_altitude_mcp", intent.selected_altitude.value,
+                intent.selected_altitude.source,
+                intent.selected_altitude.updated_at_utc, now_utc, "ft",
+                "SELECTED_REFERENCE_UNKNOWN")
+        if intent.nav_qnh is not None:
+            result["selected_altimeter_setting"] = _local_fusion_candidate(
+                "selected_altimeter_setting", intent.nav_qnh.value,
+                intent.nav_qnh.source, intent.nav_qnh.updated_at_utc,
+                now_utc, "hPa", "QFE_QNH_QNE_UNSPECIFIED")
+    entry = plane_dict.get(icao)
+    if entry and entry[1]:
+        result["callsign"] = _local_fusion_candidate(
+            "callsign", entry[1], "LOCAL_SBS", entry[0], now_utc)
+    return result
+
+
+def step_auto_aircraft_source():
+    """Consume the latest async snapshot and refresh lightweight decisions."""
+    global auto_source_scope
+    with aircraft_source_lock:
+        if aircraft_source_mode != "AUTO" or internet_source_poller is None:
+            return
+        observer = observer_position_provider.resolve(clock.now_utc())
+        identity = source_scope(observer)
+        if identity != auto_source_scope:
+            with plane_dict_lock:
+                adsblol_auto_cache.clear()
+                fused_aircraft_states.clear()
+            auto_source_scope = identity
+        envelope = internet_source_poller.snapshot()
+        if envelope is not None and envelope[1] == identity:
+            _, _, report, receipt = envelope
+            adsblol_auto_cache.consume(report, receipt)
+        now_utc, now_mono = clock.now_utc(), time.monotonic()
+        if adsblol_auto_cache.receipt_monotonic is not None:
+            with plane_dict_lock:
+                icaos = (set(aircraft_motion_states)
+                         | set(adsblol_auto_cache.aircraft))
+                current = {}
+                for icao in icaos:
+                    current[icao] = fuse_aircraft(
+                        icao, local_fusion_fields(icao, now_utc),
+                        adsblol_auto_cache.aircraft.get(icao),
+                        evaluated_at_utc=_snapshot_utc_text(now_utc),
+                        evaluated_at_monotonic=now_mono,
+                        receipt_monotonic=adsblol_auto_cache.receipt_monotonic,
+                        provider_health=adsblol_auto_cache.health)
+                fused_aircraft_states.clear()
+                fused_aircraft_states.update(current)
+        if observer.requested_mode == "MOBILE":
+            status = "PRIVACY_BLOCKED"
+        elif adsblol_auto_cache.health != "OK":
+            status = adsblol_auto_cache.health
+        elif (adsblol_auto_cache.receipt_monotonic is None
+              or now_mono - adsblol_auto_cache.receipt_monotonic > 30.0):
+            status = "STALE"
+        else:
+            status = "REFRESHING" if internet_source_poller.in_flight.locked() else "HEALTHY"
+        dashboard_runtime.state.set_aircraft_source({
+            **_source_status("AUTO", status),
+            "enrichment": "ACTIVE" if status in ("HEALTHY", "REFRESHING") else "DEGRADED",
+            "internet_aircraft_count": len(adsblol_auto_cache.aircraft),
+            "fused_aircraft_count": len(fused_aircraft_states),
+            "max_position_age_seconds": 20.0,
+            "snapshot_lease_seconds": 30.0,
+        })
+        dashboard_runtime._publish_application_state()
+        if internet_source_bridge is not None:
+            internet_source_bridge.step()
+
+
+class AutoFusionBridge(StandaloneBridge):
+    """Run TRUE_2D only when an AUTO predictor input needs remote fallback."""
+    def __init__(self, poller, dashboard, geoid):
+        super().__init__(poller, dashboard, geoid, source="AUTO_FUSION",
+                         source_mode="AUTO")
+
+    def context(self, ac, observer, now, age, body):
+        now_mono = self.monotonic()
+        with plane_dict_lock:
+            state = fuse_aircraft(
+                ac["icao"], local_fusion_fields(ac["icao"], now), ac,
+                evaluated_at_utc=_snapshot_utc_text(now),
+                evaluated_at_monotonic=now_mono,
+                receipt_monotonic=adsblol_auto_cache.receipt_monotonic,
+                provider_health=adsblol_auto_cache.health)
+            fused_aircraft_states[ac["icao"]] = state
+        view = predictor_view(
+            state, application_qnh_hpa=get_metar_press(), geoid=self.geoid)
+        if view is None or view["classification"] != "DEGRADED_UNKNOWN_FIELD_AGE":
+            # The ordinary local path remains authoritative when it has the
+            # complete known-age horizontal bundle.
+            raise ValueError("AUTO remote fallback not required")
+        position = view["position"]
+        position_age = view["position_candidate"].age_seconds
+        if position_age is None:
+            position_age = age
+        latitude, longitude = horizontal_position_from_t0(
+            position["lat"], position["lon"], view["track_deg"],
+            view["groundspeed_kmh"], position_age)
+        callsign = state.fields.get("callsign")
+        callsign = (callsign.selected.value
+                    if callsign is not None and callsign.selected is not None
+                    else "")
+        return ShadowEncounterContext(
+            icao=ac["icao"], callsign=callsign, body=body,
+            prediction_base_utc=now, observer_context=observer,
+            latitude_deg=latitude, longitude_deg=longitude,
+            track_deg=view["track_deg"],
+            groundspeed_kmh=view["groundspeed_kmh"],
+            current_altitude_m=view["altitude_m"],
+            vertical_motion=None, vertical_intent=None,
+            vertical_policy=current_vertical_prediction_policy(),
+            qnh_hpa=get_metar_press(), geometric_altitude_correction_m=0.0,
+            altitude_source=view["altitude_candidate"].source,
+            position_source=state.fields["position"].selected.source,
+            track_source=state.fields["ground_track"].selected.source
+                         + "_UNKNOWN_AGE",
+            aircraft_los_resolver=self.aircraft_los,
+            body_position_resolver=self.body_position,
+            fusion_provenance=serialize_predictor_provenance(state, view))
+
+    def _diagnostics(self):
+        # AUTO transport/trust diagnostics are published by
+        # step_auto_aircraft_source; do not let the standalone label replace it.
+        return None
+
+    def _publish(self, prediction, context, now):
+        # LOCAL may recover during the remote solve. Source -> aircraft -> dashboard;
+        # numerical solving stays outside the aircraft lock.
+        with plane_dict_lock:
+            aircraft = self.aircraft.get(prediction.icao)
+            if aircraft is None:
+                return
+            state = fuse_aircraft(
+                prediction.icao, local_fusion_fields(prediction.icao, now), aircraft,
+                evaluated_at_utc=_snapshot_utc_text(now),
+                evaluated_at_monotonic=self.monotonic(),
+                receipt_monotonic=adsblol_auto_cache.receipt_monotonic,
+                provider_health=adsblol_auto_cache.health)
+            view = predictor_view(state, application_qnh_hpa=get_metar_press(),
+                                  geoid=self.geoid)
+            if view is None or view["classification"] != "DEGRADED_UNKNOWN_FIELD_AGE":
+                return
+            super()._publish(prediction, context, now)
+            capture_authoritative_transit_prediction(prediction, context, now)
 
 
 def consume_authoritative_transition(transition, context, entry,
@@ -3394,7 +3761,7 @@ def build_frozen_prediction_state(
         (solver_input["aircraft_lat"], solver_input["aircraft_lon"]),
         solver_input["track"],
         (transit_result[0], transit_result[1]))
-    return {
+    result = {
         "horizontal": {
             "origin_lat": solver_input["aircraft_lat"],
             "origin_lon": solver_input["aircraft_lon"],
@@ -3466,6 +3833,12 @@ def build_frozen_prediction_state(
                 if solver_diagnostic is not None else None),
         },
     }
+    if aircraft_source_mode == "AUTO":
+        result["fusion_provenance"] = serialize_fused_state(fuse_local_aircraft(
+            str(icao), local_fusion_fields(str(icao), prediction_base_utc),
+            evaluated_at_utc=_snapshot_utc_text(prediction_base_utc),
+            evaluated_at_monotonic=time.monotonic()))
+    return result
 
 
 def build_snapshot_solver_input(icao, plane_lat, plane_lon, elevation,
@@ -4142,12 +4515,21 @@ def close_active_sockets():
 
 def shutdown_runtime(threads, recorder):
     global shutdown_complete, telegram_notifier, dashboard_runtime
+    global internet_source_poller, internet_source_bridge
     with shutdown_lock:
         if shutdown_complete:
             return
         shutdown_complete = True
         stop_event.set()
     close_active_sockets()
+    with aircraft_source_lock:
+        old_poller = internet_source_poller
+        if old_poller is not None:
+            old_poller.stop.set()
+        internet_source_poller = None
+        internet_source_bridge = None
+    if old_poller is not None:
+        old_poller.close()
     for thread in threads:
         try:
             thread.join(timeout=2.0)
@@ -4412,7 +4794,7 @@ def process_line(line, port):
     global moon_body_angular_diameter_arcsec, sun_body_angular_diameter_arcsec
     global moon_body_evaluated_at_utc, sun_body_evaluated_at_utc
 
-    if not line:
+    if not local_aircraft_source_enabled() or not line:
         return
 
     # Capture one immutable observer for this complete processing/prediction
@@ -4949,7 +5331,12 @@ def main():
         telegram_sun_enabled=configuration.telegram_sun_enabled,
         telegram_moon_enabled=configuration.telegram_moon_enabled,
         telegram_body_change=set_telegram_body_enabled,
+        aircraft_source_mode=getattr(
+            configuration, "aircraft_source_mode", "LOCAL"),
+        aircraft_source_change=set_aircraft_source_mode,
     )
+    set_aircraft_source_mode(getattr(
+        configuration, "aircraft_source_mode", "LOCAL"))
     observer_position_provider.set_change_handler(
         invalidate_observer_dependent_state)
     install_table_snapshot_signal_handler()
@@ -5027,8 +5414,13 @@ def main():
             time.sleep(1)
             process_table_snapshot_request()
             dashboard_now = clock.now_utc()
-            dashboard_runtime.tick(dashboard_now)
-            update_dashboard_body_positions(dashboard_now)
+            if aircraft_source_mode == "INTERNET":
+                step_internet_aircraft_source()
+            else:
+                if aircraft_source_mode == "AUTO":
+                    step_auto_aircraft_source()
+                dashboard_runtime.tick(dashboard_now)
+                update_dashboard_body_positions(dashboard_now)
             complete_candidate_observation_windows(dashboard_now)
             if daily_environment_recorder is not None:
                 daily_environment_recorder.rotate_if_needed(clock.now_utc())

@@ -1541,7 +1541,14 @@ def _json_safe(value):
 def _prediction_manifest(prediction):
     if prediction is None:
         return None
-    return {
+    result = {
+        "encounter_id": getattr(prediction, "encounter_id", None),
+        "encounter_generation": getattr(
+            prediction, "encounter_generation", None),
+        "body": getattr(prediction, "body", None),
+        "updated_at_utc": _utc_text(getattr(
+            prediction, "updated_at_utc", None)),
+        "lifecycle_state": getattr(prediction, "lifecycle_state", None),
         "predicted_transit_utc": _utc_text(prediction.predicted_transit_utc),
         "separation_deg": prediction.separation_deg,
         "slant_range_km": prediction.slant_range_km,
@@ -1561,6 +1568,10 @@ def _prediction_manifest(prediction):
         },
         "frozen_vertical_state": _json_safe(prediction.frozen_vertical_state),
     }
+    fusion = getattr(prediction, "fusion_provenance", None)
+    if fusion is not None:
+        result["fusion_provenance"] = _json_safe(fusion)
+    return result
 
 
 def _observer_manifest(observer_context):
