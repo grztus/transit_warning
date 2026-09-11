@@ -62,6 +62,50 @@ def safe_filename_component(value, fallback):
     return cleaned or fallback
 
 
+def _buffer_expiry(timestamp):
+    try:
+        return timestamp + datetime.timedelta(seconds=BUFFER_STALE_SECONDS)
+    except OverflowError:
+        # A conservative lower bound still permits the original cleanup check;
+        # indexing must not reject a previously accepted near-maximum datetime.
+        return timestamp
+
+
+class _ObservationBuffer(deque):
+    """Arrival-ordered bounded samples, with a conservative expiry lower bound."""
+
+    def __init__(self):
+        super().__init__(maxlen=BUFFER_MAXLEN)
+        self._ordered = True
+        self._earliest = None
+
+    def append(self, sample):
+        timestamp = sample["timestamp_utc"]
+        if self and timestamp < self[-1]["timestamp_utc"]:
+            self._ordered = False
+        super().append(sample)
+        if self._ordered:
+            self._earliest = self[0]["timestamp_utc"]
+        elif self._earliest is None or timestamp < self._earliest:
+            self._earliest = timestamp
+
+    def prune(self, cutoff):
+        if self._earliest is None or self._earliest >= cutoff:
+            return
+        if self._ordered:
+            while self and self[0]["timestamp_utc"] < cutoff:
+                self.popleft()
+            self._earliest = self[0]["timestamp_utc"] if self else None
+        else:
+            # Late/out-of-order input is valid. Never sort the arrival buffer.
+            retained = [sample for sample in self if sample["timestamp_utc"] >= cutoff]
+            self.clear()
+            self._ordered = True
+            self._earliest = None
+            for sample in retained:
+                self.append(sample)
+
+
 class TransitSnapshotManager:
     """Keep bounded observation history and persist completed events."""
 
@@ -80,6 +124,8 @@ class TransitSnapshotManager:
         self._buffer_last_seen = {}
         self._active = {}
         self._recent_events = {}
+        self._cleanup_pending = True
+        self._next_cleanup_utc = None
         self._lock = threading.RLock()
         self.last_error = None
         self.last_error_utc = None
@@ -97,17 +143,22 @@ class TransitSnapshotManager:
             icao = str(item["icao"])
             self._require_aware(timestamp, "observation timestamp")
             with self._lock:
+                new_aircraft = icao not in self._buffer_last_seen
                 latest = max(timestamp, self._buffer_last_seen.get(icao,
                                                                    timestamp))
                 self._buffer_last_seen[icao] = latest
-                existing = self._buffers.get(icao, ())
+                buffer = self._buffers.get(icao)
+                if buffer is None:
+                    buffer = self._buffers[icao] = _ObservationBuffer()
                 cutoff = latest - datetime.timedelta(
                     seconds=BUFFER_RETENTION_SECONDS)
-                retained = [sample for sample in existing
-                            if sample["timestamp_utc"] >= cutoff]
+                buffer.prune(cutoff)
                 if timestamp >= cutoff:
-                    retained.append(item)
-                self._buffers[icao] = deque(retained, maxlen=BUFFER_MAXLEN)
+                    buffer.append(item)
+                if new_aircraft:
+                    expires = _buffer_expiry(latest)
+                    if self._next_cleanup_utc is None or expires < self._next_cleanup_utc:
+                        self._next_cleanup_utc = expires
                 self._cleanup_locked(latest)
             return True
         except Exception as error:
@@ -188,6 +239,7 @@ class TransitSnapshotManager:
                        if now_utc >= event["finalize_after_utc"]]
                 for key in due:
                     event = self._active.pop(key)
+                    self._cleanup_pending = True
                     payloads.append(self._document(
                         event, now_utc, complete=True,
                         finalization_reason="normal"))
@@ -211,6 +263,7 @@ class TransitSnapshotManager:
             with self._lock:
                 events = list(self._active.values())
                 self._active.clear()
+                self._cleanup_pending = True
                 payloads = [self._document(
                     event, now_utc, complete=False,
                     finalization_reason="shutdown") for event in events]
@@ -238,6 +291,7 @@ class TransitSnapshotManager:
         """Discard predictions tied to an observer context that changed."""
         with self._lock:
             self._active.clear()
+            self._cleanup_pending = True
 
     def cleanup(self, now_utc):
         try:
@@ -249,19 +303,28 @@ class TransitSnapshotManager:
             return False
 
     def _cleanup_locked(self, now_utc):
+        # Preserve invalid/underflowing timestamp failures even on the fast path.
+        stale_before = now_utc - datetime.timedelta(seconds=BUFFER_STALE_SECONDS)
+        if not self._cleanup_pending and (self._next_cleanup_utc is None
+                                          or now_utc <= self._next_cleanup_utc):
+            return
         recent_expired = [key for key, expires in self._recent_events.items()
                           if expires < now_utc]
         for key in recent_expired:
             del self._recent_events[key]
         active_icaos = {key[0] for key in self._active}
-        stale_before = now_utc - datetime.timedelta(
-            seconds=BUFFER_STALE_SECONDS)
         stale_icaos = [icao for icao, timestamp
                        in self._buffer_last_seen.items()
                        if icao not in active_icaos and timestamp < stale_before]
         for icao in stale_icaos:
             self._buffers.pop(icao, None)
             self._buffer_last_seen.pop(icao, None)
+        deadlines = list(self._recent_events.values())
+        deadlines.extend(_buffer_expiry(timestamp)
+                         for icao, timestamp in self._buffer_last_seen.items()
+                         if icao not in active_icaos)
+        self._next_cleanup_utc = min(deadlines, default=None)
+        self._cleanup_pending = False
 
     def _finalize_after(self, reference_utc):
         return reference_utc + datetime.timedelta(
