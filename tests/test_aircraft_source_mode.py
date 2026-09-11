@@ -18,7 +18,7 @@ class FakeDashboard:
     def _publish_application_state(self):
         pass
 
-    def invalidate_live(self):
+    def invalidate_live(self, now_utc=None, reason="OBSERVER_INVALIDATED", details=None):
         self.invalidations += 1
 
 

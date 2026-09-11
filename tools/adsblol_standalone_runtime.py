@@ -161,7 +161,7 @@ class StandaloneBridge:
         self.last_success_receipt = None
         self.refresh_failed = False
         self.lifecycle.invalidate_transitions()
-        self.dashboard.invalidate_source(self)
+        self.dashboard.invalidate_source(self, now)
         if self.source_mode != "AUTO":
             self.dashboard.clear_body_positions()
         self.aircraft.clear()
@@ -170,10 +170,11 @@ class StandaloneBridge:
         self.processed.clear()
         self.missing.clear()
 
-    def _remove(self, icao, now):
+    def _remove(self, icao, now, reason="WITHDRAWN"):
         self.lifecycle.discard_aircraft_transitions(icao)
         for body in ("SUN", "MOON"):
-            self.dashboard.withdraw_source(icao, body, self, now)
+            self.dashboard.withdraw_source(icao, body, self, now,
+                                           reason=reason)
         self.aircraft.pop(icao, None)
         self.anchors.pop(icao, None)
         self.processed.discard(icao)
@@ -255,7 +256,8 @@ class StandaloneBridge:
 
     def _publish(self, prediction, context, now):
         if not 0 < (prediction.predicted_transit_utc - now).total_seconds() <= self.config.horizon_seconds:
-            self.dashboard.withdraw_source(prediction.icao, prediction.body, self, now)
+            self.dashboard.withdraw_source(prediction.icao, prediction.body, self, now,
+                                           reason="PREDICTION_UNAVAILABLE")
             return
         candidate = DashboardCandidate(
             body=prediction.body, icao=prediction.icao, callsign=prediction.callsign,
@@ -287,7 +289,7 @@ class StandaloneBridge:
             anchor = self.anchors.get(icao)
             age = anchor[1] + max(0, mono - anchor[2]) if anchor else None
             if age is None or age > self.max_age:
-                self._remove(icao, now)
+                self._remove(icao, now, reason="MOTION_STALE")
                 continue
             if icao in self.processed:
                 for body in ("SUN", "MOON"):
@@ -295,7 +297,8 @@ class StandaloneBridge:
                         continue
                     transition = self.lifecycle.unavailable_transition(observer.epoch, icao, body, now)
                     if transition.kind == AuthoritativeTransitionKind.WITHDRAWN:
-                        self.dashboard.withdraw_source(icao, body, self, now)
+                        self.dashboard.withdraw_source(icao, body, self, now,
+                                                       reason="PREDICTION_UNAVAILABLE")
                 continue
             with message_aircraft_cache():
                 for body in ("SUN", "MOON"):
@@ -313,7 +316,7 @@ class StandaloneBridge:
                     if newest and newest[0] != self.sequence:
                         return  # Latest-only: a completed newer snapshot wins.
                     if anchor[1] + max(0, self.monotonic() - anchor[2]) > self.max_age:
-                        self._remove(icao, self.now())
+                        self._remove(icao, self.now(), reason="MOTION_STALE")
                         break
                     transition = (self.lifecycle.consider_transition(context, result, now) if context else
                                   self.lifecycle.unavailable_transition(observer.epoch, icao, body, now))
@@ -323,7 +326,8 @@ class StandaloneBridge:
                     else:
                         self.missing.add((icao, body))
                         if transition.kind == AuthoritativeTransitionKind.WITHDRAWN:
-                            self.dashboard.withdraw_source(icao, body, self, now)
+                            self.dashboard.withdraw_source(icao, body, self, now,
+                                                       reason="PREDICTION_UNAVAILABLE")
             self.processed.add(icao)
         for body in ("SUN", "MOON"):
             position = self.body_position(body, now, observer.position)

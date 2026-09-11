@@ -25,8 +25,11 @@ from dashboard_history import (
     DashboardHistoryStore,
     records_to_csv,
 )
+from finalization_diagnostics import FinalizationJournal
 from observer_position import ObserverPosition
 
+
+_ANY_SOURCE = object()
 
 UTC = datetime.timezone.utc
 DEFAULT_HISTORY_LIMIT = 100
@@ -198,12 +201,14 @@ class DashboardState:
                  sep_visible_max_deg=DEFAULT_SEP_VISIBLE_MAX_DEG,
                  history_store=None, new_transit_indicator_enabled=True,
                  new_transit_threshold_seconds=(
-                     DEFAULT_NEW_TRANSIT_THRESHOLD_SECONDS)):
+                     DEFAULT_NEW_TRANSIT_THRESHOLD_SECONDS),
+                 finalization_journal=None):
         self.history_limit = int(history_limit)
         self.sep_green_max_deg = float(sep_green_max_deg)
         self.sep_yellow_max_deg = float(sep_yellow_max_deg)
         self.sep_visible_max_deg = float(sep_visible_max_deg)
         self.history_store = history_store
+        self.finalization_journal = finalization_journal
         self.new_transit_indicator_enabled = bool(
             new_transit_indicator_enabled)
         self.new_transit_threshold_seconds = float(
@@ -252,6 +257,11 @@ class DashboardState:
             return False
         with self._lock:
             existing = self._live[body].get(key)
+            if (existing is not None and existing["candidate"].encounter_id
+                    and existing["candidate"].encounter_id != candidate.encounter_id):
+                self._trace_finalization(existing, candidate.last_prediction_update_utc,
+                    "WITHDRAWN", "PREDICTION_REPLACED",
+                    ("SKIPPED", "PREDICTION_REPLACED", False, False))
             visible_now = candidate.separation_deg < self.sep_visible_max_deg
             first_time_to_event = (
                 candidate.predicted_event_utc
@@ -311,7 +321,7 @@ class DashboardState:
             item["history_worthy"] = True
         return True
 
-    def withdraw(self, icao, body, now_utc):
+    def withdraw(self, icao, body, now_utc, reason="WITHDRAWN", details=None):
         body = body.upper()
         with self._lock:
             item = self._live.get(body, {}).pop(icao.upper(), None)
@@ -322,34 +332,58 @@ class DashboardState:
                 seconds=WITHDRAW_HISTORY_GRACE_SECONDS)
             if (item["history_worthy"]
                     or (item["ever_visible"] and near_event)):
-                self._to_history_locked(item, now_utc, "WITHDRAWN")
+                decision = self._to_history_locked(item, now_utc, "WITHDRAWN")
+            else:
+                decision = ("SKIPPED", "EARLY_WITHDRAWAL" if item["ever_visible"]
+                            else "NOT_HISTORY_WORTHY", False, False)
+            self._trace_finalization(item, now_utc, "WITHDRAWN", reason, decision, details)
         return True
 
-    def withdraw_source(self, icao, body, owner, now_utc):
-        """Withdraw only the candidate still owned by this provider bridge."""
+    def withdraw_source(self, icao, body, owner, now_utc,
+                        reason="WITHDRAWN", details=None):
+        """Withdraw only the candidate still owned by this source."""
         with self._lock:
             item = self._live.get(body.upper(), {}).get(icao.upper())
             if item is None or item.get("source_owner") is not owner:
                 return False
-            return self.withdraw(icao, body, now_utc)
+            return self.withdraw(icao, body, now_utc, reason, details)
 
-    def invalidate_source(self, owner):
-        """Observer/source invalidation has no history output, as before."""
+    def invalidate_source(self, owner, now_utc=None,
+                          reason="OBSERVER_INVALIDATED", details=None):
+        """Discard only this source's live candidates without history output."""
+        changed = False
         with self._lock:
             for candidates in self._live.values():
                 for icao, item in list(candidates.items()):
                     if item.get("source_owner") is owner:
                         del candidates[icao]
-
-    def withdraw_aircraft(self, icao, now_utc):
-        changed = False
-        for body in ("SUN", "MOON"):
-            changed = self.withdraw(icao, body, now_utc) or changed
+                        changed = True
+                        self._trace_finalization(
+                            item, now_utc or datetime.datetime.now(UTC),
+                            "WITHDRAWN", reason,
+                            ("SKIPPED", reason, False, False), details)
         return changed
 
-    def invalidate_live(self):
+    def withdraw_aircraft(self, icao, now_utc, reason="WITHDRAWN", details=None,
+                          *, source_owner=_ANY_SOURCE):
+        changed = False
+        for body in ("SUN", "MOON"):
+            if source_owner is _ANY_SOURCE:
+                result = self.withdraw(icao, body, now_utc, reason, details)
+            else:
+                result = self.withdraw_source(
+                    icao, body, source_owner, now_utc, reason, details)
+            changed = result or changed
+        return changed
+
+    def invalidate_live(self, now_utc=None, reason="OBSERVER_INVALIDATED", details=None):
         """Discard observer-dependent live candidates without history output."""
         with self._lock:
+            for body in self._live.values():
+                for item in body.values():
+                    self._trace_finalization(item, now_utc or datetime.datetime.now(UTC),
+                        "WITHDRAWN", reason,
+                        ("SKIPPED", reason, False, False), details)
             self._live = {"SUN": {}, "MOON": {}}
 
     def tick(self, now_utc):
@@ -361,7 +395,31 @@ class DashboardState:
                 for icao in due:
                     item = self._live[body].pop(icao)
                     if item["history_worthy"] or item["ever_visible"]:
-                        self._to_history_locked(item, now_utc, "PASSED")
+                        decision = self._to_history_locked(item, now_utc, "PASSED")
+                    else:
+                        decision = ("SKIPPED", "NOT_HISTORY_WORTHY", False, False)
+                    self._trace_finalization(item, now_utc, "PASSED", "PASSED", decision)
+
+    def _trace_finalization(self, item, now, state, reason, decision, details=None):
+        if self.finalization_journal is None:
+            return
+        candidate = item["candidate"]
+        try:
+            self.finalization_journal.append({
+                "schema_version": 1, "private_forensic_data": True,
+                "encounter_id": candidate.encounter_id,
+                "icao": candidate.icao, "body": candidate.body,
+                "callsign": candidate.callsign, "finalized_at_utc": utc_text(now),
+                "final_state": state, "reason": reason,
+                "triggering_details": deepcopy(details),
+                "last_prediction": self._candidate_dict(candidate, include_forensic=True),
+                "history_decision": decision[0], "history_reason": decision[1],
+                "history_attempted": decision[2], "history_succeeded": decision[3],
+                "history_worthy": item["history_worthy"], "ever_visible": item["ever_visible"],
+                "seconds_to_t0": (candidate.predicted_event_utc - now).total_seconds(),
+            })
+        except Exception:
+            pass  # Diagnostics must not change lifecycle behavior.
 
     def _to_history_locked(self, item, recorded_at_utc, reason):
         candidate = item["candidate"]
@@ -369,7 +427,7 @@ class DashboardState:
             candidate.icao.upper(), candidate.body.upper(),
             utc_text(candidate.predicted_event_utc))
         if any(event["event_id"] == event_id for event in self._history):
-            return
+            return ("SKIPPED", "DUPLICATE_EVENT", False, False)
         record = self._candidate_dict(candidate, include_forensic=True)
         record.update({
             "event_id": event_id,
@@ -386,9 +444,15 @@ class DashboardState:
         del self._history[self.history_limit:]
         if self.history_store is not None:
             try:
-                self.history_store.append(record)
+                succeeded = self.history_store.append(record)
+                if succeeded:
+                    return ("PERSISTED", None, True, True)
+                return ("FAILED" if self.history_store.failed else "SKIPPED",
+                        "HISTORY_WRITE_FAILED" if self.history_store.failed else "DUPLICATE_EVENT",
+                        True, False)
             except Exception:
-                pass
+                return ("FAILED", "HISTORY_WRITE_FAILED", True, False)
+        return ("SKIPPED", "HISTORY_DISABLED", False, False)
 
     def query_history(self, utc_date=None, callsign=None, body="ALL",
                       offset=0, limit=DEFAULT_PAGE_SIZE, max_sep_deg=None,
@@ -583,19 +647,22 @@ class DisabledDashboard:
     def publish_authoritative(self, candidate, prediction, *, source_owner=None):
         return False
 
-    def withdraw_source(self, icao, body, owner, now_utc):
+    def withdraw_source(self, icao, body, owner, now_utc,
+                        reason="WITHDRAWN", details=None):
         return False
 
-    def invalidate_source(self, owner):
-        return None
+    def invalidate_source(self, owner, now_utc=None,
+                          reason="OBSERVER_INVALIDATED", details=None):
+        return False
 
     def update_callsign(self, icao, callsign):
         return False
 
-    def withdraw(self, icao, body, now_utc):
+    def withdraw(self, icao, body, now_utc, reason="WITHDRAWN", details=None):
         return False
 
-    def withdraw_aircraft(self, icao, now_utc):
+    def withdraw_aircraft(self, icao, now_utc, reason="WITHDRAWN", details=None,
+                          *, publish=True, source_owner=_ANY_SOURCE):
         return False
 
     def mark_history_worthy(self, icao, body):
@@ -622,7 +689,7 @@ class DisabledDashboard:
             return self.telegram_controls.snapshot()
         return self.telegram_controls.set_enabled(body, enabled)
 
-    def invalidate_live(self):
+    def invalidate_live(self, now_utc=None, reason="OBSERVER_INVALIDATED", details=None):
         return None
 
     def close(self):
@@ -660,14 +727,19 @@ class DashboardRuntime:
         self._publish_application_state()
         return result
 
-    def withdraw_source(self, icao, body, owner, now_utc):
-        result = self.state.withdraw_source(icao, body, owner, now_utc)
-        self._publish_application_state()
+    def withdraw_source(self, icao, body, owner, now_utc,
+                        reason="WITHDRAWN", details=None):
+        result = self.state.withdraw_source(icao, body, owner, now_utc, reason, details)
+        if result:
+            self._publish_application_state()
         return result
 
-    def invalidate_source(self, owner):
-        self.state.invalidate_source(owner)
-        self._publish_application_state()
+    def invalidate_source(self, owner, now_utc=None,
+                          reason="OBSERVER_INVALIDATED", details=None):
+        result = self.state.invalidate_source(owner, now_utc, reason, details)
+        if result:
+            self._publish_application_state()
+        return result
 
     def update_callsign(self, icao, callsign):
         changed = self.state.update_callsign(icao, callsign)
@@ -675,14 +747,19 @@ class DashboardRuntime:
             self._publish_application_state()
         return changed
 
-    def withdraw(self, icao, body, now_utc):
-        result = self.state.withdraw(icao, body, now_utc)
-        self._publish_application_state()
+    def withdraw(self, icao, body, now_utc, reason="WITHDRAWN", details=None):
+        result = self.state.withdraw(icao, body, now_utc, reason, details)
+        if result:
+            self._publish_application_state()
         return result
 
-    def withdraw_aircraft(self, icao, now_utc):
-        result = self.state.withdraw_aircraft(icao, now_utc)
-        self._publish_application_state()
+    def withdraw_aircraft(self, icao, now_utc, reason="WITHDRAWN", details=None,
+                          *, publish=True, source_owner=_ANY_SOURCE):
+        """Finalize immediately; cleanup may defer only public publication."""
+        result = self.state.withdraw_aircraft(
+            icao, now_utc, reason, details, source_owner=source_owner)
+        if result and publish:
+            self._publish_application_state()
         return result
 
     def mark_history_worthy(self, icao, body):
@@ -718,8 +795,8 @@ class DashboardRuntime:
             return self.telegram_controls.snapshot()
         return self.telegram_controls.set_enabled(body, enabled)
 
-    def invalidate_live(self):
-        result = self.state.invalidate_live()
+    def invalidate_live(self, now_utc=None, reason="OBSERVER_INVALIDATED", details=None):
+        result = self.state.invalidate_live(now_utc, reason, details)
         self._publish_application_state()
         return result
 
@@ -731,6 +808,8 @@ class DashboardRuntime:
             self.thread.join(timeout=1.0)
         if self.state.history_store is not None:
             self.state.history_store.close()
+        if self.state.finalization_journal is not None:
+            self.state.finalization_journal.close()
 
 
 def _handler_factory(state, now_utc, mobile_gps_state, telegram_controls,
@@ -1164,6 +1243,8 @@ def start_dashboard(enabled, host, port, now_utc, error_handler=None,
         sep_yellow_max_deg=sep_yellow_max_deg,
         sep_visible_max_deg=sep_visible_max_deg,
         history_store=history_store,
+        finalization_journal=FinalizationJournal(
+            Path(__file__).resolve().parent / "diagnostics" / "finalization"),
         new_transit_indicator_enabled=new_transit_indicator_enabled,
         new_transit_threshold_seconds=new_transit_threshold_seconds)
     application_state_store = ApplicationStateStore()

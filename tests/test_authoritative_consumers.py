@@ -1,7 +1,7 @@
 import datetime
 from types import MappingProxyType, SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 import transit_warning as transit
 from authoritative_transit import (
@@ -189,7 +189,8 @@ class AuthoritativeConsumerTests(unittest.TestCase):
             transition, context(), entry, 20.0, BASE)
         self.assertNotIn(("ABC123", "SUN"),
                          transit.authoritative_terminal_predictions)
-        transit.dashboard_runtime.withdraw.assert_called_once()
+        transit.dashboard_runtime.withdraw_source.assert_called_once_with(
+            "ABC123", "sun", None, ANY, reason="PREDICTION_UNAVAILABLE")
         transit.telegram_notifier.cancel.assert_called_once()
 
     def test_snapshot_uses_exact_frozen_state_and_hides_mobile_coordinates(self):

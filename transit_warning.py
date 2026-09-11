@@ -2984,13 +2984,14 @@ def clear_transit_prediction_state(icao, entry, celestial_body,
         (str(icao).upper(), celestial_body.upper()), None)
     cancel_pending_transit_notification(icao, celestial_body)
     try:
-        dashboard_runtime.withdraw(icao, celestial_body, clock.now_utc())
+        dashboard_runtime.withdraw_source(icao, celestial_body, None, clock.now_utc(),
+            reason="PREDICTION_UNAVAILABLE")
     except Exception:
         pass
 
 
 @synchronized_plane_dict
-def invalidate_observer_dependent_state(observer_context=None):
+def invalidate_observer_dependent_state(observer_context=None, reason="OBSERVER_INVALIDATED"):
     """Remove live predictions computed for a previous observer epoch."""
     for icao, entry in plane_dict.items():
         clear_transit_prediction(entry, 18)
@@ -3010,7 +3011,7 @@ def invalidate_observer_dependent_state(observer_context=None):
         observe_candidate_authoritative_transition(
             transition, invalidated_at_utc)
     try:
-        dashboard_runtime.invalidate_live()
+        dashboard_runtime.invalidate_live(invalidated_at_utc, reason=reason)
     except Exception:
         pass
     try:
@@ -3048,7 +3049,7 @@ def _clear_aircraft_source_state():
     """End the old source generation before another provider can publish."""
     global auto_source_scope
     auto_source_scope = None
-    invalidate_observer_dependent_state()
+    invalidate_observer_dependent_state(reason="SOURCE_RESET")
     plane_dict.clear()
     altitude_sources.clear()
     aircraft_motion_states.clear()
@@ -3416,38 +3417,47 @@ def expire_transit_prediction_after_grace(icao, entry, celestial_body,
 def clean_dict():
     current_time = clock.now_utc()
     to_delete = [icao for icao, entry in plane_dict.items() if (current_time - entry[0]).total_seconds() > MAX_AGE_SECONDS]
-    for icao in to_delete:
-        withdraw_shadow_2d(
-            icao, plane_dict[icao][1], current_time, "AIRCRAFT_EXPIRED")
-        cancel_pending_transit_notification(icao)
-        try:
-            dashboard_runtime.withdraw_aircraft(icao, current_time)
-        except Exception:
-            pass
-        del plane_dict[icao]
-        altitude_sources.pop(icao, None)
-        aircraft_motion_states.pop(icao, None)
-        raw_adsb_tracks.pop(icao, None)
-        raw_adsb_versions.pop(icao, None)
-        gnss_altitude_states.pop(icao, None)
-        mlat_beast_tracks.pop(icao, None)
-        mlat_coarse_tracks.pop(icao, None)
-        aircraft_intent_states.pop(icao, None)
-        aircraft_motion_freshness_status.pop(icao, None)
-        sun_prediction_last_valid.pop(icao, None)
-        moon_prediction_last_valid.pop(icao, None)
-        sun_predicted_transit_utc.pop(icao, None)
-        moon_predicted_transit_utc.pop(icao, None)
-        transit_solver_diagnostics.pop((icao, "sun"), None)
-        transit_solver_diagnostics.pop((icao, "moon"), None)
-        vertical_transit_diagnostics.pop((icao, "sun"), None)
-        vertical_transit_diagnostics.pop((icao, "moon"), None)
-        geometric_altitude_selections.pop((icao, "sun"), None)
-        geometric_altitude_selections.pop((icao, "moon"), None)
-        drop_transit_snapshot_buffer(icao)
-        discard_authoritative_aircraft(icao, current_time)
-        authoritative_terminal_predictions.pop((icao, "SUN"), None)
-        authoritative_terminal_predictions.pop((icao, "MOON"), None)
+    dashboard_changed = False
+    try:
+        for icao in to_delete:
+            withdraw_shadow_2d(
+                icao, plane_dict[icao][1], current_time, "AIRCRAFT_EXPIRED")
+            cancel_pending_transit_notification(icao)
+            try:
+                changed = dashboard_runtime.withdraw_aircraft(
+                    icao, current_time, reason="AIRCRAFT_EXPIRED", publish=False,
+                    source_owner=None)
+                dashboard_changed = changed or dashboard_changed
+            except Exception:
+                pass
+            del plane_dict[icao]
+            altitude_sources.pop(icao, None)
+            aircraft_motion_states.pop(icao, None)
+            raw_adsb_tracks.pop(icao, None)
+            raw_adsb_versions.pop(icao, None)
+            gnss_altitude_states.pop(icao, None)
+            mlat_beast_tracks.pop(icao, None)
+            mlat_coarse_tracks.pop(icao, None)
+            aircraft_intent_states.pop(icao, None)
+            aircraft_motion_freshness_status.pop(icao, None)
+            sun_prediction_last_valid.pop(icao, None)
+            moon_prediction_last_valid.pop(icao, None)
+            sun_predicted_transit_utc.pop(icao, None)
+            moon_predicted_transit_utc.pop(icao, None)
+            transit_solver_diagnostics.pop((icao, "sun"), None)
+            transit_solver_diagnostics.pop((icao, "moon"), None)
+            vertical_transit_diagnostics.pop((icao, "sun"), None)
+            vertical_transit_diagnostics.pop((icao, "moon"), None)
+            geometric_altitude_selections.pop((icao, "sun"), None)
+            geometric_altitude_selections.pop((icao, "moon"), None)
+            drop_transit_snapshot_buffer(icao)
+            discard_authoritative_aircraft(icao, current_time)
+            authoritative_terminal_predictions.pop((icao, "SUN"), None)
+            authoritative_terminal_predictions.pop((icao, "MOON"), None)
+    finally:
+        # Publish completed withdrawals even if a later cleanup operation fails.
+        if dashboard_changed:
+            dashboard_runtime._publish_application_state()
 
 # Funkcja do obliczania odległości między punktami (haversine) / Function to calculate distance between points (haversine)
 def haversine(origin, destination):
@@ -4452,36 +4462,44 @@ def process_table_snapshot_request(directory=DIAGNOSTICS_DIRECTORY):
 def clean_transit_dict():
     current_time = clock.now_utc()
     to_delete = [icao for icao, entry in plane_dict.items() if len(entry) > 31 and entry[31] and isinstance(entry[30], datetime.datetime) and (current_time - entry[30]).total_seconds() > 120]
-    for icao in to_delete:
-        cancel_pending_transit_notification(icao)
-        try:
-            dashboard_runtime.withdraw_aircraft(icao, current_time)
-        except Exception:
-            pass
-        del plane_dict[icao]
-        altitude_sources.pop(icao, None)
-        aircraft_motion_states.pop(icao, None)
-        raw_adsb_tracks.pop(icao, None)
-        raw_adsb_versions.pop(icao, None)
-        gnss_altitude_states.pop(icao, None)
-        mlat_beast_tracks.pop(icao, None)
-        mlat_coarse_tracks.pop(icao, None)
-        aircraft_intent_states.pop(icao, None)
-        aircraft_motion_freshness_status.pop(icao, None)
-        sun_prediction_last_valid.pop(icao, None)
-        moon_prediction_last_valid.pop(icao, None)
-        sun_predicted_transit_utc.pop(icao, None)
-        moon_predicted_transit_utc.pop(icao, None)
-        transit_solver_diagnostics.pop((icao, "sun"), None)
-        transit_solver_diagnostics.pop((icao, "moon"), None)
-        vertical_transit_diagnostics.pop((icao, "sun"), None)
-        vertical_transit_diagnostics.pop((icao, "moon"), None)
-        geometric_altitude_selections.pop((icao, "sun"), None)
-        geometric_altitude_selections.pop((icao, "moon"), None)
-        drop_transit_snapshot_buffer(icao)
-        discard_authoritative_aircraft(icao, current_time)
-        authoritative_terminal_predictions.pop((icao, "SUN"), None)
-        authoritative_terminal_predictions.pop((icao, "MOON"), None)
+    dashboard_changed = False
+    try:
+        for icao in to_delete:
+            cancel_pending_transit_notification(icao)
+            try:
+                changed = dashboard_runtime.withdraw_aircraft(icao, current_time,
+                    publish=False, source_owner=None)
+                dashboard_changed = changed or dashboard_changed
+            except Exception:
+                pass
+            del plane_dict[icao]
+            altitude_sources.pop(icao, None)
+            aircraft_motion_states.pop(icao, None)
+            raw_adsb_tracks.pop(icao, None)
+            raw_adsb_versions.pop(icao, None)
+            gnss_altitude_states.pop(icao, None)
+            mlat_beast_tracks.pop(icao, None)
+            mlat_coarse_tracks.pop(icao, None)
+            aircraft_intent_states.pop(icao, None)
+            aircraft_motion_freshness_status.pop(icao, None)
+            sun_prediction_last_valid.pop(icao, None)
+            moon_prediction_last_valid.pop(icao, None)
+            sun_predicted_transit_utc.pop(icao, None)
+            moon_predicted_transit_utc.pop(icao, None)
+            transit_solver_diagnostics.pop((icao, "sun"), None)
+            transit_solver_diagnostics.pop((icao, "moon"), None)
+            vertical_transit_diagnostics.pop((icao, "sun"), None)
+            vertical_transit_diagnostics.pop((icao, "moon"), None)
+            geometric_altitude_selections.pop((icao, "sun"), None)
+            geometric_altitude_selections.pop((icao, "moon"), None)
+            drop_transit_snapshot_buffer(icao)
+            discard_authoritative_aircraft(icao, current_time)
+            authoritative_terminal_predictions.pop((icao, "SUN"), None)
+            authoritative_terminal_predictions.pop((icao, "MOON"), None)
+    finally:
+        # Publish completed withdrawals even if a later cleanup operation fails.
+        if dashboard_changed:
+            dashboard_runtime._publish_application_state()
 
 # Function to manage sockets blocked in readline() during controlled shutdown.
 def _register_active_socket(port, sock):
@@ -5093,7 +5111,11 @@ def process_line(line, port):
                 icao, flight, clock.now_utc(), "MOTION_STALE", freshness=motion_freshness)
             cancel_pending_transit_notification(icao)
             try:
-                dashboard_runtime.withdraw_aircraft(icao, clock.now_utc())
+                dashboard_runtime.withdraw_aircraft(
+                    icao, clock.now_utc(), reason="MOTION_STALE",
+                    source_owner=None, details={
+                        "motion_freshness": motion_freshness.diagnostic,
+                        "aircraft_source_mode": aircraft_source_mode})
             except Exception:
                 pass
             discard_authoritative_aircraft(icao, clock.now_utc())
