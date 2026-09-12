@@ -242,6 +242,7 @@ describe("synchronized operational controls", () => {
     const mutate = vi.fn(() => new Promise<SettingsSnapshotDto>((resolve) => { finish = resolve; }));
     render(<App client={async () => activeFixture} settingsMutator={mutate}
       eventSourceFactory={quietStream} />);
+    if (name === "Observer fallback") fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
     const button = await screen.findByRole("button", { name });
     fireEvent.click(button);
     expect(button).toBeDisabled();
@@ -293,7 +294,7 @@ describe("synchronized operational controls", () => {
     const degraded = { ...activeFixture, observer: { ...activeFixture.observer,
       effective_source: "STATIC", fallback_active: true, gps_health: "UNAVAILABLE" } };
     render(<App client={async () => degraded} eventSourceFactory={quietStream} />);
-    expect(await screen.findByText(/MOBILE requested.*effective STATIC/)).toBeInTheDocument();
+    expect(await screen.findByText(/Fallback active.*STATIC/)).toBeInTheDocument();
   });
 
   it("suppresses only the redundant healthy MOBILE banner", async () => {
@@ -311,6 +312,7 @@ describe("synchronized operational controls", () => {
   it("keeps Fallback label and toggle in one responsive DOM group", async () => {
     const { container } = render(<App client={async () => activeFixture}
       eventSourceFactory={quietStream} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
     await screen.findByRole("button", { name: "Observer fallback" });
     const group = container.querySelector(".fallback-control-group");
     expect(group).toHaveTextContent("Fallback");

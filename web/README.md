@@ -99,3 +99,16 @@ remain possible after a backend restart when no newer state arrived meanwhile.
 
 STANDARD has no maps, map-location controls, centerline interactions, saved
 location collections, or PATTERN navigation. Its GPS acquisition has no map consumer.
+
+On phones, Compact Controls keeps Observer, Source and Telegram in three tight
+rows, with GPS Start/Stop when relevant. Expand reveals fallback settings,
+observer/source diagnostics, API revision and STATIC location management.
+Healthy MOBILE_FRESH needs no diagnostic banner in Compact; acquisition errors
+and backend no-fix/fallback warnings remain visible.
+
+Browser geolocation requires a secure context (normally HTTPS) and browser
+permission. Plain LAN HTTP may make geolocation unavailable; this is distinct
+from permission denial. The physical Galaxy S23 smoke test succeeded through
+the Tailscale secure origin, with backend MOBILE_FRESH and GPS ACTIVE. A running
+browser watcher alone does not establish a valid backend fix. This does not
+introduce a cloud requirement or change networking or backend GPS semantics.

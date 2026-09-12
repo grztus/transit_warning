@@ -28,11 +28,54 @@ function browserGps() {
 }
 
 describe("STANDARD final controls", () => {
-  it("keeps only LIVE/HISTORY navigation and compact accessible controls at narrow widths", async () => {
+  it.each([
+    [false, true, "Browser GPS requires a secure context (HTTPS)"],
+    [true, false, "Browser GPS is unavailable; use HTTPS or a supported browser"],
+  ])("distinguishes secure context %s and geolocation availability %s", async (secure, available, message) => {
+    const browser = browserGps(); const gps = gpsMock();
+    const descriptor = Object.getOwnPropertyDescriptor(window, "isSecureContext");
+    Object.defineProperty(window, "isSecureContext", { configurable: true, value: secure });
+    if (!available) Object.defineProperty(navigator, "geolocation", { configurable: true, value: undefined });
+    const rendered = render(<App client={async () => activeFixture} eventSourceFactory={quietStream} gpsClient={gps} />);
+    try {
+      const start = await screen.findByRole("button", { name: "Start GPS" });
+      await waitFor(() => expect(start).not.toBeDisabled());
+      fireEvent.click(start);
+      expect(screen.getByRole("alert")).toHaveTextContent(message);
+      expect(browser.watchPosition).not.toHaveBeenCalled();
+      expect(gps.update).not.toHaveBeenCalled();
+    } finally {
+      rendered.unmount(); browser.restore();
+      if (descriptor) Object.defineProperty(window, "isSecureContext", descriptor);
+      else Reflect.deleteProperty(window, "isSecureContext");
+    }
+  });
+
+  it.each([[1, "permission was denied"], [2, "position is unavailable"], [3, "request timed out"]])(
+    "keeps backend no-fix authoritative through browser error %s", async (code, message) => {
+      const browser = browserGps(); const gps = gpsMock();
+      const noFix = { ...activeFixture, observer: { ...activeFixture.observer, effective_source: "MOBILE_NO_FIX" } };
+      const rendered = render(<App client={async () => noFix} eventSourceFactory={quietStream} gpsClient={gps} />);
+      try {
+        const start = await screen.findByRole("button", { name: "Start GPS" });
+        await waitFor(() => expect(start).not.toBeDisabled());
+        fireEvent.click(start);
+        expect(screen.getByRole("button", { name: "Stop GPS" })).toHaveClass("gps-waiting");
+        await act(async () => browser.success[0](fix));
+        expect(screen.getByRole("button", { name: "Stop GPS" })).toHaveClass("gps-waiting");
+        expect(screen.getByText(/^MOBILE_NO_FIX$/)).toBeVisible();
+        act(() => browser.failure[0]({ code } as GeolocationPositionError));
+        expect(screen.getByRole("alert")).toHaveTextContent(message);
+        expect(screen.getByRole("button", { name: "Stop GPS" })).toHaveClass("gps-attention");
+      } finally { rendered.unmount(); browser.restore(); }
+    });
+
+  it.each([320, 360, 390])("keeps three compact operational rows and expanded details at %s px", async width => {
     const previous = window.innerWidth;
-    window.innerWidth = 360;
+    window.innerWidth = width;
     try {
       render(<App client={async () => fixed} eventSourceFactory={quietStream}
+        settingsMutator={() => new Promise(() => {})}
         historyClient={async () => ({ records: [], offset: 0, limit: 25, next_offset: null, has_more: false })} />);
       const expand = await screen.findByRole("button", { name: "Expand Controls panel" });
       expect(expand).toHaveAttribute("aria-expanded", "false");
@@ -40,13 +83,39 @@ describe("STANDARD final controls", () => {
       expect(within(screen.getByRole("navigation")).getAllByRole("button").map(b => b.textContent)).toEqual(["LIVE", "HISTORY"]);
       expect(screen.queryByRole("button", { name: /MANUAL|PATTERN|Show my location/i })).not.toBeInTheDocument();
       expect(document.querySelector("iframe, canvas")).toBeNull();
+      const panel = expand.closest(".controls-panel")! as HTMLElement;
+      expect(panel).toHaveClass("controls-compact");
+      const groups = panel.querySelectorAll(".controls-primary > .control-group");
+      expect(groups).toHaveLength(3);
+      expect(Array.from(groups).map(group => group.querySelector("strong")?.textContent)).toEqual(["Observer", "Source", "Telegram"]);
+      for (const name of ["STATIC", "MOBILE", "LOCAL", "INTERNET", "AUTO", "Telegram SUN", "Telegram MOON"]) {
+        expect(within(panel).getByRole("button", { name })).toBeVisible();
+      }
+      for (const selector of [".fallback-control-group", ".source-meta", ".observer-meta", "#controls-secondary"]) {
+        expect(panel.querySelector(selector)).not.toBeVisible();
+      }
       fireEvent.click(expand);
+      expect(panel).toHaveClass("controls-expanded");
+      expect(panel).not.toHaveClass("controls-compact");
+      for (const selector of [".fallback-control-group", ".source-meta", ".observer-meta", "#controls-secondary"]) {
+        expect(panel.querySelector(selector)).toBeVisible();
+      }
+      expect(panel.querySelectorAll(".controls-primary > .control-group")[0]).toBe(groups[0]);
       expect(screen.getByRole("button", { name: "Collapse Controls panel" })).toHaveAttribute("aria-expanded", "true");
       expect(screen.getByText("Default configured location")).toBeVisible();
       expect(screen.getByRole("button", { name: "STATIC" })).toHaveAttribute("aria-pressed", "true");
       fireEvent.click(screen.getByRole("button", { name: "HISTORY" }));
       expect(screen.getByRole("button", { name: "HISTORY" })).toHaveAttribute("aria-pressed", "true");
       expect(screen.getByRole("button", { name: "LIVE" })).toHaveAttribute("aria-pressed", "false");
+      fireEvent.click(screen.getByRole("button", { name: "LIVE" }));
+      fireEvent.click(screen.getByRole("button", { name: "Collapse Controls panel" }));
+      fireEvent.click(screen.getByRole("button", { name: "MOBILE" }));
+      for (const name of ["STATIC", "MOBILE"]) {
+        const button = screen.getByRole("button", { name });
+        expect(button).toBeDisabled();
+        expect(button).toHaveAttribute("aria-busy", "true");
+        expect(button).toHaveTextContent(name);
+      }
     } finally { window.innerWidth = previous; }
   });
 

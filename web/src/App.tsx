@@ -372,6 +372,11 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
   };
   const startGps = () => {
     if (gpsActive.current && !gpsFailed) return;
+    if (window.isSecureContext === false) {
+      setGpsFailed(true);
+      setGpsMessage("Browser GPS requires a secure context (HTTPS)");
+      return;
+    }
     if (gpsAvailable !== true || !navigator.geolocation) {
       setGpsFailed(true);
       setGpsMessage("Browser GPS is unavailable; use HTTPS or a supported browser");
@@ -482,7 +487,7 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
           </section>
 
           {view === "LIVE" ? <>
-          <section className="panel controls-panel">
+          <section className={`panel controls-panel ${controlsExpanded ? "controls-expanded" : "controls-compact"}`}>
             <header><h2>Controls</h2><button type="button" aria-expanded={controlsExpanded}
               aria-controls="controls-secondary" aria-label={`${controlsExpanded ? "Collapse" : "Expand"} Controls panel`}
               onClick={() => setControlsExpanded(current => !current)}>{controlsExpanded ? "Compact" : "Expand"}</button></header>
@@ -493,13 +498,14 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
               {(["STATIC", "MOBILE"] as const).map((mode) => (
                 <button key={mode} type="button"
                   aria-pressed={visibleObserverMode === mode}
+                  aria-busy={pending === "observer-mode"}
                   disabled={pending !== null}
                   onClick={() => void selectObserverMode(mode)}>
-                  {pending === "observer-mode" ? "CHANGING…" : mode}
+                  {pending === "observer-mode" && controlsExpanded ? "CHANGING…" : mode}
                 </button>
               ))}
               </div>
-              <span className="fallback-control-group">
+              <span className="fallback-control-group" hidden={!controlsExpanded}>
                 <span className="control-label">Fallback</span>
                 <button type="button" aria-pressed={snapshot.settings.observer.fallback_enabled}
                   aria-label="Observer fallback"
@@ -516,7 +522,7 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
                 onClick={() => void stopGps()}>Stop GPS</button>}
             </div>
             <div className="control-group aircraft-source-control-group">
-              <strong>Aircraft source</strong><div className="control-row" aria-label="Aircraft source">
+              <strong>{controlsExpanded ? "Aircraft source" : "Source"}</strong><div className="control-row" aria-label="Aircraft source">
                 {(["LOCAL", "INTERNET", "AUTO"] as const).map(mode => <button key={mode}
                   type="button" aria-pressed={snapshot.settings.aircraft_source?.requested_mode === mode}
                   disabled={pending !== null} onClick={() => void changeSetting("aircraft-source", {
@@ -574,7 +580,7 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
             </div>
             {manualError && <p className="settings-message" role="alert">{manualError}</p>}
             {gpsMessage && <p className="gps-message" role="alert">{gpsMessage}</p>}
-            <p className="observer-meta">
+            <p className="observer-meta" hidden={!controlsExpanded}>
               Requested {observerLabel(snapshot.observer.requested_mode) || "—"} · Effective {observerLabel(snapshot.observer.effective_source) || "—"}
               {snapshot.settings.observer.requested_mode === "MOBILE" && <>
                 {" · "}GPS {snapshot.observer.gps_health || "—"}
@@ -588,7 +594,9 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
             {snapshot.settings.observer.requested_mode === "MOBILE" &&
               (snapshot.observer.fallback_active || !["MOBILE", "MOBILE_FRESH"].includes(
                 snapshot.observer.effective_source || "")) && (
-              <p className="degraded" role="status">MOBILE requested · effective {snapshot.observer.effective_source || "unavailable"}</p>
+              <p className="degraded" role="status">{controlsExpanded ?
+                `MOBILE requested · effective ${snapshot.observer.effective_source || "unavailable"}` :
+                `${snapshot.observer.fallback_active ? "Fallback active · " : ""}${snapshot.observer.effective_source || "MOBILE_NO_FIX"}`}</p>
             )}
             {settingsMessage && <p className="settings-message" role="alert">{settingsMessage}</p>}
           </section>
