@@ -40,6 +40,9 @@ describe("STANDARD final controls", () => {
       expect(panel).toHaveClass("controls-compact");
       expect(within(panel).getAllByRole("button")).toEqual([expand]);
       expect(expand).toHaveTextContent("ControlsObserver STATIC");
+      expect(expand.querySelector("strong, b")).toBeNull();
+      expect(expand.querySelector(".disclosure-title")).toHaveTextContent("Controls");
+      expect(expand.querySelector(".observer-summary-state")).not.toHaveClass("summary-warning");
       expect(expand).toHaveAttribute("aria-expanded", "false");
       expect(panel.querySelector("#controls-content")).not.toBeVisible();
       expect(within(panel).queryByRole("alert")).not.toBeInTheDocument();
@@ -80,7 +83,9 @@ describe("STANDARD final controls", () => {
     render(<App client={async () => current} eventSourceFactory={quietStream} />);
     const expand = await screen.findByRole("button", { name: "Expand Controls panel" });
     const panel = expand.closest(".controls-panel")! as HTMLElement;
-    expect(screen.getByText(`Observer ${summary}`)).toBeVisible();
+    expect(expand.querySelector("#controls-observer-summary")).toHaveTextContent(`Observer ${summary}`);
+    expect(expand.querySelector("#controls-observer-summary")).toBeVisible();
+    expect(expand.querySelector(".observer-summary-state")?.classList.contains("summary-warning")).toBe(summary !== "MOBILE");
     expect(within(panel).getAllByRole("button")).toEqual([expand]);
     expect(within(panel).queryByRole("status")).not.toBeInTheDocument();
     fireEvent.click(expand);
@@ -125,7 +130,7 @@ describe("STANDARD final controls", () => {
         expect(screen.getByRole("button", { name: "Stop GPS" })).toHaveClass("gps-waiting");
         await act(async () => browser.success[0](fix));
         expect(screen.getByRole("button", { name: "Stop GPS" })).toHaveClass("gps-waiting");
-        expect(screen.getByText(/^Observer MOBILE NO FIX$/)).toBeVisible();
+        expect(document.querySelector("#controls-observer-summary")).toHaveTextContent("Observer MOBILE NO FIX");
         act(() => browser.failure[0]({ code } as GeolocationPositionError));
         expect(screen.getByRole("alert")).toHaveTextContent(message);
         expect(screen.getByRole("button", { name: "Stop GPS" })).toHaveClass("gps-attention");
@@ -144,12 +149,53 @@ describe("STANDARD final controls", () => {
     expect(document.querySelector(".source-meta")).toHaveTextContent("Requested AUTO / Effective LOCAL / Provider ADSB.lol / Health PRIVACY_BLOCKED");
   });
 
+  it.each([320, 360, 390])("keeps Backend state to one disclosure row at %s px", async width => {
+    const previous = window.innerWidth;
+    window.innerWidth = width;
+    const client = vi.fn(async () => fixed);
+    try {
+      render(<App client={client} eventSourceFactory={quietStream} />);
+      const toggle = await screen.findByRole("button", { name: "Expand Backend state panel" });
+      const panel = toggle.closest(".status-strip")! as HTMLElement;
+      const summary = toggle.textContent;
+      expect(panel).toHaveClass("backend-compact");
+      expect(panel.children).toHaveLength(1);
+      expect(within(panel).getAllByRole("button")).toEqual([toggle]);
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      expect(toggle.children).toHaveLength(3);
+      expect(toggle.querySelector("strong, b")).toBeNull();
+      expect(toggle.querySelector(".disclosure-title")).toHaveTextContent("Backend state");
+      expect(toggle.querySelector(".backend-summary-health")).toHaveClass("summary-active");
+      expect(toggle).toHaveTextContent("Backend state");
+      expect(toggle).toHaveTextContent(/ACTIVE.*\d{2}:\d{2}:\d{2} UTC/);
+      expect(panel.querySelector(".status-details")).toBeNull();
+      fireEvent.click(toggle);
+      expect(panel).toHaveClass("backend-expanded");
+      for (const name of ["Transport", "Last refresh", "Aircraft source requested", "Effective", "Provider", "Provider health", "Generated timestamp"]) {
+        expect(within(panel).getByText(name)).toBeVisible();
+      }
+      expect(within(panel).getByText(fixed.generated_at_utc!)).toBeVisible();
+      fireEvent.click(toggle);
+      expect(panel.children).toHaveLength(1);
+      expect(toggle.textContent).toBe(summary);
+      expect(client).toHaveBeenCalledTimes(1);
+    } finally { window.innerWidth = previous; }
+  });
+
+  // ERROR is a defensive wire-display case; the current typed contract is ACTIVE/STALE.
+  it.each(["ACTIVE", "STALE", "ERROR"] as const)("keeps %s visible in the collapsed backend summary", async health => {
+    render(<App client={async () => ({ ...fixed, health: health as BootstrapDto["health"] })} eventSourceFactory={quietStream} />);
+    const toggle = await screen.findByRole("button", { name: "Expand Backend state panel" });
+    expect(toggle).toHaveTextContent(health);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+  });
+
   it("keeps backend health, transport, generated time and last refresh distinct", async () => {
     render(<App client={async () => ({ ...fixed, health: "STALE" })} eventSourceFactory={quietStream} />);
     fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
     const button = await screen.findByRole("button", { name: "Expand Backend state panel" });
     expect(button).toHaveTextContent("STALE");
-    expect(button).toHaveTextContent("Generated");
+    expect(button).toHaveTextContent(/\d{2}:\d{2}:\d{2} UTC/);
     expect(screen.getByText("RECONNECTING")).toBeVisible();
     expect(screen.queryByText("Last refresh")).not.toBeInTheDocument();
     fireEvent.click(button);
@@ -235,7 +281,7 @@ describe("STANDARD final controls", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
     try {
       await waitFor(() => expect(gps.status).toHaveBeenCalled());
-      expect(screen.getByText("Observer STATIC")).toBeVisible();
+      expect(document.querySelector("#controls-observer-summary")).toHaveTextContent("Observer STATIC");
       fireEvent.click(await screen.findByRole("button", { name: "MOBILE" }));
       await waitFor(() => expect(browser.watchPosition).toHaveBeenCalledTimes(1));
       expect(screen.getByRole("button", { name: "Stop GPS" })).toHaveClass("gps-waiting");
@@ -246,7 +292,7 @@ describe("STANDARD final controls", () => {
       await act(async () => browser.success[0](fix));
       await waitFor(() => expect(screen.getByRole("button", { name: "Stop GPS" })).toHaveClass("gps-active"));
       fireEvent.click(screen.getByRole("button", { name: "Collapse Controls panel" }));
-      expect(screen.getByText("Observer MOBILE")).toBeVisible();
+      expect(document.querySelector("#controls-observer-summary")).toHaveTextContent("Observer MOBILE");
       expect(screen.queryByRole("button", { name: "Stop GPS" })).not.toBeInTheDocument();
       expect(browser.clearWatch).not.toHaveBeenCalled();
       expect(gps.clear).not.toHaveBeenCalled();

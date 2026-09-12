@@ -471,16 +471,18 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
         </section>
       ) : (
         <>
-          <section className="status-strip panel">
+          <section className={`status-strip panel ${backendExpanded ? "backend-expanded" : "backend-compact"}`}>
             <button type="button" className="top-panel-toggle"
-              aria-expanded={backendExpanded} aria-controls="backend-status-details"
+              aria-expanded={backendExpanded} aria-controls="backend-status-details" aria-describedby="backend-summary"
               aria-label={`${backendExpanded ? "Collapse" : "Expand"} Backend state panel`}
               onClick={() => setBackendExpanded(current => !current)}>
-              <strong>Backend state</strong><span>{snapshot.health}</span>
-              <span>Generated {time(snapshot.generated_at_utc || undefined)}</span>
-              <span aria-hidden="true">{backendExpanded ? "-" : "+"}</span>
+              <span className="disclosure-title">Backend state</span>
+              <span id="backend-summary"><span className={`backend-summary-health summary-${health.toLowerCase()}`}>{health}</span> · {snapshot.generated_at_utc && Number.isFinite(Date.parse(snapshot.generated_at_utc)) ?
+                time(snapshot.generated_at_utc) : "—"}</span>
+              <span aria-hidden="true">{backendExpanded ? "⌄" : "›"}</span>
             </button>
             {backendExpanded && <div id="backend-status-details" className="status-details">
+              <div><span>Generated timestamp</span><strong>{snapshot.generated_at_utc || "Unavailable"}</strong></div>
               <div><span>Transport</span><strong>{state.transport}</strong></div>
               <div><span>Last refresh</span><strong>{state.lastSuccessfulRefresh?.toLocaleTimeString() || "Unavailable"}</strong></div>
               <div><span>Aircraft source requested</span><strong>{snapshot.aircraft_source?.requested_mode || "Unavailable"}</strong></div>
@@ -496,8 +498,8 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
               aria-controls="controls-content" aria-describedby="controls-observer-summary"
               aria-label={`${controlsExpanded ? "Collapse" : "Expand"} Controls panel`}
               onClick={() => setControlsExpanded(current => !current)}>
-              <strong>Controls</strong>
-              <span id="controls-observer-summary">Observer {observerSummary}</span>
+              <span className="disclosure-title">Controls</span>
+              <span id="controls-observer-summary">Observer <span className={observerSummary.startsWith("MOBILE ") ? "observer-summary-state summary-warning" : "observer-summary-state"}>{observerSummary}</span></span>
               <span aria-hidden="true">{controlsExpanded ? "⌄" : "›"}</span>
             </button>
             <div id="controls-content" hidden={!controlsExpanded}>

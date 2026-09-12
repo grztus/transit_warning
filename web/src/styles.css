@@ -222,22 +222,38 @@ button:disabled { cursor: wait; opacity: .65; }
   .candidate-title, .candidate-summary { flex-wrap: wrap; }
 }
 
-.status-strip .top-panel-toggle { display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr) auto; }
-.status-strip .top-panel-toggle > :last-child { margin-left: auto; }
 @media (max-width: 699px) {
-  .status-strip .top-panel-toggle { grid-template-columns: minmax(0, 1fr) auto auto; }
-  .status-strip .top-panel-toggle > :nth-child(3) { grid-column: 1 / -1; grid-row: 2; }
-  .status-strip .top-panel-toggle > :last-child { grid-column: 3; grid-row: 1; }
   .controls-panel button { min-height: 40px; }
 }
+
+.backend-compact { padding: 0; }
+.status-strip .top-panel-toggle { display: flex; flex-wrap: nowrap; gap: .4rem;
+  min-height: 48px; padding: .5rem .8rem; }
+.status-strip .top-panel-toggle > .disclosure-title { font-size: .85rem; white-space: nowrap; }
+.status-strip .top-panel-toggle > #backend-summary { flex-basis: auto; margin-left: auto;
+  font-size: .7rem; white-space: nowrap; color: inherit; }
+.status-strip .top-panel-toggle > :last-child { margin-left: 0; flex: 0 0 auto; font-size: 1.4rem; }
+.backend-expanded .top-panel-toggle { padding: 0; }
+.top-panel-toggle:focus-visible { outline: 2px solid #52d68a; outline-offset: -3px; }
 
 /* One disclosure row; the existing control tree stays mounted when collapsed. */
 .controls-compact { padding: 0; }
 .controls-panel .controls-toggle { display: flex; align-items: center; gap: .5rem; width: 100%;
   min-height: 48px; border: 0; background: transparent; text-align: left; }
-.controls-toggle > strong { font-size: .95rem; }
+.controls-toggle > .disclosure-title { font-size: .95rem; }
 .controls-toggle > span:nth-child(2) { margin-left: auto; font-size: .75rem; min-width: 0; }
 .controls-toggle > span:last-child { flex: 0 0 auto; font-size: 1.4rem; }
 .controls-expanded .controls-toggle { padding: 0; }
 .controls-toggle:focus-visible { outline: 2px solid #52d68a; outline-offset: -3px; }
+
+/* Restrained disclosure typography; color belongs to meaningful states only. */
+.status-strip .top-panel-toggle, .controls-compact .controls-toggle {
+  color: #7895ad; font-weight: 400; }
+.status-strip .top-panel-toggle .disclosure-title,
+.controls-compact .controls-toggle .disclosure-title { font-weight: 400; }
+.status-strip .top-panel-toggle .summary-active { color: #52d68a; }
+.status-strip .top-panel-toggle .summary-stale,
+.controls-compact .controls-toggle .summary-warning { color: #ffd15a; }
+.status-strip .top-panel-toggle .summary-error,
+.status-strip .top-panel-toggle .summary-offline { color: #ff7474; }
+.status-strip .status-details strong { color: #7895ad; font-weight: 400; }

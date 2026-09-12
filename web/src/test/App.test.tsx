@@ -151,6 +151,12 @@ describe("LIVE screen", () => {
     render(<App client={client} pollIntervalMs={5} />);
     expect(await screen.findByText("TEST123")).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("OFFLINE"));
+    const backend = screen.getByRole("button", { name: "Expand Backend state panel" });
+    expect(backend).toHaveTextContent("OFFLINE");
+    expect(backend.querySelector(".backend-summary-health")).toHaveClass("summary-offline");
+    fireEvent.click(backend);
+    fireEvent.click(backend);
+    expect(backend).toHaveTextContent("OFFLINE");
     expect(screen.getByText("TEST123")).toBeInTheDocument();
     expect(screen.getByText(/showing the last valid snapshot/i)).toBeInTheDocument();
   });

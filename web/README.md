@@ -90,8 +90,11 @@ mode, effective mode, provider and provider health come from backend state;
 unavailable fields are shown as unavailable. The UI does not infer source
 ownership or privacy-blocked status. Telegram SUN and MOON remain independent.
 
-Backend state starts compact and shows data health and generated time. Expand
-it for transport, last successful refresh and aircraft-source diagnostics.
+Backend state starts as a single clickable row showing health, generated UTC
+time and a chevron. Both collapsed cards use muted grey, normal-weight text;
+color is reserved for health and observer warnings. Expand Backend state for
+the generated timestamp, transport, last successful refresh and aircraft-source
+diagnostics. Confirmed OFFLINE remains visible even with a retained snapshot.
 Realtime/reconnecting/polling status is distinct from stale backend data and
 confirmed connection failure. Delayed HTTP responses cannot overwrite newer
 live/settings state received while those requests were running. Revision resets
