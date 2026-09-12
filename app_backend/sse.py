@@ -14,6 +14,9 @@ def live_envelope(snapshot):
              "generated_at_utc": state.get("generated_at_utc"),
              "payload": state}
     assert_public_payload(value)
+    # Validate wire encoding before the required publisher callback succeeds.
+    # Socket delivery remains asynchronous and is not an acknowledgement.
+    encode_sse(value)
     return value
 
 

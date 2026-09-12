@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
 import mimetypes
+import socket
 from pathlib import Path
 import threading
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -21,6 +22,7 @@ from app_backend.settings import (
     SettingsValidationError,
 )
 from app_backend.state import ApplicationStateStore
+from app_backend.publisher import PublicStatePublisher
 from app_backend.sse import SseBroker, encode_sse, live_envelope, settings_envelope
 from dashboard_history import (
     DEFAULT_PAGE_SIZE,
@@ -243,17 +245,22 @@ class DashboardState:
         body = str(body).upper()
         if body not in self._body_positions:
             return False
+        position = {
+            "altitude_deg": float(altitude_deg),
+            "azimuth_deg": float(azimuth_deg),
+            "evaluated_at_utc": utc_text(evaluated_at_utc),
+        }
         with self._lock:
-            self._body_positions[body] = {
-                "altitude_deg": float(altitude_deg),
-                "azimuth_deg": float(azimuth_deg),
-                "evaluated_at_utc": utc_text(evaluated_at_utc),
-            }
+            if self._body_positions[body] == position:
+                return False
+            self._body_positions[body] = position
         return True
 
     def clear_body_positions(self):
         with self._lock:
+            changed = any(value is not None for value in self._body_positions.values())
             self._body_positions = {"SUN": None, "MOON": None}
+            return changed
 
     def set_aircraft_source(self, diagnostic):
         """Source health only; no query centre or observer coordinates."""
@@ -329,7 +336,7 @@ class DashboardState:
     def mark_history_worthy(self, icao, body):
         with self._lock:
             item = self._live.get(body.upper(), {}).get(icao.upper())
-            if item is None:
+            if item is None or item["history_worthy"]:
                 return False
             item["history_worthy"] = True
         return True
@@ -406,27 +413,32 @@ class DashboardState:
     def invalidate_live(self, now_utc=None, reason="OBSERVER_INVALIDATED", details=None):
         """Discard observer-dependent live candidates without history output."""
         with self._lock:
+            changed = any(self._live.values())
             for body in self._live.values():
                 for item in body.values():
                     self._trace_finalization(item, now_utc or datetime.datetime.now(UTC),
                         "WITHDRAWN", reason,
                         ("SKIPPED", reason, False, False), details)
             self._live = {"SUN": {}, "MOON": {}}
+        return changed
 
     @_prediction_mutation
     def tick(self, now_utc):
         with self._lock:
+            changed = self._generated_at_utc != now_utc
             self._generated_at_utc = now_utc
             for body in ("SUN", "MOON"):
                 due = [icao for icao, item in self._live[body].items()
                        if item["candidate"].predicted_event_utc <= now_utc]
                 for icao in due:
+                    changed = True
                     item = self._live[body].pop(icao)
                     if item["history_worthy"] or item["ever_visible"]:
                         decision = self._to_history_locked(item, now_utc, "PASSED")
                     else:
                         decision = ("SKIPPED", "NOT_HISTORY_WORTHY", False, False)
                     self._trace_finalization(item, now_utc, "PASSED", "PASSED", decision)
+        return changed
 
     def _trace_finalization(self, item, now, state, reason, decision, details=None):
         if self.finalization_journal is None:
@@ -730,7 +742,7 @@ class DisabledDashboard:
 class DashboardRuntime:
     def __init__(self, state, server=None, thread=None, mobile_gps_state=None,
                  telegram_controls=None, application_state_store=None,
-                 settings_store=None):
+                 settings_store=None, publisher=None):
         self.state = state
         self.server = server
         self.thread = thread
@@ -738,24 +750,27 @@ class DashboardRuntime:
         self.telegram_controls = telegram_controls or TelegramBodyControls()
         self.application_state_store = application_state_store
         self.settings_store = settings_store
+        self.publisher = publisher or (PublicStatePublisher(
+            lambda: self.application_state_store.publish(self.state.snapshot()))
+            if application_state_store is not None else None)
 
     def _publish_application_state(self):
-        try:
-            if self.application_state_store is not None:
-                self.application_state_store.publish(self.state.snapshot())
-        except Exception:
-            pass
+        """Compatibility entry point: mutations only mark latest public state dirty."""
+        if self.publisher is not None:
+            self.publisher.mark_dirty()
 
     def publish(self, candidate):
         result = self.state.publish(candidate)
-        self._publish_application_state()
+        if result:
+            self._publish_application_state()
         return result
 
     def publish_authoritative(self, candidate, prediction, *, source_owner=None):
         """Publish provenance and private source ownership, without geometry storage."""
         result = self.state.publish(replace(candidate, fusion_provenance=deepcopy(
             getattr(prediction, "fusion_provenance", None))), source_owner=source_owner)
-        self._publish_application_state()
+        if result:
+            self._publish_application_state()
         return result
 
     def withdraw_source(self, icao, body, owner, now_utc,
@@ -795,24 +810,26 @@ class DashboardRuntime:
 
     def mark_history_worthy(self, icao, body):
         result = self.state.mark_history_worthy(icao, body)
-        self._publish_application_state()
+        if result:
+            self._publish_application_state()
         return result
 
     def tick(self, now_utc):
-        result = self.state.tick(now_utc)
-        self._publish_application_state()
-        return result
+        if self.state.tick(now_utc):
+            self._publish_application_state()
 
     def update_body_position(self, body, altitude_deg, azimuth_deg,
                              evaluated_at_utc):
         result = self.state.update_body_position(
             body, altitude_deg, azimuth_deg, evaluated_at_utc)
-        self._publish_application_state()
+        if result:
+            self._publish_application_state()
         return result
 
     def clear_body_positions(self):
         result = self.state.clear_body_positions()
-        self._publish_application_state()
+        if result:
+            self._publish_application_state()
         return result
 
     def telegram_enabled(self, body):
@@ -828,15 +845,27 @@ class DashboardRuntime:
 
     def invalidate_live(self, now_utc=None, reason="OBSERVER_INVALIDATED", details=None):
         result = self.state.invalidate_live(now_utc, reason, details)
-        self._publish_application_state()
+        if result:
+            self._publish_application_state()
         return result
 
-    def close(self):
+    def stop_mutations(self):
+        """Drain HTTP producers while publisher and lifecycle consumers are alive."""
         if self.server is not None:
             self.server.shutdown()
+            stop_mutations = getattr(self.server.RequestHandlerClass, "stop_mutations", None)
+            if stop_mutations is not None:
+                stop_mutations()
+
+
+    def close(self):
+        self.stop_mutations()
+        if self.server is not None:
             self.server.server_close()
         if self.thread is not None:
             self.thread.join(timeout=1.0)
+        if self.publisher is not None:
+            self.publisher.close()
         if self.state.history_store is not None:
             self.state.history_store.close()
         if self.state.finalization_journal is not None:
@@ -849,7 +878,7 @@ def _handler_factory(state, now_utc, mobile_gps_state, telegram_controls,
                      observer_position_provider=None,
                      stale_warning_seconds=30.0,
                      critical_warning_seconds=300.0,
-                     frontend_dist_dir=None):
+                     frontend_dist_dir=None, publisher=None):
     dist_dir = Path(frontend_dist_dir or (
         Path(__file__).resolve().parent / "web" / "dist")).resolve()
 
@@ -882,6 +911,28 @@ def _handler_factory(state, now_utc, mobile_gps_state, telegram_controls,
         return result
 
     class DashboardHandler(BaseHTTPRequestHandler):
+        _mutation_condition = threading.Condition()
+        _mutations_stopped = False
+        _active_mutations = set()
+
+        @classmethod
+        def stop_mutations(cls):
+            # Barriers need the publisher alive while accepted POSTs finish.
+            with cls._mutation_condition:
+                cls._mutations_stopped = True
+                requests = tuple(cls._active_mutations)
+            # Do not let an incomplete HTTP body hold shutdown indefinitely.
+            # Stop transport only; committed mutation work still drains.
+            for request in requests:
+                connection = getattr(request, "connection", None)
+                if connection is not None:
+                    try:
+                        connection.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+            with cls._mutation_condition:
+                cls._mutation_condition.wait_for(lambda: not cls._active_mutations)
+
         def do_GET(self):
             parsed = urlsplit(self.path)
             path = parsed.path
@@ -890,6 +941,9 @@ def _handler_factory(state, now_utc, mobile_gps_state, telegram_controls,
                     state.snapshot(now_utc()), separators=(",", ":"),
                 ).encode("utf-8"))
             elif path == "/api/v1/bootstrap":
+                if publisher is not None and not publisher.flush():
+                    self._send_json({"error": "Public state temporarily unavailable"}, 503)
+                    return
                 self._send_json(serialize_bootstrap(
                     application_state_store.snapshot(),
                     settings_store.snapshot(), observer_diagnostics(),
@@ -937,6 +991,26 @@ def _handler_factory(state, now_utc, mobile_gps_state, telegram_controls,
                 self.send_error(404)
 
         def do_POST(self):
+            cls = type(self)
+            with cls._mutation_condition:
+                accepted = not cls._mutations_stopped
+                if accepted:
+                    cls._active_mutations.add(self)
+            if not accepted:
+                self._send_json({"error": "Dashboard shutting down"}, 503)
+                return
+            try:
+                connection = getattr(self, "connection", None)
+                if connection is not None:
+                    timeout = connection.gettimeout()
+                    connection.settimeout(min(timeout, 5.0) if timeout is not None else 5.0)
+                self._do_POST()
+            finally:
+                with cls._mutation_condition:
+                    cls._active_mutations.discard(self)
+                    cls._mutation_condition.notify_all()
+
+        def _do_POST(self):
             path = urlsplit(self.path).path
             if path == "/api/telegram":
                 try:
@@ -1016,6 +1090,26 @@ def _handler_factory(state, now_utc, mobile_gps_state, telegram_controls,
             self._send_json(diagnostics)
 
         def do_PATCH(self):
+            cls = type(self)
+            with cls._mutation_condition:
+                accepted = not cls._mutations_stopped
+                if accepted:
+                    cls._active_mutations.add(self)
+            if not accepted:
+                self._send_json({"error": "Dashboard shutting down"}, 503)
+                return
+            try:
+                connection = getattr(self, "connection", None)
+                if connection is not None:
+                    timeout = connection.gettimeout()
+                    connection.settimeout(min(timeout, 5.0) if timeout is not None else 5.0)
+                self._do_PATCH()
+            finally:
+                with cls._mutation_condition:
+                    cls._active_mutations.discard(self)
+                    cls._mutation_condition.notify_all()
+
+        def _do_PATCH(self):
             if urlsplit(self.path).path != "/api/v1/settings":
                 self.send_error(404)
                 return
@@ -1049,6 +1143,26 @@ def _handler_factory(state, now_utc, mobile_gps_state, telegram_controls,
                     status=400)
 
         def do_DELETE(self):
+            cls = type(self)
+            with cls._mutation_condition:
+                accepted = not cls._mutations_stopped
+                if accepted:
+                    cls._active_mutations.add(self)
+            if not accepted:
+                self._send_json({"error": "Dashboard shutting down"}, 503)
+                return
+            try:
+                connection = getattr(self, "connection", None)
+                if connection is not None:
+                    timeout = connection.gettimeout()
+                    connection.settimeout(min(timeout, 5.0) if timeout is not None else 5.0)
+                self._do_DELETE()
+            finally:
+                with cls._mutation_condition:
+                    cls._active_mutations.discard(self)
+                    cls._mutation_condition.notify_all()
+
+        def _do_DELETE(self):
             if urlsplit(self.path).path != "/api/mobile-gps":
                 self.send_error(404)
                 return
@@ -1281,9 +1395,10 @@ def start_dashboard(enabled, host, port, now_utc, error_handler=None,
     application_state_store = ApplicationStateStore()
     sse_broker = SseBroker()
     application_state_store.subscribe(
-        lambda snapshot: sse_broker.publish(live_envelope(snapshot)))
+        lambda snapshot: sse_broker.publish(live_envelope(snapshot)), required=True)
     settings_store.subscribe(
         lambda snapshot: sse_broker.publish(settings_envelope(snapshot)))
+    publisher = PublicStatePublisher(lambda: application_state_store.publish(state.snapshot()))
     try:
         state.tick(now_utc())
         application_state_store.publish(state.snapshot())
@@ -1296,7 +1411,7 @@ def start_dashboard(enabled, host, port, now_utc, error_handler=None,
                 observer_position_provider,
                 mobile_gps_stale_warning_seconds,
                 mobile_gps_critical_warning_seconds,
-                frontend_dist_dir))
+                frontend_dist_dir, publisher))
         thread = threading.Thread(
             target=server.serve_forever, name="transit-dashboard", daemon=True)
         thread.start()
@@ -1304,7 +1419,7 @@ def start_dashboard(enabled, host, port, now_utc, error_handler=None,
             state, server, thread, mobile_gps_state=mobile_gps_state,
             telegram_controls=telegram_controls,
             application_state_store=application_state_store,
-            settings_store=settings_store)
+            settings_store=settings_store, publisher=publisher)
     except Exception as error:
         try:
             errors("Dashboard server failed: {}".format(type(error).__name__))
@@ -1314,7 +1429,7 @@ def start_dashboard(enabled, host, port, now_utc, error_handler=None,
             state, mobile_gps_state=mobile_gps_state,
             telegram_controls=telegram_controls,
             application_state_store=application_state_store,
-            settings_store=settings_store)
+            settings_store=settings_store, publisher=publisher)
 
 
 DASHBOARD_HTML = r"""<!doctype html>

@@ -25,6 +25,7 @@ class CleanupPublicationTests(unittest.TestCase):
         self.broker = SseBroker()
         self.app.subscribe(lambda snapshot: self.broker.publish(live_envelope(snapshot)))
         self.dashboard = DashboardRuntime(self.state, application_state_store=self.app)
+        self.addCleanup(self.dashboard.publisher.close)
         self.publications = self.enterContext(patch.object(
             self.app, "publish", wraps=self.app.publish))
         self.enterContext(patch.object(transit, "dashboard_runtime", self.dashboard))
@@ -69,6 +70,7 @@ class CleanupPublicationTests(unittest.TestCase):
         self.candidate("000000", "MOON")
         self.candidate("000001", seconds=120)  # Existing early-withdrawal policy.
         transit.clean_dict()
+        self.assertTrue(self.dashboard.publisher.flush())
         self.publications.assert_called_once()
         self.assertEqual({}, transit.plane_dict)
         self.assertEqual(3, len(self.records))
@@ -104,6 +106,7 @@ class CleanupPublicationTests(unittest.TestCase):
         self.candidate("ABC123", "MOON")
         self.assertTrue(self.dashboard.withdraw_aircraft("ABC123", NOW))
         self.assertFalse(self.dashboard.withdraw_aircraft("ABC123", NOW))
+        self.assertTrue(self.dashboard.publisher.flush())
         self.publications.assert_called_once()
         self.assertEqual(2, len(self.records))
 
@@ -115,6 +118,7 @@ class CleanupPublicationTests(unittest.TestCase):
         self.candidate("ABC123")
         self.assertTrue(self.dashboard.withdraw_aircraft(
             "ABC123", NOW, reason="MOTION_STALE", details=details))
+        self.assertTrue(self.dashboard.publisher.flush())
         self.publications.assert_called_once()
         self.assertEqual("MOTION_STALE", self.records[0]["reason"])
         self.assertEqual(details, self.records[0]["triggering_details"])
@@ -124,6 +128,7 @@ class CleanupPublicationTests(unittest.TestCase):
         self.publications.assert_not_called()
         self.candidate("ABC123")
         self.assertTrue(self.dashboard.withdraw("ABC123", "SUN", NOW))
+        self.assertTrue(self.dashboard.publisher.flush())
         self.publications.assert_called_once()
 
     def test_completed_withdrawal_published_if_later_cleanup_fails(self):
@@ -132,6 +137,7 @@ class CleanupPublicationTests(unittest.TestCase):
         self.drop.side_effect = RuntimeError("cleanup failure")
         with self.assertRaisesRegex(RuntimeError, "cleanup failure"):
             transit.clean_dict()
+        self.assertTrue(self.dashboard.publisher.flush())
         self.publications.assert_called_once()
         self.assertEqual(1, len(self.records))
 
@@ -186,6 +192,7 @@ class CleanupPublicationTests(unittest.TestCase):
         self.assertEqual(2, len(self.state._history))
         self.assertEqual(2, self.recorder.call_count)
         self.assertEqual(2, self.drop.call_count)
+        self.assertTrue(self.dashboard.publisher.flush())
         self.publications.assert_called_once()
 
     def test_completed_mutation_is_visible_if_later_cleanup_fails(self):
@@ -193,13 +200,16 @@ class CleanupPublicationTests(unittest.TestCase):
         self.candidate("000000")
         self.candidate("000001")
         self.dashboard._publish_application_state()
+        self.assertTrue(self.dashboard.publisher.flush())
         self.publications.reset_mock()
         self.drop.side_effect = RuntimeError("later failure")
         with self.assertRaisesRegex(RuntimeError, "later failure"):
             transit.clean_dict()
+        self.assertTrue(self.dashboard.publisher.flush())
         candidates = self.app.snapshot()["state"]["bodies"]["sun"]["candidates"]
         self.assertEqual(["000001"], [item["icao"] for item in candidates])
         self.assertEqual(1, len(self.app.snapshot()["state"]["recent_events"]))
+        self.assertTrue(self.dashboard.publisher.flush())
         self.publications.assert_called_once()
 
     def test_post_transit_cleanup_batches_and_preserves_remote_owner(self):
@@ -216,4 +226,5 @@ class CleanupPublicationTests(unittest.TestCase):
         self.assertEqual({}, transit.plane_dict)
         self.assertEqual({"000002"}, set(self.state._live["SUN"]))
         self.assertEqual(2, len(self.records))
+        self.assertTrue(self.dashboard.publisher.flush())
         self.publications.assert_called_once()

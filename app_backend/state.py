@@ -15,11 +15,11 @@ class ApplicationStateStore:
         self._lock = threading.Lock()
         self._subscribers = []
 
-    def subscribe(self, callback):
+    def subscribe(self, callback, *, required=False):
         if not callable(callback):
             raise TypeError("subscriber must be callable")
         with self._lock:
-            self._subscribers.append(callback)
+            self._subscribers.append((callback, required))
 
     def publish(self, snapshot):
         detached = serialize_live_state(snapshot)
@@ -29,11 +29,12 @@ class ApplicationStateStore:
             revision = self._revision
             subscribers = tuple(self._subscribers)
             result = self._snapshot_locked() if subscribers else None
-        for callback in subscribers:
+        for callback, required in subscribers:
             try:
                 callback(deepcopy(result))
             except Exception:
-                pass
+                if required:
+                    raise  # The publisher must retry failed required delivery.
         return revision
 
     def snapshot(self):

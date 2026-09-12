@@ -136,7 +136,7 @@ class ApplicationConfigurationTests(unittest.TestCase):
         )
         for thread in threads:
             thread.start.assert_called_once_with()
-            thread.join.assert_called_once_with(timeout=2.0)
+            thread.join.assert_called_once_with()
         self.assertEqual(
             transit.port_status,
             {TEST_CONFIG.adsb_port: False, TEST_CONFIG.mlat_port: False},

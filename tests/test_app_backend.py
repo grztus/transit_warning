@@ -49,6 +49,7 @@ class ApplicationContractTests(unittest.TestCase):
                         app = ApplicationStateStore()
                         runtime = dashboard.DashboardRuntime(
                             state, application_state_store=app)
+                        self.addCleanup(runtime.publisher.close)
                         runtime.publish(dashboard.DashboardCandidate(
                             body="SUN", icao="ABC123", callsign=callsign,
                             predicted_event_utc=NOW + datetime.timedelta(seconds=2),
@@ -58,6 +59,7 @@ class ApplicationContractTests(unittest.TestCase):
                             telegram_range=True, prediction_geometry=geometry))
 
                         def check_identity(is_history):
+                            self.assertTrue(runtime.publisher.flush())
                             snapshot = app.snapshot()
                             bootstrap = serialize_bootstrap(
                                 snapshot, RuntimeSettingsStore().snapshot(), {}, NOW)
@@ -233,6 +235,7 @@ class ApplicationStateStoreTests(unittest.TestCase):
         store.publish.side_effect = RuntimeError("failure")
         runtime = dashboard.DashboardRuntime(
             state, application_state_store=store)
+        self.addCleanup(runtime.publisher.close)
         self.assertIsNone(runtime.tick(NOW))
         self.assertEqual(dashboard.utc_text(NOW),
                          state.snapshot(NOW)["generated_at_utc"])

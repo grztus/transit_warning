@@ -78,6 +78,7 @@ class DashboardStateTests(unittest.TestCase):
                         state = dashboard.DashboardState()
                         app = ApplicationStateStore()
                         runtime = dashboard.DashboardRuntime(state, application_state_store=app)
+                        self.addCleanup(runtime.publisher.close)
                         original = replace(candidate("ABC123", seconds=2),
                                            callsign=None, prediction_geometry=geometry)
                         runtime.publish(original)
@@ -98,12 +99,14 @@ class DashboardStateTests(unittest.TestCase):
                         after = state.snapshot(NOW)["sun"]["candidates"][0]
                         self.assertEqual({**before, "callsign": "LATE123"}, after)
                         self.assertEqual(None, original.callsign)
+                        self.assertTrue(runtime.publisher.flush())
                         revision = app.snapshot()["revision"]
                         self.assertFalse(runtime.update_callsign("ABC123", "   "))
                         self.assertFalse(runtime.update_callsign("ABC123", "LATE123"))
                         self.assertEqual(revision, app.snapshot()["revision"])
 
                         def check_wire(history):
+                            self.assertTrue(runtime.publisher.flush())
                             snapshot = app.snapshot()
                             bootstrap = serialize_bootstrap(snapshot,
                                 RuntimeSettingsStore().snapshot(), {}, NOW)
@@ -579,7 +582,7 @@ class DashboardRuntimeTests(unittest.TestCase):
                     port = runtime.server.server_address[1]
                     request = urllib.request.Request(
                         "http://127.0.0.1:{}/api/mobile-gps".format(port),
-                        data=json.dumps(payload).encode("utf-8"),
+                        data=json.dumps(payload).encode("utf-8") if enabled else b"",
                         headers={"Content-Type": "application/json"},
                         method="POST")
                     with self.assertRaises(urllib.error.HTTPError) as caught:

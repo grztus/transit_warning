@@ -33,6 +33,7 @@ class StandaloneTests(unittest.TestCase):
                                     monotonic=lambda: self.mono, now=lambda: self.now)
         self.state = DashboardState()
         self.dashboard = DashboardRuntime(self.state, application_state_store=ApplicationStateStore())
+        self.addCleanup(self.dashboard.publisher.close)
         self.bridge = StandaloneBridge(self.poller, self.dashboard, ConstantGeoid(35))
 
     def report(self, payload=None):
@@ -250,6 +251,7 @@ class StandaloneTests(unittest.TestCase):
         candidate = self.state._live["SUN"]["ABC123"]["candidate"]
         self.assertEqual(candidate.prediction_geometry, "TRUE_2D")
         self.assertTrue(candidate.encounter_id.endswith(":1"))
+        self.assertTrue(self.dashboard.publisher.flush())
         public = self.dashboard.application_state_store.snapshot()
         self.assertNotIn("centerline", json.dumps(public))
         self.assertNotIn("map_privacy", json.dumps(public))
@@ -268,6 +270,7 @@ class StandaloneTests(unittest.TestCase):
 
     def test_source_label_public_contract_has_no_coordinate_leak(self):
         self.acquire()
+        self.assertTrue(self.dashboard.publisher.flush())
         snapshot = self.dashboard.application_state_store.snapshot()
         public = serialize_bootstrap(snapshot, {"revision": 0, "values": {}, "capabilities": {}}, {}, self.now)
         self.assertEqual(public["aircraft_source"]["mode"], "ADSBLOL_STANDALONE")

@@ -284,7 +284,7 @@ class MainSessionRecordingTests(unittest.TestCase):
             recorder.session_dir, delete_raw=True,
             error_handler=unittest.mock.ANY)
         for thread in threads:
-            thread.join.assert_called_once_with(timeout=2.0)
+            thread.join.assert_called_once_with()
 
     def test_shutdown_is_idempotent(self):
         transit.stop_event.clear()
@@ -294,7 +294,7 @@ class MainSessionRecordingTests(unittest.TestCase):
         with patch.object(transit, "archive_session", return_value=True):
             transit.shutdown_runtime([thread], recorder)
             transit.shutdown_runtime([thread], recorder)
-        thread.join.assert_called_once_with(timeout=2.0)
+        thread.join.assert_called_once_with()
         recorder.close.assert_called_once()
 
     def test_session_creation_error_is_fail_open(self):

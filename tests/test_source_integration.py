@@ -44,6 +44,7 @@ class SourceIntegrationTests(unittest.TestCase):
         self.enterContext(patch.object(runtime, "observer_position_provider", self.observer))
         self.enterContext(patch.object(runtime, "clock", SimpleNamespace(now_utc=lambda: NOW)))
         self.dashboard = DashboardRuntime(DashboardState(), application_state_store=ApplicationStateStore())
+        self.addCleanup(self.dashboard.publisher.close)
         self.poller = SnapshotPoller(self.observer, provider=Mock(), now=lambda: NOW,
                                      monotonic=lambda: 100.)
         self.bridge = StandaloneBridge(self.poller, self.dashboard, ConstantGeoid(), source_mode="AUTO")
@@ -62,6 +63,7 @@ class SourceIntegrationTests(unittest.TestCase):
         self.dashboard.state.set_aircraft_source({"requested_mode": "AUTO",
             "effective_mode": "LOCAL+ADSBLOL", "status": "HEALTHY", "enrichment": "ACTIVE"})
         self.dashboard._publish_application_state()
+        self.assertTrue(self.dashboard.publisher.flush())
         payload = serialize_bootstrap(self.dashboard.application_state_store.snapshot(),
             {"revision": 0, "values": {}, "capabilities": {}}, {}, NOW)
         for forbidden in ("source_owner", "centerline", "map_privacy", "pattern", "fusion_provenance"):

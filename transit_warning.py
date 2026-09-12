@@ -4465,6 +4465,10 @@ def render_full_table_snapshot():
     if deferred_true2d is not None:
         print("Deferred TRUE_2D: " + json.dumps(
             deferred_prediction_diagnostics(), sort_keys=True), file=output)
+    publisher = getattr(dashboard_runtime, "publisher", None)
+    if publisher is not None:
+        print("Public-state publisher: " + json.dumps(
+            publisher.snapshot(), sort_keys=True), file=output)
     return ANSI_ESCAPE_RE.sub("", output.getvalue())
 
 
@@ -4579,6 +4583,9 @@ def shutdown_runtime(threads, recorder):
         shutdown_complete = True
         stop_event.set()
     close_active_sockets()
+    stop_dashboard_mutations = getattr(dashboard_runtime, "stop_mutations", None)
+    if stop_dashboard_mutations is not None:
+        stop_dashboard_mutations()
     with aircraft_source_lock:
         old_poller = internet_source_poller
         if old_poller is not None:
@@ -4589,7 +4596,8 @@ def shutdown_runtime(threads, recorder):
         old_poller.close()
     for thread in threads:
         try:
-            thread.join(timeout=2.0)
+            # Drain accepted messages before prediction/publication consumers.
+            thread.join()
         except Exception:
             pass
     if deferred_true2d is not None:

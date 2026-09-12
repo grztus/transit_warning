@@ -564,3 +564,55 @@ class DeferredRuntimeTests(unittest.TestCase):
         self.idle()
         self.assertEqual(2, self.service.scheduler.snapshot()['committed'])
         self.assertIsNone(self.dashboard.state._live['SUN']['ABC123']['source_owner'])
+
+    def test_prediction_commit_does_not_wait_for_public_snapshot_build(self):
+        from app_backend.publisher import PublicStatePublisher
+        from app_backend.state import ApplicationStateStore
+        store = ApplicationStateStore()
+        started, release = threading.Event(), threading.Event()
+        def build():
+            self.assertEqual(threading.current_thread().name, 'public-state-publisher')
+            self.assertFalse(r.plane_dict_lock._is_owned())
+            started.set()
+            self.assertTrue(release.wait(3))
+            store.publish(self.dashboard.state.snapshot())
+        publisher = PublicStatePublisher(build, .02)
+        self.addCleanup(publisher.close)
+        self.addCleanup(release.set)
+        self.dashboard.publisher = publisher
+        publisher.mark_dirty()
+        self.assertTrue(started.wait(2))
+        self.submit()
+        self.idle()
+        self.assertEqual(1, self.service.scheduler.snapshot()['committed'])
+        self.assertEqual(2, self.recorder.call_count)
+        self.assertEqual(2, self.telegram.call_count)
+        self.assertEqual(2, self.capture.call_count)
+        self.assertEqual(0, store.snapshot()['revision'])
+        release.set()
+        self.assertTrue(publisher.flush())
+        self.assertEqual(1, len(store.snapshot()['state']['bodies']['sun']['candidates']))
+
+    def test_sbs_ingest_continues_while_publication_is_blocked(self):
+        from app_backend.publisher import PublicStatePublisher
+        started, release = threading.Event(), threading.Event()
+        threads = []
+        def build():
+            threads.append(threading.current_thread().name)
+            self.assertFalse(r.plane_dict_lock._is_owned())
+            self.assertFalse(r.aircraft_source_lock._is_owned())
+            started.set()
+            self.assertTrue(release.wait(3))
+            self.dashboard.state.snapshot()
+        publisher = PublicStatePublisher(build, .02)
+        self.addCleanup(publisher.close)
+        self.addCleanup(release.set)
+        self.dashboard.publisher = publisher
+        publisher.mark_dirty()
+        self.assertTrue(started.wait(2))
+        self.test_sbs_submits_without_solving_on_reader_and_records_each_observation()
+        self.assertEqual(0, publisher.snapshot()['published'])
+        release.set()
+        self.assertTrue(publisher.flush())
+        self.assertEqual({'public-state-publisher'}, set(threads))
+        self.assertLessEqual(publisher.snapshot()['published'], 2)
