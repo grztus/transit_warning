@@ -54,7 +54,7 @@ class AircraftSourceModeTests(unittest.TestCase):
         transit.aircraft_los_geoid_provider = object()
         poller, bridge = Mock(), Mock()
         with patch.object(transit, "SnapshotPoller", return_value=poller), \
-                patch.object(transit, "StandaloneBridge", return_value=bridge):
+                patch.object(transit, "ProductionInternetBridge", return_value=bridge):
             transit.set_aircraft_source_mode("INTERNET")
             poller.start.assert_called_once_with()
             bridge.step.assert_called_once_with()

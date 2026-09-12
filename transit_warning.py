@@ -812,6 +812,7 @@ def discard_authoritative_aircraft(icao, now_utc):
         icao)
     for transition in transitions:
         observe_candidate_authoritative_transition(transition, now_utc)
+        withdraw_authoritative_notification(getattr(transition, "prediction", None), "LOCAL")
     return transitions
 
 
@@ -2711,18 +2712,31 @@ def publish_authoritative_dashboard_prediction(prediction, now_utc,
         return False
 
 
-def emit_authoritative_transit_notification(prediction, now_utc):
+def withdraw_authoritative_notification(prediction, owner):
+    """Optional notification bookkeeping must not interrupt lifecycle consumers."""
+    try:
+        if telegram_notifier is not None and prediction is not None:
+            telegram_notifier.withdraw_authoritative(prediction, owner)
+    except Exception:
+        pass
+
+
+def finalize_authoritative_notification(icao, body, encounter_id, reason):
+    """Close notification identity on actual finalization, not snapshot delivery."""
+    try:
+        if telegram_notifier is not None:
+            telegram_notifier.finalize_authoritative(icao, body, encounter_id, reason)
+    except Exception:
+        pass
+
+
+def emit_authoritative_transit_notification(prediction, now_utc, owner="LOCAL"):
     """Feed one fresh true-2D update into existing Telegram stabilization."""
     if telegram_notifier is None:
         return False
     try:
         time_to_event = (
             prediction.predicted_transit_utc - now_utc).total_seconds()
-        if not (0 < time_to_event <= telegram_alert_horizon_seconds
-                and prediction.separation_deg
-                < telegram_alert_separation_deg):
-            telegram_notifier.cancel(prediction.icao, prediction.body)
-            return False
         event = TransitNotification(
             created_at_utc=now_utc, body=prediction.body,
             icao=prediction.icao, callsign=prediction.callsign or None,
@@ -2735,14 +2749,31 @@ def emit_authoritative_transit_notification(prediction, now_utc):
             distance_km=prediction.slant_range_km,
             encounter_id=prediction.encounter_id,
             prediction_geometry=prediction.model,
+            observer_epoch=prediction.observer_epoch,
+            source_owner=owner,
         )
+        # Bind the first replacement before range/toggle decisions, not only
+        # when it first qualifies. No coordinates enter notification bookkeeping.
+        if (prediction.lifecycle_state != "ACTIVE"
+                or prediction.boundary_status != "INTERIOR"):
+            telegram_notifier.record_decision("SKIPPED_INVALID_PREDICTION")
+            telegram_notifier.cancel(prediction.icao, prediction.body)
+            return False
+        telegram_notifier.observe_authoritative(event)
+        if not (0 < time_to_event <= telegram_alert_horizon_seconds
+                and prediction.separation_deg < telegram_alert_separation_deg):
+            telegram_notifier.record_decision("SKIPPED_RANGE")
+            telegram_notifier.cancel(prediction.icao, prediction.body)
+            return False
         try:
             body_enabled = dashboard_runtime.telegram_enabled(prediction.body)
         except Exception:
             body_enabled = True
         if not body_enabled:
+            telegram_notifier.record_decision("SKIPPED_BODY_DISABLED")
             telegram_notifier.suppress(event)
             return False
+        telegram_notifier.record_decision("ELIGIBLE")
         return telegram_notifier.consider(event)
     except Exception:
         return False
@@ -2995,8 +3026,9 @@ def clear_transit_prediction_state(icao, entry, celestial_body,
     predicted_times.pop(icao, None)
     vertical_transit_diagnostics.pop((icao, celestial_body), None)
     geometric_altitude_selections.pop((icao, celestial_body), None)
-    authoritative_terminal_predictions.pop(
+    previous_prediction = authoritative_terminal_predictions.pop(
         (str(icao).upper(), celestial_body.upper()), None)
+    withdraw_authoritative_notification(previous_prediction, "LOCAL")
     cancel_pending_transit_notification(icao, celestial_body)
     try:
         dashboard_runtime.withdraw_source(icao, celestial_body, None, clock.now_utc(),
@@ -3010,6 +3042,12 @@ def invalidate_observer_dependent_state(observer_context=None, reason="OBSERVER_
     """Remove live predictions computed for a previous observer epoch."""
     if deferred_true2d is not None:
         deferred_true2d.invalidate(source=reason == "SOURCE_RESET")
+    if telegram_notifier is not None:
+        try:
+            telegram_notifier.invalidate_authoritative(
+                source_handoff=reason == "SOURCE_RESET", now=clock.now_utc())
+        except Exception:
+            pass
     for icao, entry in plane_dict.items():
         clear_transit_prediction(entry, 18)
         clear_transit_prediction(entry, 23)
@@ -3090,6 +3128,7 @@ def set_aircraft_source_mode(mode):
     old_poller = None
     try:
         with aircraft_source_lock:
+            dashboard_runtime.state.notification_finalized = finalize_authoritative_notification
             old_poller = internet_source_poller
             if old_poller is not None:
                 old_poller.stop.set()
@@ -3106,7 +3145,7 @@ def set_aircraft_source_mode(mode):
                     return
                 internet_source_poller = SnapshotPoller(observer_position_provider)
                 if requested == "INTERNET":
-                    internet_source_bridge = StandaloneBridge(
+                    internet_source_bridge = ProductionInternetBridge(
                         internet_source_poller, dashboard_runtime,
                         aircraft_los_geoid_provider, source="ADSBLOL",
                         source_mode="INTERNET")
@@ -3284,7 +3323,59 @@ def step_auto_aircraft_source():
             internet_source_bridge.step()
 
 
-class AutoFusionBridge(StandaloneBridge):
+class ProductionInternetBridge(StandaloneBridge):
+    """Production-only lifecycle notification consumer for remote authority."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # A recreated standalone lifecycle starts its generation count again.
+        # Keep bridge ownership unique without changing LOCAL lifecycle policy.
+        from uuid import uuid4
+        self.notification_owner = "REMOTE:" + uuid4().hex
+        self.lifecycle.encounter_namespace = self.notification_owner
+
+    def _telegram_range(self, prediction):
+        return prediction.separation_deg < telegram_alert_separation_deg
+
+    def _on_rejected(self, reason):
+        try:
+            if telegram_notifier is not None:
+                telegram_notifier.record_decision(reason)
+        except Exception:
+            pass
+
+    def _on_transition(self, transition, context, now):
+        if transition.kind in (AuthoritativeTransitionKind.NONE,
+                               AuthoritativeTransitionKind.HELD):
+            self._on_rejected("SKIPPED_INVALID_PREDICTION")
+        if telegram_notifier is None or transition.prediction is None:
+            return
+        if transition.kind in (AuthoritativeTransitionKind.OPENED,
+                               AuthoritativeTransitionKind.UPDATED):
+            observer = self.poller.observer.resolve(now)
+            if (observer.epoch != transition.prediction.observer_epoch
+                    or observer.effective_source != transition.prediction.observer_source):
+                self._on_rejected("SKIPPED_INVALID_PREDICTION")
+                return
+            with plane_dict_lock:
+                state = self.dashboard.state
+                if not isinstance(self.dashboard, DisabledDashboard):
+                    identities = state.prediction_encounters(transition.prediction.icao)
+                    index = 0 if transition.prediction.body.upper() == "MOON" else 1
+                    current = identities[index]
+                    if current != (transition.prediction.encounter_id, self):
+                        self._on_rejected("SKIPPED_SOURCE_POLICY")
+                        return
+                if emit_authoritative_transit_notification(
+                        transition.prediction, now, self.notification_owner):
+                    mark_dashboard_history_worthy(
+                        transition.prediction.icao, transition.prediction.body)
+        elif transition.kind == AuthoritativeTransitionKind.WITHDRAWN:
+            withdraw_authoritative_notification(
+                transition.prediction, self.notification_owner)
+
+
+class AutoFusionBridge(ProductionInternetBridge):
     """Run TRUE_2D only when an AUTO predictor input needs remote fallback."""
     def __init__(self, poller, dashboard, geoid):
         super().__init__(poller, dashboard, geoid, source="AUTO_FUSION",
@@ -3358,7 +3449,7 @@ class AutoFusionBridge(StandaloneBridge):
         with plane_dict_lock:
             aircraft = self.aircraft.get(prediction.icao)
             if aircraft is None:
-                return
+                return False
             state = fuse_aircraft(
                 prediction.icao, local_fusion_fields(prediction.icao, now), aircraft,
                 evaluated_at_utc=_snapshot_utc_text(now),
@@ -3368,11 +3459,13 @@ class AutoFusionBridge(StandaloneBridge):
             view = predictor_view(state, application_qnh_hpa=get_metar_press(),
                                   geoid=self.geoid)
             if view is None or view["classification"] != "DEGRADED_UNKNOWN_FIELD_AGE":
-                return
+                return False
             if deferred_true2d is not None:
                 deferred_true2d.invalidate(prediction.icao)
-            super()._publish(prediction, context, now)
-            capture_authoritative_transit_prediction(prediction, context, now)
+            accepted = super()._publish(prediction, context, now)
+            if accepted:
+                capture_authoritative_transit_prediction(prediction, context, now)
+            return accepted
 
 
 def consume_authoritative_transition(transition, context, entry,
@@ -4469,6 +4562,9 @@ def render_full_table_snapshot():
     if publisher is not None:
         print("Public-state publisher: " + json.dumps(
             publisher.snapshot(), sort_keys=True), file=output)
+    if telegram_notifier is not None:
+        print("Telegram decisions: " + json.dumps(
+            telegram_notifier.diagnostics(), sort_keys=True), file=output)
     return ANSI_ESCAPE_RE.sub("", output.getvalue())
 
 

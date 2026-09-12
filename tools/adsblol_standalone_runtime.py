@@ -160,7 +160,8 @@ class StandaloneBridge:
     def _clear(self, now):
         self.last_success_receipt = None
         self.refresh_failed = False
-        self.lifecycle.invalidate_transitions()
+        for transition in self.lifecycle.invalidate_transitions():
+            self._on_transition(transition, None, now)
         self.dashboard.invalidate_source(self, now)
         if self.source_mode != "AUTO":
             self.dashboard.clear_body_positions()
@@ -171,7 +172,8 @@ class StandaloneBridge:
         self.missing.clear()
 
     def _remove(self, icao, now, reason="WITHDRAWN"):
-        self.lifecycle.discard_aircraft_transitions(icao)
+        for transition in self.lifecycle.discard_aircraft_transitions(icao):
+            self._on_transition(transition, None, now)
         for body in ("SUN", "MOON"):
             self.dashboard.withdraw_source(icao, body, self, now,
                                            reason=reason)
@@ -254,21 +256,34 @@ class StandaloneBridge:
             body_position_resolver=self.body_position,
             fusion_provenance=fusion)
 
+    def _on_transition(self, transition, context, now):
+        """Optional production consumer; standalone mode has no alert side effects."""
+
+
+    def _on_rejected(self, reason):
+        """Optional aggregate production diagnostic, without inputs or identity."""
+
+
+    def _telegram_range(self, prediction):
+        return False
+
+
     def _publish(self, prediction, context, now):
         if not 0 < (prediction.predicted_transit_utc - now).total_seconds() <= self.config.horizon_seconds:
             self.dashboard.withdraw_source(prediction.icao, prediction.body, self, now,
                                            reason="PREDICTION_UNAVAILABLE")
-            return
+            return False
         candidate = DashboardCandidate(
             body=prediction.body, icao=prediction.icao, callsign=prediction.callsign,
             predicted_event_utc=prediction.predicted_transit_utc, separation_deg=prediction.separation_deg,
             body_azimuth_deg=prediction.body_azimuth_deg, body_elevation_deg=prediction.body_altitude_deg,
             aircraft_elevation_deg=prediction.aircraft_altitude_deg, distance_km=None,
-            last_prediction_update_utc=now, telegram_range=False,
+            last_prediction_update_utc=now, telegram_range=self._telegram_range(prediction),
             transit_distance_km=prediction.slant_range_km, encounter_id=prediction.encounter_id,
             prediction_geometry="TRUE_2D",
             aircraft_source_mode=self.source_mode)
         self.dashboard.publish_authoritative(candidate, prediction, source_owner=self)
+        return True
 
     def step(self):
         now, mono = self.now(), self.monotonic()
@@ -278,6 +293,7 @@ class StandaloneBridge:
             self._clear(now)
             self.identity = identity
         if observer.requested_mode not in ("STATIC", "MANUAL"):
+            self._on_rejected("SKIPPED_SOURCE_POLICY")
             self.status = "PRIVACY_BLOCKED" if observer.requested_mode == "MOBILE" else "MANUAL_REQUIRED"
             self._diagnostics()
             return
@@ -289,6 +305,7 @@ class StandaloneBridge:
             anchor = self.anchors.get(icao)
             age = anchor[1] + max(0, mono - anchor[2]) if anchor else None
             if age is None or age > self.max_age:
+                self._on_rejected("SKIPPED_FRESHNESS")
                 self._remove(icao, now, reason="MOTION_STALE")
                 continue
             if icao in self.processed:
@@ -299,6 +316,7 @@ class StandaloneBridge:
                     if transition.kind == AuthoritativeTransitionKind.WITHDRAWN:
                         self.dashboard.withdraw_source(icao, body, self, now,
                                                        reason="PREDICTION_UNAVAILABLE")
+                    self._on_transition(transition, None, self.now())
                 continue
             with message_aircraft_cache():
                 for body in ("SUN", "MOON"):
@@ -316,18 +334,22 @@ class StandaloneBridge:
                     if newest and newest[0] != self.sequence:
                         return  # Latest-only: a completed newer snapshot wins.
                     if anchor[1] + max(0, self.monotonic() - anchor[2]) > self.max_age:
+                        self._on_rejected("SKIPPED_FRESHNESS")
                         self._remove(icao, self.now(), reason="MOTION_STALE")
                         break
                     transition = (self.lifecycle.consider_transition(context, result, now) if context else
                                   self.lifecycle.unavailable_transition(observer.epoch, icao, body, now))
                     if transition.kind in (AuthoritativeTransitionKind.OPENED, AuthoritativeTransitionKind.UPDATED):
                         self.missing.discard((icao, body))
-                        self._publish(transition.prediction, context, now)
+                        if self._publish(transition.prediction, context, now) is False:
+                            self._on_rejected("SKIPPED_SOURCE_POLICY")
+                            continue
                     else:
                         self.missing.add((icao, body))
                         if transition.kind == AuthoritativeTransitionKind.WITHDRAWN:
                             self.dashboard.withdraw_source(icao, body, self, now,
                                                        reason="PREDICTION_UNAVAILABLE")
+                    self._on_transition(transition, context, self.now())
             self.processed.add(icao)
         for body in ("SUN", "MOON"):
             position = self.body_position(body, now, observer.position)

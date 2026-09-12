@@ -74,11 +74,12 @@ class AuthoritativeTransitLifecycle:
     """
 
     def __init__(self, geometry=PredictionGeometry.LEGACY,
-                 grace_seconds=3.0, horizon_seconds=900.0):
+                 grace_seconds=3.0, horizon_seconds=900.0, encounter_namespace=None):
         value = geometry.value if isinstance(geometry, PredictionGeometry) else geometry
         self.geometry = PredictionGeometry(str(value).upper())
         self.grace_seconds = float(grace_seconds)
         self.horizon_seconds = float(horizon_seconds)
+        self.encounter_namespace = encounter_namespace
         self._active = {}
         self._generations = {}
         self._lock = threading.RLock()
@@ -201,13 +202,14 @@ class AuthoritativeTransitLifecycle:
     def _key(observer_epoch, icao, body):
         return (int(observer_epoch), str(icao).upper(), str(body).upper())
 
-    @staticmethod
-    def _prediction(context, exact, now_utc, generation):
+    def _prediction(self, context, exact, now_utc, generation):
         epoch = int(context.observer_context.epoch)
         icao = str(context.icao).upper()
         body = str(context.body).upper()
         encounter_id = "{}:{}:{}:{}".format(
             epoch, icao, body, generation)
+        if self.encounter_namespace is not None:
+            encounter_id += ":" + self.encounter_namespace
         return AuthoritativeTransitPrediction(
             observer_epoch=epoch,
             observer_source=str(context.observer_context.effective_source),

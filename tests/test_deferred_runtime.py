@@ -49,6 +49,7 @@ class DeferredRuntimeTests(unittest.TestCase):
         self.enterContext(patch.object(r, 'gong'))
         self.recorder = self.enterContext(patch.object(r, 'observe_candidate_authoritative_transition'))
         self.capture = self.enterContext(patch.object(r, 'capture_authoritative_transit_prediction'))
+        self.real_telegram_consumer = r.emit_authoritative_transit_notification
         self.telegram = self.enterContext(patch.object(r, 'emit_authoritative_transit_notification', return_value=False))
         self.dashboard = DashboardRuntime(DashboardState())
         self.enterContext(patch.object(r, 'dashboard_runtime', self.dashboard))
@@ -616,3 +617,21 @@ class DeferredRuntimeTests(unittest.TestCase):
         self.assertTrue(publisher.flush())
         self.assertEqual({'public-state-publisher'}, set(threads))
         self.assertLessEqual(publisher.snapshot()['published'], 2)
+
+    def test_interim_and_latest_commits_enqueue_once_per_body(self):
+        from telegram_notifications import TelegramNotifier
+        transport = Mock()
+        transport.send.return_value = (True, None)
+        notifier = TelegramNotifier(transport, stability_seconds=0)
+        self.addCleanup(notifier.close)
+        started, release = self.pause_worker()
+        with (patch.object(r, 'telegram_notifier', notifier),
+              patch.object(r, 'emit_authoritative_transit_notification', self.real_telegram_consumer)):
+            self.submit()
+            self.assertTrue(started.wait(2))
+            self.submit()  # Newest pending work survives the interim commit.
+            release.set()
+            self.idle()
+        self.assertEqual(2, self.service.scheduler.snapshot()['committed'])
+        self.assertEqual(2, notifier.diagnostics()['ENQUEUED'])
+        self.assertEqual(2, notifier.diagnostics()['SKIPPED_DUPLICATE'])

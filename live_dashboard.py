@@ -223,6 +223,7 @@ class DashboardState:
         self.sep_visible_max_deg = float(sep_visible_max_deg)
         self.history_store = history_store
         self.finalization_journal = finalization_journal
+        self.notification_finalized = None
         self.new_transit_indicator_enabled = bool(
             new_transit_indicator_enabled)
         self.new_transit_threshold_seconds = float(
@@ -441,9 +442,15 @@ class DashboardState:
         return changed
 
     def _trace_finalization(self, item, now, state, reason, decision, details=None):
+        candidate = item["candidate"]
+        if self.notification_finalized is not None:
+            try:
+                self.notification_finalized(candidate.icao, candidate.body,
+                                            candidate.encounter_id, reason)
+            except Exception:
+                pass  # Notification bookkeeping cannot interrupt finalization.
         if self.finalization_journal is None:
             return
-        candidate = item["candidate"]
         try:
             self.finalization_journal.append({
                 "schema_version": 1, "private_forensic_data": True,
