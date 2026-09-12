@@ -2,6 +2,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import App from "../App";
 import type { EventSourceFactory, EventSourceLike } from "../useBootstrap";
+import type { BootstrapDto } from "../types";
 import { activeFixture } from "./fixture";
 
 class FakeEventSource implements EventSourceLike {
@@ -165,5 +166,52 @@ describe("SSE realtime transport", () => {
     expect(screen.getByText(/API unavailable · rev 4/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "STATIC" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByText("RECENT1")).toBeInTheDocument();
+  });
+});
+
+
+describe("HTTP and stream ordering", () => {
+  it("does not let delayed HTTP undo newer live and settings events", async () => {
+    let finish!: (snapshot: BootstrapDto) => void;
+    const client = vi.fn().mockResolvedValueOnce(activeFixture)
+      .mockImplementation(() => new Promise<BootstrapDto>(resolve => { finish = resolve; }));
+    const { sources } = setup(client);
+    await screen.findByText("TEST123");
+    act(() => sources[0].malformed("live_state"));
+    act(() => sources[0].emit("live_state", { schema_version: 1, event: "live_state", live_revision: 43,
+      payload: { ...activeFixture, bodies: { ...activeFixture.bodies,
+        sun: { current_position: null, candidates: [{ callsign: "LATEST" }] } } } }));
+    act(() => sources[0].emit("settings", { schema_version: 1, event: "settings", settings_revision: 4,
+      payload: { values: { ...activeFixture.settings, telegram: { sun_enabled: false, moon_enabled: true } },
+        capabilities: activeFixture.capabilities } }));
+    await act(async () => finish(activeFixture));
+    expect(screen.getByText("LATEST")).toBeInTheDocument();
+    expect(screen.queryByText("TEST123")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Telegram SUN" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "Telegram MOON" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("retains newer HTTP results when concurrent resyncs finish out of order", async () => {
+    const finishes: Array<(snapshot: BootstrapDto) => void> = [];
+    const client = vi.fn().mockResolvedValueOnce(activeFixture)
+      .mockImplementation(() => new Promise<BootstrapDto>(resolve => { finishes.push(resolve); }));
+    const { sources } = setup(client);
+    await screen.findByText("TEST123");
+    act(() => { sources[0].malformed("live_state"); sources[0].malformed("live_state"); });
+    await act(async () => finishes[1]({ ...activeFixture, live_revision: 50,
+      bodies: { ...activeFixture.bodies, sun: { current_position: null, candidates: [{ callsign: "NEWHTTP" }] } } }));
+    await act(async () => finishes[0](activeFixture));
+    expect(screen.getByText("NEWHTTP")).toBeInTheDocument();
+  });
+
+  it("does not report an open stream offline when auxiliary HTTP fails", async () => {
+    const client = vi.fn().mockResolvedValueOnce(activeFixture).mockRejectedValue(new Error("temporary"));
+    const { sources } = setup(client);
+    await screen.findByText("TEST123");
+    await act(async () => { sources[0].onopen?.(); sources[0].malformed("live_state"); });
+    await act(async () => sources[0].malformed("live_state"));
+    expect(screen.getByText("REALTIME")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("ACTIVE");
+    expect(screen.queryByText(/Connection failed/)).not.toBeInTheDocument();
   });
 });

@@ -218,6 +218,16 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
   const [gpsAvailable, setGpsAvailable] = useState<boolean | null>(null);
   const [gpsRunning, setGpsRunning] = useState(false);
   const [gpsMessage, setGpsMessage] = useState<string | null>(null);
+  const [controlsExpanded, setControlsExpanded] = useState(false);
+  const [backendExpanded, setBackendExpanded] = useState(false);
+  const gpsGeneration = useRef(0);
+  const [gpsFailed, setGpsFailed] = useState(false);
+  const observerMode = snapshot?.settings.observer.requested_mode;
+  const visibleObserverMode = observerMode === "MANUAL" ? "STATIC" : observerMode;
+  const observerLabel = (source?: string) => source === "MANUAL" ? "STATIC (custom)" : source;
+  const gpsControlClass = `gps-control ${gpsFailed ? "gps-attention" :
+    gpsRunning && snapshot?.observer.effective_source === "MOBILE_FRESH" ? "gps-active" :
+    gpsRunning ? "gps-waiting" : "gps-attention"}`;
   const gpsWatchId = useRef<number | null>(null);
   const gpsActive = useRef(false);
   const [view, setView] = useState<"LIVE" | "HISTORY">("LIVE");
@@ -243,6 +253,7 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
     return () => {
       active = false;
       gpsActive.current = false;
+      gpsGeneration.current++;
       if (gpsWatchId.current !== null && navigator.geolocation) {
         navigator.geolocation.clearWatch(gpsWatchId.current);
       }
@@ -251,7 +262,7 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
   }, [gpsClient]);
   useEffect(() => {
     if (!gpsRunning) return;
-    const timer = window.setInterval(() => void state.resync(), 3_000);
+    const timer = window.setInterval(() => void state.resync().catch(() => {}), 3_000);
     return () => window.clearInterval(timer);
   }, [gpsRunning, state.resync]);
   const loadHistory = async (append = false) => {
@@ -331,73 +342,95 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
     if (saved) setManualEditorOpen(false);
   };
 
-  const selectObserverMode = (mode: "STATIC" | "MOBILE" | "MANUAL") => {
-    if (mode === "MANUAL" && !snapshot?.settings.observer.manual_position_saved) {
-      setManualEditorOpen(true);
-      setManualError(null);
-      setSettingsMessage(null);
-      return;
-    }
-    void changeSetting("observer-mode", { observer: { requested_mode: mode } });
+  const resetLocationDraft = () => {
+    const fixed = snapshot?.settings.observer;
+    setManualDraft(fixed?.manual_position_saved
+      ? { lat: String(fixed.manual_lat_deg), lon: String(fixed.manual_lon_deg),
+        elevation: String(fixed.manual_elevation_amsl_m) }
+      : { lat: "", lon: "", elevation: "" });
+    setManualError(null);
   };
-
-  const startGps = () => {
-    if (gpsRunning || gpsAvailable !== true) return;
-    if (!navigator.geolocation) {
-      setGpsMessage("Browser GPS is unavailable; use HTTPS or a supported browser");
-      return;
-    }
-    gpsActive.current = true;
-    setGpsRunning(true);
-    setGpsMessage("Waiting for browser GPS position");
-    try {
-      gpsWatchId.current = navigator.geolocation.watchPosition(
-        (position) => {
-          if (!gpsActive.current) return;
-          const coordinates = position.coords;
-          void gpsClient.update({
-            latitude: coordinates.latitude,
-            longitude: coordinates.longitude,
-            accuracy: coordinates.accuracy,
-            altitude: coordinates.altitude,
-            altitudeAccuracy: coordinates.altitudeAccuracy,
-            timestamp: position.timestamp,
-          }).then(() => {
-            if (!gpsActive.current) return;
-            setGpsMessage(null);
-            void state.resync();
-          }).catch((error) => {
-            if (gpsActive.current) setGpsMessage(
-              error instanceof Error ? error.message : "Mobile GPS update failed");
-          });
-        },
-        (error) => {
-          if (gpsActive.current) setGpsMessage(geolocationErrorMessage(error));
-        },
-        { enableHighAccuracy: true, timeout: 10_000, maximumAge: 0 },
-      );
-    } catch {
-      gpsActive.current = false;
-      setGpsRunning(false);
-      setGpsMessage("Browser GPS is unavailable; use HTTPS or a supported browser");
-    }
-  };
-
   const stopGps = async () => {
+    const wasActive = gpsActive.current;
     gpsActive.current = false;
+    const generation = ++gpsGeneration.current;
     if (gpsWatchId.current !== null && navigator.geolocation) {
       navigator.geolocation.clearWatch(gpsWatchId.current);
     }
     gpsWatchId.current = null;
     setGpsRunning(false);
+    setGpsFailed(false);
     setGpsMessage(null);
+    if (!wasActive) return;
     try {
       await gpsClient.clear();
-      await state.resync();
+      if (generation === gpsGeneration.current) await state.resync();
     } catch (error) {
-      setGpsMessage(error instanceof Error ? error.message : "Could not stop Mobile GPS");
+      if (generation === gpsGeneration.current) setGpsMessage(
+        error instanceof Error ? error.message : "Could not stop Mobile GPS");
     }
   };
+  const startGps = () => {
+    if (gpsActive.current && !gpsFailed) return;
+    if (gpsAvailable !== true || !navigator.geolocation) {
+      setGpsFailed(true);
+      setGpsMessage("Browser GPS is unavailable; use HTTPS or a supported browser");
+      return;
+    }
+    if (gpsWatchId.current !== null) navigator.geolocation.clearWatch(gpsWatchId.current);
+    const generation = ++gpsGeneration.current;
+    const active = () => gpsActive.current && generation === gpsGeneration.current;
+    const fail = (message: string) => {
+      if (!active()) return;
+      setGpsFailed(true);
+      setGpsMessage(message);
+    };
+    gpsActive.current = true;
+    setGpsRunning(true);
+    setGpsFailed(false);
+    setGpsMessage("Waiting for browser GPS position");
+    try {
+      gpsWatchId.current = navigator.geolocation.watchPosition(position => {
+        if (!active()) return;
+        const coordinates = position.coords;
+        if (!Number.isFinite(coordinates.latitude) || !Number.isFinite(coordinates.longitude)
+            || Math.abs(coordinates.latitude) > 90 || Math.abs(coordinates.longitude) > 180) {
+          fail("Browser GPS position is unavailable");
+          return;
+        }
+        void gpsClient.update({ latitude: coordinates.latitude, longitude: coordinates.longitude,
+          accuracy: coordinates.accuracy, altitude: coordinates.altitude,
+          altitudeAccuracy: coordinates.altitudeAccuracy, timestamp: position.timestamp,
+        }).then(() => {
+          if (!active()) return;
+          setGpsFailed(false);
+          setGpsMessage(null);
+          void state.resync().catch(() => {});
+        }).catch(error => fail(error instanceof Error ? error.message : "Mobile GPS update failed"));
+      }, error => fail(geolocationErrorMessage(error)),
+      { enableHighAccuracy: true, timeout: 10_000, maximumAge: 0 });
+    } catch {
+      fail("Browser GPS is unavailable; use HTTPS or a supported browser");
+      gpsActive.current = false;
+      setGpsRunning(false);
+    }
+  };
+  const selectObserverMode = async (mode: "STATIC" | "MOBILE") => {
+    setManualEditorOpen(false);
+    setManualError(null);
+    // Invalidate callbacks immediately, before awaiting any HTTP operation.
+    if (mode === "STATIC") void stopGps();
+    const generation = gpsGeneration.current;
+    if (mode !== visibleObserverMode) {
+      if (!await changeSetting("observer-mode", { observer: { requested_mode: mode } })) return;
+    }
+    if (mode === "MOBILE" && generation === gpsGeneration.current) startGps();
+  };
+  useEffect(() => {
+    // A mode change from another client also relinquishes browser GPS.
+    if (observerMode && observerMode !== "MOBILE") void stopGps();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [observerMode]);
 
   return (
     <main>
@@ -430,34 +463,38 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
       ) : (
         <>
           <section className="status-strip panel">
-            <div><span>Backend state</span><strong>{snapshot.health}</strong></div>
-            <div><span>Generated</span><strong>{time(snapshot.generated_at_utc || undefined)}</strong></div>
-            <div><span>Last refresh</span><strong>{state.lastSuccessfulRefresh?.toLocaleTimeString() || "—"}</strong></div>
+            <button type="button" className="top-panel-toggle"
+              aria-expanded={backendExpanded} aria-controls="backend-status-details"
+              aria-label={`${backendExpanded ? "Collapse" : "Expand"} Backend state panel`}
+              onClick={() => setBackendExpanded(current => !current)}>
+              <strong>Backend state</strong><span>{snapshot.health}</span>
+              <span>Generated {time(snapshot.generated_at_utc || undefined)}</span>
+              <span aria-hidden="true">{backendExpanded ? "-" : "+"}</span>
+            </button>
+            {backendExpanded && <div id="backend-status-details" className="status-details">
+              <div><span>Transport</span><strong>{state.transport}</strong></div>
+              <div><span>Last refresh</span><strong>{state.lastSuccessfulRefresh?.toLocaleTimeString() || "Unavailable"}</strong></div>
+              <div><span>Aircraft source requested</span><strong>{snapshot.aircraft_source?.requested_mode || "Unavailable"}</strong></div>
+              <div><span>Effective</span><strong>{snapshot.aircraft_source?.effective_mode || "Unavailable"}</strong></div>
+              <div><span>Provider</span><strong>{snapshot.aircraft_source?.provider || "Unavailable"}</strong></div>
+              <div><span>Provider health</span><strong>{snapshot.aircraft_source?.status || "Unavailable"}</strong></div>
+            </div>}
           </section>
 
           {view === "LIVE" ? <>
-            <section className="predictions-section" aria-labelledby="predictions-title">
-              <header className="predictions-header">
-                <h2 id="predictions-title">TRANSIT PREDICTIONS</h2>
-              </header>
-              <div className="body-grid">
-                <BodyPanel name="SUN" state={snapshot.bodies.sun} nowMs={nowMs} />
-                <BodyPanel name="MOON" state={snapshot.bodies.moon} nowMs={nowMs} />
-              </div>
-            </section>
-
           <section className="panel controls-panel">
-            <header><h2>Controls</h2><span className="controls-meta">
-              API {snapshot.capabilities.runtime_settings ? "available" : "unavailable"} · rev {snapshot.settings_revision}
-            </span></header>
+            <header><h2>Controls</h2><button type="button" aria-expanded={controlsExpanded}
+              aria-controls="controls-secondary" aria-label={`${controlsExpanded ? "Collapse" : "Expand"} Controls panel`}
+              onClick={() => setControlsExpanded(current => !current)}>{controlsExpanded ? "Compact" : "Expand"}</button></header>
+            <div className="controls-primary">
             <div className="control-group observer-control-group">
               <strong>Observer</strong>
               <div className="control-row" aria-label="Observer mode">
-              {(["STATIC", "MOBILE", "MANUAL"] as const).map((mode) => (
+              {(["STATIC", "MOBILE"] as const).map((mode) => (
                 <button key={mode} type="button"
-                  aria-pressed={snapshot.settings.observer.requested_mode === mode}
+                  aria-pressed={visibleObserverMode === mode}
                   disabled={pending !== null}
-                  onClick={() => selectObserverMode(mode)}>
+                  onClick={() => void selectObserverMode(mode)}>
                   {pending === "observer-mode" ? "CHANGING…" : mode}
                 </button>
               ))}
@@ -473,43 +510,23 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
                 </button>
               </span>
               {snapshot.settings.observer.requested_mode === "MOBILE" && !gpsRunning &&
-                <button type="button" className="gps-control" disabled={gpsAvailable !== true}
+                <button type="button" className={gpsControlClass} disabled={gpsAvailable !== true}
                   onClick={startGps}>Start GPS</button>}
-              {gpsRunning && <button type="button" className="gps-control"
+              {gpsRunning && <button type="button" className={gpsControlClass}
                 onClick={() => void stopGps()}>Stop GPS</button>}
             </div>
-            {(snapshot.settings.observer.requested_mode === "MANUAL" || manualEditorOpen) &&
-              <div className="manual-observer" aria-label="Manual observer position">
-                <label>LAT <input aria-label="Manual latitude" inputMode="decimal"
-                  value={manualDraft.lat} onChange={(event) => setManualDraft({
-                    ...manualDraft, lat: event.target.value })} /></label>
-                <label>LON <input aria-label="Manual longitude" inputMode="decimal"
-                  value={manualDraft.lon} onChange={(event) => setManualDraft({
-                    ...manualDraft, lon: event.target.value })} /></label>
-                <label>ELEV AMSL <input aria-label="Manual elevation AMSL" inputMode="decimal"
-                  value={manualDraft.elevation} onChange={(event) => setManualDraft({
-                    ...manualDraft, elevation: event.target.value })} /></label>
-                <button type="button" disabled={pending !== null}
-                  onClick={saveManualPosition}>SAVE</button>
-              </div>}
-            {manualError && <p className="settings-message" role="alert">{manualError}</p>}
-            {gpsMessage && <p className="gps-message" role="alert">{gpsMessage}</p>}
-            <p className="observer-meta">
-              Requested {snapshot.observer.requested_mode || "—"} · Effective {snapshot.observer.effective_source || "—"}
-              {snapshot.settings.observer.requested_mode === "MOBILE" && <>
-                {" · "}GPS {snapshot.observer.gps_health || "—"}
-                {" · "}Age {value(snapshot.observer.mobile_age_seconds ?? undefined, " s")}
-                {" · "}Accuracy {value(snapshot.observer.mobile_accuracy_m ?? undefined, " m")}
-              </>}
-              {snapshot.observer.fallback_active && " · Fallback active"}
-              {snapshot.observer.effective_elevation_m != null &&
-                <> · Elevation {value(snapshot.observer.effective_elevation_m, " m AMSL")}</>}
-            </p>
-            {snapshot.settings.observer.requested_mode === "MOBILE" &&
-              (snapshot.observer.fallback_active || !["MOBILE", "MOBILE_FRESH"].includes(
-                snapshot.observer.effective_source || "")) && (
-              <p className="degraded" role="status">MOBILE requested · effective {snapshot.observer.effective_source || "unavailable"}</p>
-            )}
+            <div className="control-group aircraft-source-control-group">
+              <strong>Aircraft source</strong><div className="control-row" aria-label="Aircraft source">
+                {(["LOCAL", "INTERNET", "AUTO"] as const).map(mode => <button key={mode}
+                  type="button" aria-pressed={snapshot.settings.aircraft_source?.requested_mode === mode}
+                  disabled={pending !== null} onClick={() => void changeSetting("aircraft-source", {
+                    aircraft_source: { requested_mode: mode } })}>{mode}</button>)}
+              </div>
+              <p className="source-meta" hidden={!controlsExpanded}>Requested {snapshot.aircraft_source?.requested_mode || "Unavailable"}
+                {" / "}Effective {snapshot.aircraft_source?.effective_mode || "Unavailable"}
+                {" / "}Provider {snapshot.aircraft_source?.provider || "Unavailable"}
+                {" / "}Health {snapshot.aircraft_source?.status || "Unavailable"}</p>
+            </div>
             <div className="control-group telegram-control-group">
               <strong>Telegram</strong>
             {(["sun", "moon"] as const).map((body) => (
@@ -526,8 +543,65 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
               </div>
             ))}
             </div>
+            </div>
+            <div id="controls-secondary" hidden={!controlsExpanded}>
+            <span className="controls-meta">
+              API {snapshot.capabilities.runtime_settings ? "available" : "unavailable"} · rev {snapshot.settings_revision}
+            </span>
+            {visibleObserverMode === "STATIC" && <div className="static-location">
+              <strong>STATIC location</strong>
+              <span>{observerMode === "MANUAL" ? "Custom fixed location" : "Default configured location"}</span>
+              {!manualEditorOpen ? <button type="button" disabled={pending !== null}
+                onClick={() => { resetLocationDraft(); setManualEditorOpen(true); }}>Change location</button> :
+              <div className="manual-observer" aria-label="Static location coordinates">
+                <label>LAT <input aria-label="Static latitude" inputMode="decimal"
+                  value={manualDraft.lat} onChange={event => setManualDraft({ ...manualDraft, lat: event.target.value })} /></label>
+                <label>LON <input aria-label="Static longitude" inputMode="decimal"
+                  value={manualDraft.lon} onChange={event => setManualDraft({ ...manualDraft, lon: event.target.value })} /></label>
+                <label>ELEV AMSL <input aria-label="Static elevation AMSL" inputMode="decimal"
+                  value={manualDraft.elevation} onChange={event => setManualDraft({ ...manualDraft, elevation: event.target.value })} /></label>
+                <button type="button" disabled={pending !== null} onClick={saveManualPosition}>Apply</button>
+                <button type="button" disabled={pending !== null}
+                  onClick={() => { resetLocationDraft(); setManualEditorOpen(false); }}>Cancel</button>
+              </div>}
+              {observerMode === "MANUAL" && <button type="button" disabled={pending !== null}
+                onClick={async () => {
+                  if (await changeSetting("observer-mode", { observer: { requested_mode: "STATIC" } })) {
+                    resetLocationDraft(); setManualEditorOpen(false);
+                  }
+                }}>Use default location</button>}
+            </div>}
+            </div>
+            {manualError && <p className="settings-message" role="alert">{manualError}</p>}
+            {gpsMessage && <p className="gps-message" role="alert">{gpsMessage}</p>}
+            <p className="observer-meta">
+              Requested {observerLabel(snapshot.observer.requested_mode) || "—"} · Effective {observerLabel(snapshot.observer.effective_source) || "—"}
+              {snapshot.settings.observer.requested_mode === "MOBILE" && <>
+                {" · "}GPS {snapshot.observer.gps_health || "—"}
+                {" · "}Age {value(snapshot.observer.mobile_age_seconds ?? undefined, " s")}
+                {" · "}Accuracy {value(snapshot.observer.mobile_accuracy_m ?? undefined, " m")}
+              </>}
+              {snapshot.observer.fallback_active && " · Fallback active"}
+              {snapshot.observer.effective_elevation_m != null &&
+                <> · Elevation {value(snapshot.observer.effective_elevation_m, " m AMSL")}</>}
+            </p>
+            {snapshot.settings.observer.requested_mode === "MOBILE" &&
+              (snapshot.observer.fallback_active || !["MOBILE", "MOBILE_FRESH"].includes(
+                snapshot.observer.effective_source || "")) && (
+              <p className="degraded" role="status">MOBILE requested · effective {snapshot.observer.effective_source || "unavailable"}</p>
+            )}
             {settingsMessage && <p className="settings-message" role="alert">{settingsMessage}</p>}
           </section>
+            <section className="predictions-section" aria-labelledby="predictions-title">
+              <header className="predictions-header">
+                <h2 id="predictions-title">TRANSIT PREDICTIONS</h2>
+              </header>
+              <div className="body-grid">
+                <BodyPanel name="SUN" state={snapshot.bodies.sun} nowMs={nowMs} />
+                <BodyPanel name="MOON" state={snapshot.bodies.moon} nowMs={nowMs} />
+              </div>
+            </section>
+
           <section className="panel recent-panel">
             <header><h2>Recent events</h2></header>
             {snapshot.recent_events.length ? (

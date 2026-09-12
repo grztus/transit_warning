@@ -115,7 +115,17 @@ export interface PresentationDto {
   sep_visible_max_deg?: number;
 }
 
+export interface AircraftSourceDto {
+  mode?: string;
+  requested_mode?: string;
+  effective_mode?: string;
+  provider?: string;
+  status?: string;
+  trust_policy?: string;
+}
+
 export interface BootstrapDto {
+  aircraft_source?: AircraftSourceDto;
   schema_version: 1;
   live_revision: number;
   settings_revision: number;
@@ -133,6 +143,7 @@ export interface BootstrapDto {
 }
 
 export interface RuntimeSettingsValuesDto {
+  aircraft_source?: { requested_mode: "LOCAL" | "INTERNET" | "AUTO" };
   telegram: { sun_enabled: boolean; moon_enabled: boolean };
   observer: {
     requested_mode: "STATIC" | "MOBILE" | "MANUAL";
@@ -149,7 +160,7 @@ export interface LiveStateEvent {
   event: "live_state";
   live_revision: number;
   generated_at_utc?: string | null;
-  payload: Pick<BootstrapDto, "generated_at_utc" | "bodies" | "recent_events" | "presentation">;
+  payload: Pick<BootstrapDto, "generated_at_utc" | "bodies" | "recent_events" | "presentation" | "aircraft_source">;
 }
 
 export interface SettingsSnapshotDto {
@@ -164,6 +175,7 @@ export interface SettingsMutation {
   expected_revision: number;
   command_id: string;
   changes: {
+    aircraft_source?: RuntimeSettingsValuesDto["aircraft_source"];
     telegram?: Partial<RuntimeSettingsValuesDto["telegram"]>;
     observer?: Partial<RuntimeSettingsValuesDto["observer"]>;
   };

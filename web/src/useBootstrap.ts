@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchBootstrap, POLL_INTERVAL_MS, STREAM_ENDPOINT, type BootstrapFetcher } from "./api";
 import type { BootstrapDto, LiveStateEvent, SettingsEvent } from "./types";
 
-export type TransportState = "REALTIME" | "RECONNECTING" | "POLLING FALLBACK" | "OFFLINE";
+export type TransportState = "REALTIME" | "RECONNECTING" | "POLLING FALLBACK";
 export interface EventSourceLike {
   close(): void;
   addEventListener(type: string, listener: (event: MessageEvent<string>) => void): void;
@@ -16,6 +16,7 @@ export interface BootstrapPollingState {
   offline: boolean;
   loading: boolean;
   transport: TransportState;
+  reconnecting: boolean;
   resync(): Promise<void>;
 }
 
@@ -34,6 +35,23 @@ export function useBootstrap(
   const [lastSuccessfulRefresh, setLastSuccessfulRefresh] = useState<Date | null>(null);
   const [loading, setLoading] = useState(true);
   const [transport, setTransport] = useState<TransportState>("RECONNECTING");
+  const [offline, setOffline] = useState(false);
+  const [reconnecting, setReconnecting] = useState(eventSourceFactory !== undefined);
+  const consecutiveFailures = useRef(0);
+  const streamOpen = useRef(false);
+
+  const contactSucceeded = useCallback(() => {
+    consecutiveFailures.current = 0;
+    setOffline(false);
+  }, []);
+  const contactFailed = useCallback(() => {
+    // With a retained snapshot, one transient HTTP failure is insufficient
+    // evidence that the backend is offline. An open SSE stream is positive
+    // backend contact regardless of an auxiliary resync failure.
+    if (streamOpen.current) return;
+    consecutiveFailures.current += 1;
+    if (!snapshotRef.current || consecutiveFailures.current >= 2) setOffline(true);
+  }, []);
 
   const install = useCallback((next: BootstrapDto) => {
     snapshotRef.current = next;
@@ -41,9 +59,22 @@ export function useBootstrap(
     setLastSuccessfulRefresh(new Date());
   }, []);
   const resync = useCallback(async () => {
-    const next = await client();
-    install(next);
-  }, [client, install]);
+    try {
+      const started = snapshotRef.current;
+      const next = await client();
+      const current = snapshotRef.current;
+      // A delayed HTTP snapshot must not undo newer SSE/HTTP state (and make
+      // an active selected encounter appear withdrawn). Allow revision resets
+      // after server restart when no newer state arrived during this request.
+      if (!current || current === started ||
+          (next.live_revision >= current.live_revision &&
+           next.settings_revision >= current.settings_revision)) install(next);
+      contactSucceeded();
+    } catch (error) {
+      contactFailed();
+      throw error;
+    }
+  }, [client, contactFailed, contactSucceeded, install]);
 
   useEffect(() => {
     let cancelled = false;
@@ -58,13 +89,18 @@ export function useBootstrap(
     const pollFallback = async () => {
       if (cancelled || !fallbackActive) return;
       try {
+        const started = snapshotRef.current;
         const next = await client();
         if (!cancelled && fallbackActive) {
-          install(next);
+          const current = snapshotRef.current;
+          if (!current || current === started ||
+              (next.live_revision >= current.live_revision &&
+               next.settings_revision >= current.settings_revision)) install(next);
+          contactSucceeded();
           setTransport("POLLING FALLBACK");
         }
       } catch {
-        if (!cancelled && fallbackActive) setTransport("OFFLINE");
+        if (!cancelled && fallbackActive) contactFailed();
       }
       if (!cancelled && fallbackActive) pollTimer = setTimeout(pollFallback, pollIntervalMs);
     };
@@ -79,7 +115,7 @@ export function useBootstrap(
       if (fallbackTimer === undefined) fallbackTimer = setTimeout(startFallback, fallbackDelayMs);
     };
     const safeResync = async () => {
-      try { await resync(); } catch { if (!cancelled) setTransport("OFFLINE"); }
+      try { await resync(); } catch { /* resync records transport failure */ }
     };
     const applyLive = (event: MessageEvent<string>) => {
       try {
@@ -127,6 +163,7 @@ export function useBootstrap(
       }
       source = candidate;
       connectionCount += 1;
+      setReconnecting(true);
       setTransport("RECONNECTING");
       candidate.addEventListener("live_state", applyLive);
       candidate.addEventListener("settings", applySettings);
@@ -137,6 +174,9 @@ export function useBootstrap(
         pollTimer = undefined;
         if (fallbackTimer !== undefined) clearTimeout(fallbackTimer);
         fallbackTimer = undefined;
+        streamOpen.current = true;
+        contactSucceeded();
+        setReconnecting(false);
         setTransport("REALTIME");
         if (connectionCount > 1) void safeResync();
       };
@@ -144,6 +184,8 @@ export function useBootstrap(
         if (cancelled || source !== candidate) return;
         candidate.close();
         source = undefined;
+        streamOpen.current = false;
+        setReconnecting(true);
         setTransport("RECONNECTING");
         scheduleFallback();
         scheduleReconnect();
@@ -157,23 +199,24 @@ export function useBootstrap(
       }, reconnectDelayMs);
     };
     const start = async () => {
-      try { await resync(); } catch { setTransport("OFFLINE"); }
+      try { await resync(); } catch { /* resync records transport failure */ }
       finally { if (!cancelled) setLoading(false); }
       if (cancelled) return;
-      if (!eventSourceFactory) { startFallback(); return; }
+      if (!eventSourceFactory) { setReconnecting(false); startFallback(); return; }
       connect();
     };
     void start();
     return () => {
       cancelled = true;
+      streamOpen.current = false;
       source?.close();
       if (fallbackTimer !== undefined) clearTimeout(fallbackTimer);
       if (pollTimer !== undefined) clearTimeout(pollTimer);
       if (reconnectTimer !== undefined) clearTimeout(reconnectTimer);
       if (staleTimer !== undefined) clearTimeout(staleTimer);
     };
-  }, [eventSourceFactory, fallbackDelayMs, pollIntervalMs, reconnectDelayMs, resync, install]);
+  }, [contactFailed, contactSucceeded, eventSourceFactory, fallbackDelayMs, pollIntervalMs,
+    reconnectDelayMs, resync, install]);
 
-  return { snapshot, lastSuccessfulRefresh, offline: transport === "OFFLINE", loading, transport,
-    resync };
+  return { snapshot, lastSuccessfulRefresh, offline, loading, transport, reconnecting, resync };
 }

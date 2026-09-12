@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import App from "../App";
 import { SettingsConflictError } from "../api";
-import type { MobileGpsPositionDto, SettingsSnapshotDto } from "../types";
+import type { BootstrapDto, MobileGpsPositionDto, SettingsSnapshotDto } from "../types";
 import type { EventSourceFactory } from "../useBootstrap";
 import { activeFixture } from "./fixture";
 
@@ -11,6 +11,10 @@ const accepted = (revision: number): SettingsSnapshotDto => ({
   capabilities: activeFixture.capabilities,
   persistence: "RUNTIME_ONLY_RESET_TO_CONFIG_ON_RESTART",
 });
+const openLocation = async () => {
+  fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
+  fireEvent.click(screen.getByRole("button", { name: "Change location" }));
+};
 const quietStream: EventSourceFactory = () => ({ close() {}, addEventListener() {},
   onopen: null, onerror: null });
 
@@ -84,8 +88,13 @@ describe("synchronized operational controls", () => {
   it("sends STATIC to MOBILE and MOBILE to STATIC mode requests", async () => {
     const staticFixture = { ...activeFixture, settings: { ...activeFixture.settings,
       observer: { ...activeFixture.settings.observer, requested_mode: "STATIC" as const } } };
-    const mobileMutate = vi.fn().mockResolvedValue(accepted(4));
-    render(<App client={async () => staticFixture} settingsMutator={mobileMutate}
+    let current: BootstrapDto = staticFixture;
+    const mobileMutate = vi.fn().mockImplementation(async () => {
+      current = { ...current, settings: { ...current.settings,
+        observer: { ...current.settings.observer, requested_mode: "MOBILE" } } };
+      return accepted(4);
+    });
+    render(<App client={async () => current} settingsMutator={mobileMutate}
       eventSourceFactory={quietStream} />);
     fireEvent.click(await screen.findByRole("button", { name: "MOBILE" }));
     await waitFor(() => expect(mobileMutate).toHaveBeenCalledWith(expect.objectContaining({
@@ -100,54 +109,60 @@ describe("synchronized operational controls", () => {
     })));
   });
 
-  it("opens a blank editor without a request for first-ever MANUAL selection", async () => {
+  it("opens a blank editor without a request for first custom STATIC location", async () => {
     const staticFixture = { ...activeFixture, settings: { ...activeFixture.settings,
       observer: { ...activeFixture.settings.observer, requested_mode: "STATIC" as const,
         manual_position_saved: false } } };
     const mutate = vi.fn();
     render(<App client={async () => staticFixture} settingsMutator={mutate}
       eventSourceFactory={quietStream} />);
-    fireEvent.click(await screen.findByRole("button", { name: "MANUAL" }));
-    expect(await screen.findByLabelText("Manual latitude")).toHaveValue("");
-    expect(screen.getByLabelText("Manual longitude")).toHaveValue("");
-    expect(screen.getByLabelText("Manual elevation AMSL")).toHaveValue("");
+    await openLocation();
+    expect(await screen.findByLabelText("Static latitude")).toHaveValue("");
+    expect(screen.getByLabelText("Static longitude")).toHaveValue("");
+    expect(screen.getByLabelText("Static elevation AMSL")).toHaveValue("");
     expect(mutate).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "MANUAL" }))
-      .toHaveAttribute("aria-pressed", "false");
+    expect(screen.queryByRole("button", { name: "MANUAL" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "STATIC" })).toHaveAttribute("aria-pressed", "true");
   });
 
-  it("saves a complete first MANUAL tuple and activates it atomically", async () => {
+  it("saves a complete first custom STATIC tuple and activates it atomically", async () => {
     const staticFixture = { ...activeFixture, settings: { ...activeFixture.settings,
       observer: { ...activeFixture.settings.observer, requested_mode: "STATIC" as const,
         manual_position_saved: false } } };
     const mutate = vi.fn().mockResolvedValue(accepted(4));
     render(<App client={async () => staticFixture} settingsMutator={mutate}
       eventSourceFactory={quietStream} />);
-    fireEvent.click(await screen.findByRole("button", { name: "MANUAL" }));
-    fireEvent.change(screen.getByLabelText("Manual latitude"), { target: { value: "51,5" } });
-    fireEvent.change(screen.getByLabelText("Manual longitude"), { target: { value: "22.25" } });
-    fireEvent.change(screen.getByLabelText("Manual elevation AMSL"), { target: { value: "320" } });
-    fireEvent.click(screen.getByRole("button", { name: "SAVE" }));
+    await openLocation();
+    fireEvent.change(screen.getByLabelText("Static latitude"), { target: { value: "51,5" } });
+    fireEvent.change(screen.getByLabelText("Static longitude"), { target: { value: "22.25" } });
+    fireEvent.change(screen.getByLabelText("Static elevation AMSL"), { target: { value: "320" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
     await waitFor(() => expect(mutate).toHaveBeenCalledWith(expect.objectContaining({
       changes: { observer: { requested_mode: "MANUAL", manual_lat_deg: 51.5,
         manual_lon_deg: 22.25, manual_elevation_amsl_m: 320 } },
     })));
   });
 
-  it("activates an existing saved MANUAL tuple directly", async () => {
-    const staticFixture = { ...activeFixture, settings: { ...activeFixture.settings,
-      observer: { ...activeFixture.settings.observer, requested_mode: "STATIC" as const,
+  it("cancels a draft and resets a custom STATIC location to the configured default", async () => {
+    const custom = { ...activeFixture, settings: { ...activeFixture.settings,
+      observer: { ...activeFixture.settings.observer, requested_mode: "MANUAL" as const,
         manual_position_saved: true } } };
     const mutate = vi.fn().mockResolvedValue(accepted(4));
-    render(<App client={async () => staticFixture} settingsMutator={mutate}
-      eventSourceFactory={quietStream} />);
-    fireEvent.click(await screen.findByRole("button", { name: "MANUAL" }));
+    render(<App client={async () => custom} settingsMutator={mutate} eventSourceFactory={quietStream} />);
+    await openLocation();
+    fireEvent.change(screen.getByLabelText("Static latitude"), { target: { value: "12" } });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(mutate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Change location" }));
+    expect(screen.getByLabelText("Static latitude")).toHaveValue(String(custom.settings.observer.manual_lat_deg));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Use default location" }));
     await waitFor(() => expect(mutate).toHaveBeenCalledWith(expect.objectContaining({
-      changes: { observer: { requested_mode: "MANUAL" } },
+      changes: { observer: { requested_mode: "STATIC" } },
     })));
   });
 
-  it("edits validated MANUAL coordinates through authoritative settings", async () => {
+  it("edits validated custom STATIC coordinates through authoritative settings", async () => {
     const manualFixture = { ...activeFixture, observer: {
       requested_mode: "MANUAL", effective_source: "MANUAL",
       effective_elevation_m: 315, manual_lat_deg: 51.25,
@@ -160,34 +175,36 @@ describe("synchronized operational controls", () => {
     const mutate = vi.fn().mockResolvedValue(accepted(4));
     render(<App client={async () => manualFixture} settingsMutator={mutate}
       eventSourceFactory={quietStream} />);
-    await waitFor(() => expect(screen.getByLabelText("Manual latitude")).toHaveValue("51.25"));
-    fireEvent.change(screen.getByLabelText("Manual latitude"), {
+    await openLocation();
+    await waitFor(() => expect(screen.getByLabelText("Static latitude")).toHaveValue("51.25"));
+    fireEvent.change(screen.getByLabelText("Static latitude"), {
       target: { value: "51,5" },
     });
-    fireEvent.change(screen.getByLabelText("Manual longitude"), {
+    fireEvent.change(screen.getByLabelText("Static longitude"), {
       target: { value: "22.25" },
     });
-    fireEvent.change(screen.getByLabelText("Manual elevation AMSL"), {
+    fireEvent.change(screen.getByLabelText("Static elevation AMSL"), {
       target: { value: "320" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "SAVE" }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
     await waitFor(() => expect(mutate).toHaveBeenCalledWith(expect.objectContaining({
       changes: { observer: { requested_mode: "MANUAL", manual_lat_deg: 51.5, manual_lon_deg: 22.25,
         manual_elevation_amsl_m: 320 } },
     })));
   });
 
-  it("does not submit invalid MANUAL coordinates", async () => {
+  it("does not submit invalid custom STATIC coordinates", async () => {
     const manualFixture = { ...activeFixture, settings: { ...activeFixture.settings,
       observer: { ...activeFixture.settings.observer, requested_mode: "MANUAL" as const,
         manual_position_saved: true } } };
     const mutate = vi.fn();
     render(<App client={async () => manualFixture} settingsMutator={mutate}
       eventSourceFactory={quietStream} />);
-    fireEvent.change(await screen.findByLabelText("Manual latitude"), {
+    await openLocation();
+    fireEvent.change(await screen.findByLabelText("Static latitude"), {
       target: { value: "91" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "SAVE" }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
     expect(screen.getByRole("alert")).toHaveTextContent("valid LAT");
     expect(mutate).not.toHaveBeenCalled();
   });
