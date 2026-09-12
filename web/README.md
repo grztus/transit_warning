@@ -1,14 +1,26 @@
 # Transit Warning web frontend
 
-The A2 frontend reads the versioned backend through `/api/v1/bootstrap`.
+The supported STANDARD frontend initializes through `/api/v1/bootstrap`, follows
+revisioned live/settings updates through `/api/v1/stream`, and changes runtime
+settings through `/api/v1/settings`. It includes LIVE and HISTORY.
 During local development, Vite proxies `/api` to
 `http://127.0.0.1:8765` by default.
 
-Install dependencies and start the development server:
+## Toolchain
+
+Use Node.js **22.22.2+ within 22.x** or **24.15.0+ within 24.x** for the
+locked build/test stack. `package-lock.json` pins jsdom 30.0.1 with
+`^22.22.2 || ^24.15.0 || >=26.0.0`, Vitest 5.0.0 with
+`^22.12.0 || ^24.0.0 || >=26.0.0`, and Vite 8.2.2 with
+`^20.19.0 || >=22.12.0`. The two documented Node lines satisfy the complete
+locked stack; an older Vite-only minimum is insufficient for the tests.
+This checkpoint was validated with Node 24.19.0 and npm 11.17.0.
+
+Install locked dependencies and start the development server:
 
 ```powershell
-npm install
-npm run dev
+npm.cmd ci
+npm.cmd run dev
 ```
 
 To test against a backend on another private LAN host, set the development
@@ -16,11 +28,11 @@ proxy target for the current PowerShell session before starting Vite:
 
 ```powershell
 $env:VITE_BACKEND_TARGET = "http://<backend-host>:8765"
-npm run dev
+npm.cmd run dev
 ```
 
 `VITE_BACKEND_TARGET` affects only the Vite development proxy. The browser
-application continues to request `/api/v1/bootstrap`; production API paths and
+application continues to use same-origin `/api/` paths; production API paths and
 backend configuration are unchanged.
 
 ## Production
@@ -41,9 +53,10 @@ npm run build
 The generated frontend is written to `web/dist`. The existing Python dashboard
 server serves that directory on the configured dashboard port: `/` serves the
 React index, `/assets/` serves its static assets, and the existing `/api/`
-routes remain same-origin. Vite does not run in production. The embedded legacy
-dashboard remains temporarily available at `/legacy`; when `web/dist/index.html`
-is absent, `/` also falls back to that legacy dashboard.
+routes remain same-origin. Vite does not run in production. The legacy page can
+expose internal MANUAL terminology and is not the React observer presentation.
+This compatibility/debug interface remains available at `/legacy`; when
+`web/dist/index.html` is absent, `/` also falls back to that legacy dashboard.
 
 ## STANDARD operational controls
 
@@ -57,7 +70,12 @@ location to enter fixed latitude, longitude and elevation AMSL, then Apply or
 Cancel. Custom fixed locations still appear as STATIC; the existing backend
 MANUAL value is an internal compatibility detail. Use default location restores
 the configured STATIC origin. Applying custom coordinates never starts GPS.
-These runtime settings reset to configuration when the backend restarts.
+The last complete custom fixed position is saved through the backend
+MANUAL-compatible storage path (`DASHBOARD_SETTINGS_PATH`, normally
+`recordings/dashboard_settings.json`) and restored after backend restart.
+Frontend reload/restart does not clear it. Startup mode still follows
+`OBSERVER_MODE`; source, Telegram and fallback settings restore their configured
+startup values. Storage must be writable for durable custom-location changes.
 
 Selecting MOBILE starts or reuses browser GPS for transit calculations. Waiting,
 active and attention feedback distinguish acquisition, backend MOBILE_FRESH
@@ -80,4 +98,4 @@ live/settings state received while those requests were running. Revision resets
 remain possible after a backend restart when no newer state arrived meanwhile.
 
 STANDARD has no maps, map-location controls, centerline interactions, saved
-locations, or PATTERN navigation. Its GPS acquisition has no map consumer.
+location collections, or PATTERN navigation. Its GPS acquisition has no map consumer.

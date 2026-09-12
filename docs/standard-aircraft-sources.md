@@ -3,13 +3,18 @@
 AIRCRAFT_SOURCE_MODE selects the startup mode: LOCAL (default), INTERNET,
 or AUTO. The runtime settings API accepts
 {"aircraft_source":{"requested_mode":"AUTO"}} inside the existing revisioned
-settings command. Restart restores the configured mode. The frontend is unchanged.
+settings command. React exposes LOCAL/INTERNET/AUTO controls and displays the
+authoritative requested/effective mode and provider health. Restart restores the
+configured mode. Replay overrides all requests to effective LOCAL, retains local
+recorded ingest, and never creates the live provider; the preference is unchanged.
 
 LOCAL preserves existing SBS/RAW/MLAT prediction and recording. INTERNET ignores
 local prediction updates and uses the shared TRUE_2D solver with EGM96 conversion
 and pressure-zero topocentric ephemerides. Missing geoid data produces ERROR;
-there is no per-event LEGACY fallback. Remote notification integration is not
-part of this checkpoint.
+there is no per-event LEGACY fallback. INTERNET/AUTO authoritative candidates
+use the existing common Telegram eligibility, stabilization and bounded delivery
+pipeline, with independent SUN/MOON switches and guarded source-handoff
+suppression. See [handoff semantics](standard-telegram-source-handoff.md).
 
 One provider worker publishes a replaceable snapshot mailbox. HTTP acquisition
 does not hold runtime source or aircraft locks. Switching sources invalidates

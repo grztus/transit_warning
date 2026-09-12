@@ -1,8 +1,8 @@
 # A4.2 isolated live acquisition diagnostics
 
-This opt-in tool implements the [A4.1 field contract](adsblol_live_contract.md).
+This opt-in tool implements the [STANDARD field contract](adsblol_live_contract.md).
 It does not read installation/observer settings, import the runtime, populate
-aircraft state, run geometry, create candidates, or update the map/dashboard.
+aircraft state, run geometry, create candidates, or update the dashboard.
 It cannot yet be used to test live Transit Warning predictions in another region.
 It acquires and inspects potential inputs only.
 
@@ -29,7 +29,7 @@ The radius is an integer in nautical miles, capped at 250; negatives/fractional
 radii and invalid coordinates are rejected. The JSON records the actual radius
 and whether it was capped. The geographic centre is included in the optional
 private JSON but not echoed by the console summary. Do not publish that file
-without reviewing location/aircraft sensitivity and A4.1's licensing constraints.
+without reviewing location/aircraft sensitivity and the contract's data-use boundary.
 Existing output files are never overwritten.
 
 Default is one acquisition (which can include one transient retry), not a
@@ -123,8 +123,6 @@ The A4.2 manual probe failed certificate verification in the development
 environment before receiving HTTP. No successful latency or live field
 availability is claimed; TLS validation was not weakened.
 
-Recommended A4.3: opt-in, offline/shadow comparison of normalized observations
-against local recordings, with explicit clocks/datums and measured field
-availability. Decide unknown-age eligibility and privacy separately before any
-runtime provider adapter. Do not automatically turn A4.2 output into synthetic
-SBS messages or wire it to the predictor/maps.
+Production source integration is separate from this isolated probe; see
+[STANDARD aircraft sources](../docs/standard-aircraft-sources.md). The probe does
+not send notifications or write synthetic SBS messages into local recordings.

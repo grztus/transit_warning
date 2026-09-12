@@ -12,10 +12,12 @@ No-op withdrawals, empty invalidations/body resets and identical timestamp ticks
 do not mark dirty. Source resets and owner replacements retain their existing
 guards; the next acknowledged snapshot reflects current authoritative state.
 
-The worker builds a consistent snapshot under the dashboard lock. Contract
-serialization, copying, privacy validation, SSE encoding validation and fan-out
-run on the worker after that lock is released. It takes no source, aircraft or
-scheduler lock. Dashboard-lock contention and Python GIL cost still exist.
+The worker builds a consistent dashboard snapshot under the dashboard lock.
+After releasing it, the worker captures observer diagnostics with their settings
+revision, then serializes/copies the contract, validates privacy and SSE encoding,
+and performs fan-out. Observer resolution can invoke existing invalidation
+callbacks when effective source changes. Dashboard/settings-lock contention and
+Python GIL cost still exist.
 
 Startup publishes the initial snapshot synchronously before HTTP serving.
 Bootstrap waits up to 5 seconds for the dirty generation known at request entry,
@@ -46,4 +48,7 @@ the publisher is not abandoned while it could access consumers.
 Private diagnostics include dirty/published generations, attempts/publications,
 coalesced marks, failures, pending state, duration, barrier waits/failures, worker
 status and shutdown drain result. Existing terminal snapshots include these scalar
-counters. No public contract changes or coordinate-bearing diagnostics are added.
+counters. These performance diagnostics remain private. Public live/settings
+contracts also carry privacy-filtered observer status; MOBILE coordinates are
+excluded. Subscription revision watermarks reject older/equal offers even after
+the latest-state mailbox is drained.

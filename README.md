@@ -16,8 +16,10 @@ Telegram, dashboard, or recording does not stop the core ADS-B/MLAT receiver.
 - ADS-B and MLAT SBS TCP sources
 - `ephem`, `pytz`, `requests`, `python-dotenv`, `tzdata`, and `matplotlib`
   from `requirements.txt`
-- recommended GeographicLib EGM96 PGM geoid data for datum-consistent aircraft
-  line-of-sight geometry and geometric-altitude selection
+- GeographicLib EGM96 PGM geoid data for authoritative TRUE_2D geometry;
+  LEGACY retains its explicit flat LOS fallback when data are unavailable
+- for the frontend, Node.js 22.22.2+ within 22.x or 24.15.0+ within 24.x
+  (see [locked toolchain requirements](web/README.md#toolchain))
 
 `tzdata` supplies IANA timezone rules on platforms such as Windows. Matplotlib
 is used by the offline snapshot visualizer.
@@ -58,8 +60,10 @@ state and do not contain a second prediction implementation.
 - ADS-B, MLAT, RAW ADS-B, MLAT Beast, TC29 intent, and METAR/QNH integration.
 - Datum-consistent WGS84 ECEF/ENU aircraft geometry and optional geometric
   altitude selection.
-- Terminal presentation, Telegram alerts, operational legacy dashboard, and a
-  read-only React LIVE frontend.
+- Terminal presentation, independent SUN/MOON Telegram controls, and the
+  supported React LIVE/HISTORY interface with synchronized runtime settings.
+- LOCAL/INTERNET/AUTO sources, field-level AUTO fusion, deferred live TRUE_2D
+  execution, and a bounded/coalescing public-state publisher.
 - Full-session recording, Candidate Auto-Recorder forensic bundles and
   FULL_REFERENCE markers, replay, Snapshot V3, and offline diagnostics.
 
@@ -80,6 +84,16 @@ immutable observer context is captured for every complete prediction operation.
 30003 timestamps, not the Transit Warning computer timezone. Conversion uses
 the record date and historical DST rules. Current 30106 timestamps remain UTC.
 
+### Aircraft source selection
+
+`AIRCRAFT_SOURCE_MODE` selects LOCAL, INTERNET or AUTO at startup. The React
+controls change the requested runtime mode; restart restores configuration. AUTO
+fuses eligible local and remote fields with ownership/provenance guards. Remote
+notifications use the same authoritative Telegram pipeline as LOCAL. Full-session
+recordings retain local receiver streams; remote snapshots are not synthetic SBS.
+Replay forces effective LOCAL ingest and never starts the live provider, while
+retaining the configured source preference. See [source behavior](docs/standard-aircraft-sources.md).
+
 ### Motion freshness and prediction
 
 Fully fresh motion currently requires position age at most 3 seconds, parameter
@@ -90,9 +104,10 @@ The horizontal model propagates constant track and groundspeed on a spherical
 great-circle path. The solved finite-distance aircraft line of sight is then
 computed with WGS84 geodetic-to-ECEF and observer-local ENU geometry. MSL-like
 observer and aircraft heights are converted to WGS84 ellipsoidal height with
-the local EGM96 undulation before that calculation. If geoid data are missing,
-the application reports the condition and fails open with the explicit legacy
-flat LOS fallback rather than silently treating MSL height as HAE. The
+the local EGM96 undulation before that calculation. LEGACY can report missing
+geoid data and use its explicit flat LOS fallback. Authoritative TRUE_2D requires
+datum-consistent geometry: missing geoid data or an exact-solve failure withholds
+the affected prediction, without a per-event fallback to LEGACY. The
 moving-body solver iterates against the changing Sun or Moon. Vertical
 prediction uses vertical-rate history and the existing LEVEL, DYNAMIC,
 DEGRADED, and ignored/stale policies. Fresh TC29 selected altitude may clamp
@@ -215,7 +230,11 @@ Credentials belong only in `.env`; observer coordinates are not sent.
 
 ## Web interfaces
 
-Both interfaces reuse the same production state and remain available.
+The supported React interface at `/` is primary. Both interfaces reuse the same
+production state. Build `web/dist` for deployment; without it, `/` falls back to
+the legacy page. The compatibility/debug interface at `/legacy` may expose raw
+MANUAL terminology and has different GPS controls; it is not equivalent to the
+final React STATIC/MOBILE presentation.
 
 ### Legacy dashboard
 
@@ -243,30 +262,34 @@ trusted private transport such as Tailscale Serve/tailnet HTTPS. Do not use
 public Funnel exposure without an appropriate security model. The dashboard
 itself has no authentication.
 
-### New read-only LIVE frontend
+### Supported React interface
 
-`web/` contains the shared React + TypeScript frontend introduced in App/Web
-Phase A2. It consumes only `GET /api/v1/bootstrap` and is currently read-only;
-settings controls remain in the legacy interface.
+`web/` contains the React + TypeScript STANDARD interface. Navigation is
+**LIVE | HISTORY**. Controls start compact and expand for diagnostics and the
+fixed-location editor. Backend state also has a compact/expanded presentation.
 
-The responsive LIVE view displays:
+- Observer: **STATIC | MOBILE**. STATIC uses the configured default location or
+  custom fixed coordinates entered through **Change location**. MOBILE uses
+  browser GPS as the calculation observer.
+- Aircraft source: **LOCAL | INTERNET | AUTO**.
+- Telegram: independent **SUN ON/OFF** and **MOON ON/OFF** controls.
+- LIVE shows authoritative Sun/Moon candidates and browser-local countdowns;
+  HISTORY provides filters, pagination and CSV export.
+- No maps, map controls, or PATTERN navigation are included.
 
-- distinct ACTIVE, backend STALE, and frontend OFFLINE states;
-- current Sun/Moon altitude and azimuth;
-- authoritative candidates with callsign, SEP class, lifecycle state,
-  prediction geometry, and encounter identity;
-- a browser-local countdown based on authoritative `predicted_event_utc`;
-- recent events and privacy-safe observer diagnostics.
-
-The browser updates countdowns once per second without increasing the normal
-three-second bootstrap polling rate. On a temporary fetch failure, the last
-valid snapshot remains visible and is clearly marked as cached/offline.
+Bootstrap initializes state; SSE delivers revisioned live and settings updates,
+with polling fallback during transport failures. Observer diagnostics travel with
+authoritative settings/live state so connected clients converge. Late HTTP
+responses cannot overwrite newer revisions received while the request was pending.
+Data health uses generated time (fresh through 10 seconds), independently of
+realtime/reconnecting transport status. Diagnostic/source SSE activity cannot
+make stale generated data ACTIVE. Countdown rendering does not request predictions.
 
 For local frontend development:
 
 ```powershell
 cd web
-npm.cmd install
+npm.cmd ci
 npm.cmd run dev
 ```
 
@@ -287,15 +310,16 @@ and a separate Windows frontend development machine.
 The public App/Web foundation provides:
 
 - `GET /api/v1/bootstrap`
+- `GET /api/v1/stream` (SSE)
 - `GET /api/v1/settings`
 - `PATCH /api/v1/settings`
 
 Schema-v1 bootstrap responses use explicit privacy-safe contracts and include
 monotonic live and settings revisions. Runtime mutation uses one authoritative
 settings store with expected-revision conflict handling and idempotent command
-identifiers. The A2 frontend consumes bootstrap only and does not mutate
-settings. Ordinary API/frontend payloads expose explicitly configured MANUAL
-observer values only; they do not expose MOBILE coordinates, Telegram
+identifiers. The React frontend uses these settings controls and synchronized
+updates. Ordinary API/frontend payloads expose explicitly configured custom STATIC
+(internally MANUAL) observer values only; they do not expose MOBILE coordinates, Telegram
 credentials, private recorder paths, or private forensic context.
 
 ## Observer modes and mobile GPS
@@ -305,7 +329,9 @@ solver, and snapshot construction share one resolved context per operation.
 
 ### STATIC
 
-STATIC uses `OBSERVER_LAT`, `OBSERVER_LON`, and `OBSERVER_ELEVATION_M`:
+Default STATIC uses `OBSERVER_LAT`, `OBSERVER_LON`, and `OBSERVER_ELEVATION_M`.
+Change location accepts custom fixed coordinates and elevation AMSL; the UI
+continues to display STATIC. Use default location returns to configured values:
 
 ```text
 STATIC → STATIC
@@ -339,20 +365,24 @@ MOBILE → NO POSITION         GPS: NO_FIX
   candidates. Aircraft ingestion continues.
 - Replay is forced to STATIC observer semantics.
 
-Selecting STATIC does not stop a running GPS watch. Browser permission is
-required again after page reload, and mobile OS/browser backgrounding may pause
-updates.
+In React, selecting STATIC stops that browser's GPS watch and clears the mobile
+fix. Stale callbacks from stopped/replaced watches are ignored. After reload,
+GPS acquisition requires a user action; browser permission and mobile OS
+backgrounding can affect availability. This does not revoke OS permission or
+control another device's location service.
 
-### MANUAL
+### Custom STATIC persistence (internal MANUAL compatibility)
 
-MANUAL uses runtime settings for latitude/longitude in decimal degrees and
+The internal MANUAL path uses runtime settings for latitude/longitude in decimal degrees and
 observer elevation AMSL in metres. The saved MANUAL position remains available
-when another mode is selected and becomes effective again when MANUAL is
-restored. The last complete, valid MANUAL position is stored in
+when another mode is selected and becomes effective when the custom location
+is applied again. The last complete, valid MANUAL position is stored in
 `recordings/dashboard_settings.json` by default and restored after process
 restart. Startup mode still comes from `OBSERVER_MODE`; when no saved MANUAL
-position exists, selecting MANUAL opens an empty editor and leaves the current
+position exists, Change location opens an empty editor and leaves the current
 observer effective until a complete valid position is saved and activated.
+Frontend reload/restart does not erase the saved custom location. The normal
+React UI has no third MANUAL mode button.
 Only these explicit MANUAL coordinates are exposed for dashboard editing;
 MOBILE coordinates remain private. Raw GNSS altitude is not used as AMSL.
 
@@ -566,7 +596,7 @@ green < yellow < visible.
 | `shadow_2d_prediction.py` | Independent coarse screening and exact 2-D solver |
 | `live_dashboard.py` | Operational legacy dashboard and HTTP API host |
 | `app_backend/` | Versioned public contracts, live-state, and runtime settings stores |
-| `web/` | React + TypeScript read-only LIVE frontend |
+| `web/` | React + TypeScript LIVE/HISTORY interface and operational controls |
 | `recording.py`, `replay_server.py` | Full-session recording and SBS replay |
 | `candidate_recorder.py` | Candidate pre-buffer, bundles, and FULL_REFERENCE markers |
 | `transit_snapshot.py`, `tools/` | Snapshot and offline diagnostic tooling |
@@ -575,11 +605,12 @@ green < yellow < visible.
 
 ## Current project status and limitations
 
-The terminal UI, legacy dashboard, versioned App/Web API, A2 React LIVE view,
+The terminal UI, compatibility dashboard, versioned API, React LIVE/HISTORY UI,
 TRUE_2D production path, Telegram notifications, observer modes, recording,
 Candidate Auto-Recorder, replay, and Snapshot V3 diagnostics are implemented.
-The React client is read-only at the current public checkpoint; operational
-settings remain available through the legacy dashboard and versioned API.
+The React client provides synchronized observer, source and Telegram controls.
+See the [Debian release smoke-test checklist](docs/standard-release-smoke-test.md)
+for deployment validation.
 
 Development is ongoing. Some recorded precision streams do not yet have full
 deterministic replay support, phone altitude remains diagnostic-only, and

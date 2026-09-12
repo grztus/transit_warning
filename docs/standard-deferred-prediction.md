@@ -41,8 +41,13 @@ Phone altitude does not replace configured calculation elevation.
 Lock order is source, aircraft, then scheduler condition or dashboard state.
 Solve and commit callbacks never run under the scheduler condition. Dashboard
 mutation guards run before its state lock; existing publication callbacks run
-after that lock is released. Commit still invokes synchronous existing consumers
-under the runtime locks; isolating that publication cost is a later checkpoint.
+after that lock is released. Commit retains synchronous authoritative lifecycle,
+history, notification and recorder consumers. Presentation changes only mark a
+dirty generation: the bounded/coalescing publisher builds and serializes the
+latest public state on its worker, at a minimum 0.2-second attempt interval.
+There is no snapshot FIFO and no publication barrier on ingest/solve paths.
+Bootstrap can wait for publication; settings responses do not. See
+[publication semantics](standard-public-state-publisher.md).
 
 Shutdown rejects new work, cancels pending jobs and invalidates running results.
 Numerical sampling checks cooperative cancellation. The worker is joined outside
