@@ -232,17 +232,12 @@ button:disabled { cursor: wait; opacity: .65; }
   .controls-panel button { min-height: 40px; }
 }
 
-/* Compact uses the same controls, with one operational row per group. */
-@media (max-width: 699px) {
-  .controls-compact { padding: .4rem .45rem; }
-  .controls-compact .control-group { flex-wrap: nowrap; gap: .2rem; margin-top: .25rem; }
-  .controls-compact .control-group > strong { width: 3.5rem; min-width: 3.5rem; font-size: .7rem; }
-  .controls-compact .control-row { flex-wrap: nowrap; gap: .2rem; min-width: 0; }
-  .controls-compact .control-group button { min-width: 44px; min-height: 44px; padding: .25rem .3rem; font-size: .7rem; }
-  .controls-compact header button { min-height: 44px; }
-  .controls-compact .telegram-control-group { border-top: 0; padding-top: 0; }
-  .controls-compact .inline-toggle { gap: .2rem; margin-right: .25rem; }
-  .controls-compact .inline-toggle span { font-size: .7rem; }
-  .controls-compact .gps-control { white-space: nowrap; }
-  .controls-compact .gps-message, .controls-compact .degraded { margin: .25rem 0 0; padding: .2rem 0; font-size: .7rem; overflow-wrap: anywhere; }
-}
+/* One disclosure row; the existing control tree stays mounted when collapsed. */
+.controls-compact { padding: 0; }
+.controls-panel .controls-toggle { display: flex; align-items: center; gap: .5rem; width: 100%;
+  min-height: 48px; border: 0; background: transparent; text-align: left; }
+.controls-toggle > strong { font-size: .95rem; }
+.controls-toggle > span:nth-child(2) { margin-left: auto; font-size: .75rem; min-width: 0; }
+.controls-toggle > span:last-child { flex: 0 0 auto; font-size: 1.4rem; }
+.controls-expanded .controls-toggle { padding: 0; }
+.controls-toggle:focus-visible { outline: 2px solid #52d68a; outline-offset: -3px; }

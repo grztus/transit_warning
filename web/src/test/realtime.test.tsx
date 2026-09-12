@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import App from "../App";
 import { generatedHealth } from "../useBootstrap";
@@ -158,6 +158,7 @@ describe("SSE realtime transport", () => {
   it("applies authoritative settings revisions to the controls", async () => {
     const { sources } = setup();
     await screen.findByText("TEST123");
+    fireEvent.click(screen.getByRole("button", { name: "Expand Controls panel" }));
     const source = sources[0];
     act(() => source.emit("settings", { schema_version: 1, event: "settings",
       settings_revision: 4, payload: { schema_version: 1, revision: 4,
@@ -179,6 +180,7 @@ describe("HTTP and stream ordering", () => {
       .mockImplementation(() => new Promise<BootstrapDto>(resolve => { finish = resolve; }));
     const { sources } = setup(client);
     await screen.findByText("TEST123");
+    fireEvent.click(screen.getByRole("button", { name: "Expand Controls panel" }));
     act(() => sources[0].malformed("live_state"));
     act(() => sources[0].emit("live_state", { schema_version: 1, event: "live_state", live_revision: 43,
       payload: { ...activeFixture, bodies: { ...activeFixture.bodies,
@@ -223,6 +225,7 @@ describe("release observer and health synchronization", () => {
   it("updates client B observer diagnostics when client A selects STATIC or a custom fixed location", async () => {
     const { sources, client } = setup();
     await screen.findByText("TEST123");
+    fireEvent.click(screen.getByRole("button", { name: "Expand Controls panel" }));
     for (const [revision, mode] of [[4, "STATIC"], [5, "MANUAL"]] as const) {
       act(() => sources[0].emit("settings", { schema_version: 1, event: "settings", settings_revision: revision,
         payload: { values: { ...activeFixture.settings, observer: { ...activeFixture.settings.observer,
@@ -245,6 +248,7 @@ describe("release observer and health synchronization", () => {
   it("updates effective observer status from live state without changing settings", async () => {
     const { sources } = setup();
     await screen.findByText("TEST123");
+    fireEvent.click(screen.getByRole("button", { name: "Expand Controls panel" }));
     act(() => sources[0].emit("live_state", { schema_version: 1, event: "live_state", live_revision: 43,
       payload: { generated_at_utc: new Date().toISOString(), bodies: activeFixture.bodies,
         recent_events: activeFixture.recent_events, presentation: activeFixture.presentation,

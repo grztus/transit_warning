@@ -12,7 +12,6 @@ const accepted = (revision: number): SettingsSnapshotDto => ({
   persistence: "RUNTIME_ONLY_RESET_TO_CONFIG_ON_RESTART",
 });
 const openLocation = async () => {
-  fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
   fireEvent.click(screen.getByRole("button", { name: "Change location" }));
 };
 const quietStream: EventSourceFactory = () => ({ close() {}, addEventListener() {},
@@ -35,6 +34,7 @@ describe("synchronized operational controls", () => {
       update, clear };
     const rendered = render(<App client={async () => activeFixture} gpsClient={gpsClient}
       eventSourceFactory={quietStream} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
     try {
       fireEvent.click(await screen.findByRole("button", { name: "Start GPS" }));
       expect(watchPosition).toHaveBeenCalledWith(expect.any(Function), expect.any(Function),
@@ -72,6 +72,7 @@ describe("synchronized operational controls", () => {
       update: vi.fn(), clear: vi.fn() };
     const rendered = render(<App client={async () => activeFixture} gpsClient={gpsClient}
       eventSourceFactory={quietStream} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
     try {
       fireEvent.click(await screen.findByRole("button", { name: "Start GPS" }));
       failure({ code: 1 } as GeolocationPositionError);
@@ -96,6 +97,7 @@ describe("synchronized operational controls", () => {
     });
     render(<App client={async () => current} settingsMutator={mobileMutate}
       eventSourceFactory={quietStream} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
     fireEvent.click(await screen.findByRole("button", { name: "MOBILE" }));
     await waitFor(() => expect(mobileMutate).toHaveBeenCalledWith(expect.objectContaining({
       expected_revision: 3, changes: { observer: { requested_mode: "MOBILE" } },
@@ -116,6 +118,7 @@ describe("synchronized operational controls", () => {
     const mutate = vi.fn();
     render(<App client={async () => staticFixture} settingsMutator={mutate}
       eventSourceFactory={quietStream} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
     await openLocation();
     expect(await screen.findByLabelText("Static latitude")).toHaveValue("");
     expect(screen.getByLabelText("Static longitude")).toHaveValue("");
@@ -132,6 +135,7 @@ describe("synchronized operational controls", () => {
     const mutate = vi.fn().mockResolvedValue(accepted(4));
     render(<App client={async () => staticFixture} settingsMutator={mutate}
       eventSourceFactory={quietStream} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
     await openLocation();
     fireEvent.change(screen.getByLabelText("Static latitude"), { target: { value: "51,5" } });
     fireEvent.change(screen.getByLabelText("Static longitude"), { target: { value: "22.25" } });
@@ -149,6 +153,7 @@ describe("synchronized operational controls", () => {
         manual_position_saved: true } } };
     const mutate = vi.fn().mockResolvedValue(accepted(4));
     render(<App client={async () => custom} settingsMutator={mutate} eventSourceFactory={quietStream} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
     await openLocation();
     fireEvent.change(screen.getByLabelText("Static latitude"), { target: { value: "12" } });
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
@@ -175,6 +180,7 @@ describe("synchronized operational controls", () => {
     const mutate = vi.fn().mockResolvedValue(accepted(4));
     render(<App client={async () => manualFixture} settingsMutator={mutate}
       eventSourceFactory={quietStream} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
     await openLocation();
     await waitFor(() => expect(screen.getByLabelText("Static latitude")).toHaveValue("51.25"));
     fireEvent.change(screen.getByLabelText("Static latitude"), {
@@ -200,6 +206,7 @@ describe("synchronized operational controls", () => {
     const mutate = vi.fn();
     render(<App client={async () => manualFixture} settingsMutator={mutate}
       eventSourceFactory={quietStream} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
     await openLocation();
     fireEvent.change(await screen.findByLabelText("Static latitude"), {
       target: { value: "91" },
@@ -216,6 +223,7 @@ describe("synchronized operational controls", () => {
     const client = vi.fn().mockResolvedValueOnce(activeFixture).mockResolvedValue(next);
     const mutate = vi.fn().mockResolvedValue(accepted(4));
     render(<App client={client} settingsMutator={mutate} eventSourceFactory={quietStream} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
     const sun = await screen.findByRole("button", { name: "Telegram SUN" });
     expect(sun).toHaveAttribute("aria-pressed", "true");
     fireEvent.click(sun);
@@ -242,7 +250,7 @@ describe("synchronized operational controls", () => {
     const mutate = vi.fn(() => new Promise<SettingsSnapshotDto>((resolve) => { finish = resolve; }));
     render(<App client={async () => activeFixture} settingsMutator={mutate}
       eventSourceFactory={quietStream} />);
-    if (name === "Observer fallback") fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
     const button = await screen.findByRole("button", { name });
     fireEvent.click(button);
     expect(button).toBeDisabled();
@@ -259,6 +267,7 @@ describe("synchronized operational controls", () => {
     const client = vi.fn().mockResolvedValueOnce(activeFixture).mockResolvedValue(current);
     const mutate = vi.fn().mockRejectedValue(new SettingsConflictError());
     render(<App client={client} settingsMutator={mutate} eventSourceFactory={quietStream} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
     fireEvent.click(await screen.findByRole("button", { name: "Telegram SUN" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("another client");
     expect(mutate).toHaveBeenCalledTimes(1);
@@ -271,6 +280,7 @@ describe("synchronized operational controls", () => {
     const mutate = vi.fn().mockRejectedValue(new Error("network"));
     render(<App client={async () => activeFixture} settingsMutator={mutate}
       eventSourceFactory={quietStream} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
     const sun = await screen.findByRole("button", { name: "Telegram SUN" });
     fireEvent.click(sun);
     expect(await screen.findByRole("alert")).toHaveTextContent("network");
@@ -285,6 +295,7 @@ describe("synchronized operational controls", () => {
       new Error("Mobile GPS is disabled"));
     render(<App client={async () => staticFixture} settingsMutator={mutate}
       eventSourceFactory={quietStream} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
     fireEvent.click(await screen.findByRole("button", { name: "MOBILE" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Mobile GPS is disabled");
@@ -294,7 +305,8 @@ describe("synchronized operational controls", () => {
     const degraded = { ...activeFixture, observer: { ...activeFixture.observer,
       effective_source: "STATIC", fallback_active: true, gps_health: "UNAVAILABLE" } };
     render(<App client={async () => degraded} eventSourceFactory={quietStream} />);
-    expect(await screen.findByText(/Fallback active.*STATIC/)).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
+    expect(await screen.findByText(/MOBILE requested.*effective STATIC/)).toBeInTheDocument();
   });
 
   it("suppresses only the redundant healthy MOBILE banner", async () => {
@@ -302,6 +314,7 @@ describe("synchronized operational controls", () => {
       effective_source: "MOBILE_FRESH" } };
     const { container } = render(<App client={async () => healthy}
       eventSourceFactory={quietStream} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
     await screen.findByRole("button", { name: "MOBILE" });
     expect(container.querySelector(".observer-meta"))
       .toHaveTextContent("Requested MOBILE · Effective MOBILE_FRESH");

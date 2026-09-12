@@ -124,6 +124,7 @@ describe("LIVE screen", () => {
     expect(await screen.findByRole("status")).toHaveTextContent("ACTIVE");
     expect(screen.getByText("TEST123")).toBeInTheDocument();
     expect(screen.getByText(/ALT 31.2° · AZ 217.4°/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Expand Controls panel" }));
     expect(screen.getByRole("button", { name: "MOBILE" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByText(/Requested MOBILE · Effective MOBILE/)).toBeInTheDocument();
     expect(screen.getByText("SEP 0.42°")).toHaveClass("sep-green");

@@ -224,6 +224,10 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
   const [gpsFailed, setGpsFailed] = useState(false);
   const observerMode = snapshot?.settings.observer.requested_mode;
   const visibleObserverMode = observerMode === "MANUAL" ? "STATIC" : observerMode;
+  const observerSummary = visibleObserverMode !== "MOBILE" ? (visibleObserverMode || "unavailable") :
+    snapshot?.observer.fallback_active ? "MOBILE FALLBACK" :
+    ["MOBILE", "MOBILE_FRESH"].includes(snapshot?.observer.effective_source || "") ? "MOBILE" :
+    ["MOBILE_STALE", "MOBILE_LAST_KNOWN"].includes(snapshot?.observer.effective_source || "") ? "MOBILE STALE" : "MOBILE NO FIX";
   const observerLabel = (source?: string) => source === "MANUAL" ? "STATIC (custom)" : source;
   const gpsControlClass = `gps-control ${gpsFailed ? "gps-attention" :
     gpsRunning && snapshot?.observer.effective_source === "MOBILE_FRESH" ? "gps-active" :
@@ -488,9 +492,15 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
 
           {view === "LIVE" ? <>
           <section className={`panel controls-panel ${controlsExpanded ? "controls-expanded" : "controls-compact"}`}>
-            <header><h2>Controls</h2><button type="button" aria-expanded={controlsExpanded}
-              aria-controls="controls-secondary" aria-label={`${controlsExpanded ? "Collapse" : "Expand"} Controls panel`}
-              onClick={() => setControlsExpanded(current => !current)}>{controlsExpanded ? "Compact" : "Expand"}</button></header>
+            <button type="button" className="controls-toggle" aria-expanded={controlsExpanded}
+              aria-controls="controls-content" aria-describedby="controls-observer-summary"
+              aria-label={`${controlsExpanded ? "Collapse" : "Expand"} Controls panel`}
+              onClick={() => setControlsExpanded(current => !current)}>
+              <strong>Controls</strong>
+              <span id="controls-observer-summary">Observer {observerSummary}</span>
+              <span aria-hidden="true">{controlsExpanded ? "⌄" : "›"}</span>
+            </button>
+            <div id="controls-content" hidden={!controlsExpanded}>
             <div className="controls-primary">
             <div className="control-group observer-control-group">
               <strong>Observer</strong>
@@ -599,6 +609,7 @@ export default function App({ client, pollIntervalMs, eventSourceFactory, fallba
                 `${snapshot.observer.fallback_active ? "Fallback active · " : ""}${snapshot.observer.effective_source || "MOBILE_NO_FIX"}`}</p>
             )}
             {settingsMessage && <p className="settings-message" role="alert">{settingsMessage}</p>}
+            </div>
           </section>
             <section className="predictions-section" aria-labelledby="predictions-title">
               <header className="predictions-header">

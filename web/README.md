@@ -100,11 +100,12 @@ remain possible after a backend restart when no newer state arrived meanwhile.
 STANDARD has no maps, map-location controls, centerline interactions, saved
 location collections, or PATTERN navigation. Its GPS acquisition has no map consumer.
 
-On phones, Compact Controls keeps Observer, Source and Telegram in three tight
-rows, with GPS Start/Stop when relevant. Expand reveals fallback settings,
-observer/source diagnostics, API revision and STATIC location management.
-Healthy MOBILE_FRESH needs no diagnostic banner in Compact; acquisition errors
-and backend no-fix/fallback warnings remain visible.
+Compact Controls is a single full-width disclosure button showing Controls,
+the authoritative observer summary (including MOBILE NO FIX or fallback when
+applicable), and a chevron. No individual controls or diagnostic banners appear
+until expanded. Tap the row to reveal all observer/GPS/fallback, source, Telegram,
+location and diagnostic controls. Collapsing keeps drafts and the GPS watch
+intact; it only hides the controls. This behavior is shared by phone and desktop.
 
 Browser geolocation requires a secure context (normally HTTPS) and browser
 permission. Plain LAN HTTP may make geolocation unavailable; this is distinct

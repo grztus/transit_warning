@@ -28,6 +28,66 @@ function browserGps() {
 }
 
 describe("STANDARD final controls", () => {
+
+  it.each([320, 360, 390])("shows only a summary row and preserves the expanded controls and draft at %s px", async width => {
+    const previous = window.innerWidth;
+    window.innerWidth = width;
+    const mutate = vi.fn();
+    try {
+      render(<App client={async () => fixed} eventSourceFactory={quietStream} settingsMutator={mutate} />);
+      const expand = await screen.findByRole("button", { name: "Expand Controls panel" });
+      const panel = expand.closest(".controls-panel")! as HTMLElement;
+      expect(panel).toHaveClass("controls-compact");
+      expect(within(panel).getAllByRole("button")).toEqual([expand]);
+      expect(expand).toHaveTextContent("ControlsObserver STATIC");
+      expect(expand).toHaveAttribute("aria-expanded", "false");
+      expect(panel.querySelector("#controls-content")).not.toBeVisible();
+      expect(within(panel).queryByRole("alert")).not.toBeInTheDocument();
+      expect(within(panel).queryByRole("status")).not.toBeInTheDocument();
+      fireEvent.click(expand);
+      expect(panel).toHaveClass("controls-expanded");
+      for (const name of ["STATIC", "MOBILE", "Observer fallback", "LOCAL", "INTERNET", "AUTO", "Telegram SUN", "Telegram MOON", "Change location"]) {
+        expect(within(panel).getByRole("button", { name })).toBeVisible();
+      }
+      for (const selector of [".controls-meta", ".source-meta", ".observer-meta", ".static-location"]) {
+        expect(panel.querySelector(selector)).toBeVisible();
+      }
+      const staticButton = screen.getByRole("button", { name: "STATIC" });
+      const telegram = screen.getByRole("button", { name: "Telegram SUN" });
+      const pressed = telegram.getAttribute("aria-pressed");
+      fireEvent.click(screen.getByRole("button", { name: "Change location" }));
+      fireEvent.change(screen.getByLabelText("Static latitude"), { target: { value: "12" } });
+      fireEvent.click(screen.getByRole("button", { name: "Collapse Controls panel" }));
+      expect(within(panel).getAllByRole("button")).toEqual([expand]);
+      expect(screen.queryByRole("textbox", { name: "Static latitude" })).not.toBeInTheDocument();
+      fireEvent.click(expand);
+      expect(screen.getByLabelText("Static latitude")).toHaveValue("12");
+      expect(screen.getByRole("button", { name: "STATIC" })).toBe(staticButton);
+      expect(staticButton).toHaveAttribute("aria-pressed", "true");
+      expect(telegram).toHaveAttribute("aria-pressed", pressed);
+      expect(mutate).not.toHaveBeenCalled();
+    } finally { window.innerWidth = previous; }
+  });
+
+  it.each([
+    ["MOBILE_FRESH", false, "MOBILE"],
+    ["MOBILE_NO_FIX", false, "MOBILE NO FIX"],
+    ["MOBILE_LAST_KNOWN", false, "MOBILE STALE"],
+    ["STATIC", true, "MOBILE FALLBACK"],
+  ])("keeps authoritative %s concise while collapsed", async (effective, fallback, summary) => {
+    const current = { ...activeFixture, observer: { ...activeFixture.observer,
+      effective_source: effective, fallback_active: fallback } };
+    render(<App client={async () => current} eventSourceFactory={quietStream} />);
+    const expand = await screen.findByRole("button", { name: "Expand Controls panel" });
+    const panel = expand.closest(".controls-panel")! as HTMLElement;
+    expect(screen.getByText(`Observer ${summary}`)).toBeVisible();
+    expect(within(panel).getAllByRole("button")).toEqual([expand]);
+    expect(within(panel).queryByRole("status")).not.toBeInTheDocument();
+    fireEvent.click(expand);
+    expect(screen.getByRole("button", { name: "Start GPS" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "MOBILE" })).toHaveAttribute("aria-pressed", "true");
+  });
+
   it.each([
     [false, true, "Browser GPS requires a secure context (HTTPS)"],
     [true, false, "Browser GPS is unavailable; use HTTPS or a supported browser"],
@@ -37,6 +97,7 @@ describe("STANDARD final controls", () => {
     Object.defineProperty(window, "isSecureContext", { configurable: true, value: secure });
     if (!available) Object.defineProperty(navigator, "geolocation", { configurable: true, value: undefined });
     const rendered = render(<App client={async () => activeFixture} eventSourceFactory={quietStream} gpsClient={gps} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
     try {
       const start = await screen.findByRole("button", { name: "Start GPS" });
       await waitFor(() => expect(start).not.toBeDisabled());
@@ -56,6 +117,7 @@ describe("STANDARD final controls", () => {
       const browser = browserGps(); const gps = gpsMock();
       const noFix = { ...activeFixture, observer: { ...activeFixture.observer, effective_source: "MOBILE_NO_FIX" } };
       const rendered = render(<App client={async () => noFix} eventSourceFactory={quietStream} gpsClient={gps} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
       try {
         const start = await screen.findByRole("button", { name: "Start GPS" });
         await waitFor(() => expect(start).not.toBeDisabled());
@@ -63,76 +125,28 @@ describe("STANDARD final controls", () => {
         expect(screen.getByRole("button", { name: "Stop GPS" })).toHaveClass("gps-waiting");
         await act(async () => browser.success[0](fix));
         expect(screen.getByRole("button", { name: "Stop GPS" })).toHaveClass("gps-waiting");
-        expect(screen.getByText(/^MOBILE_NO_FIX$/)).toBeVisible();
+        expect(screen.getByText(/^Observer MOBILE NO FIX$/)).toBeVisible();
         act(() => browser.failure[0]({ code } as GeolocationPositionError));
         expect(screen.getByRole("alert")).toHaveTextContent(message);
         expect(screen.getByRole("button", { name: "Stop GPS" })).toHaveClass("gps-attention");
       } finally { rendered.unmount(); browser.restore(); }
     });
 
-  it.each([320, 360, 390])("keeps three compact operational rows and expanded details at %s px", async width => {
-    const previous = window.innerWidth;
-    window.innerWidth = width;
-    try {
-      render(<App client={async () => fixed} eventSourceFactory={quietStream}
-        settingsMutator={() => new Promise(() => {})}
-        historyClient={async () => ({ records: [], offset: 0, limit: 25, next_offset: null, has_more: false })} />);
-      const expand = await screen.findByRole("button", { name: "Expand Controls panel" });
-      expect(expand).toHaveAttribute("aria-expanded", "false");
-      expect(screen.queryByRole("button", { name: "Change location" })).not.toBeInTheDocument();
-      expect(within(screen.getByRole("navigation")).getAllByRole("button").map(b => b.textContent)).toEqual(["LIVE", "HISTORY"]);
-      expect(screen.queryByRole("button", { name: /MANUAL|PATTERN|Show my location/i })).not.toBeInTheDocument();
-      expect(document.querySelector("iframe, canvas")).toBeNull();
-      const panel = expand.closest(".controls-panel")! as HTMLElement;
-      expect(panel).toHaveClass("controls-compact");
-      const groups = panel.querySelectorAll(".controls-primary > .control-group");
-      expect(groups).toHaveLength(3);
-      expect(Array.from(groups).map(group => group.querySelector("strong")?.textContent)).toEqual(["Observer", "Source", "Telegram"]);
-      for (const name of ["STATIC", "MOBILE", "LOCAL", "INTERNET", "AUTO", "Telegram SUN", "Telegram MOON"]) {
-        expect(within(panel).getByRole("button", { name })).toBeVisible();
-      }
-      for (const selector of [".fallback-control-group", ".source-meta", ".observer-meta", "#controls-secondary"]) {
-        expect(panel.querySelector(selector)).not.toBeVisible();
-      }
-      fireEvent.click(expand);
-      expect(panel).toHaveClass("controls-expanded");
-      expect(panel).not.toHaveClass("controls-compact");
-      for (const selector of [".fallback-control-group", ".source-meta", ".observer-meta", "#controls-secondary"]) {
-        expect(panel.querySelector(selector)).toBeVisible();
-      }
-      expect(panel.querySelectorAll(".controls-primary > .control-group")[0]).toBe(groups[0]);
-      expect(screen.getByRole("button", { name: "Collapse Controls panel" })).toHaveAttribute("aria-expanded", "true");
-      expect(screen.getByText("Default configured location")).toBeVisible();
-      expect(screen.getByRole("button", { name: "STATIC" })).toHaveAttribute("aria-pressed", "true");
-      fireEvent.click(screen.getByRole("button", { name: "HISTORY" }));
-      expect(screen.getByRole("button", { name: "HISTORY" })).toHaveAttribute("aria-pressed", "true");
-      expect(screen.getByRole("button", { name: "LIVE" })).toHaveAttribute("aria-pressed", "false");
-      fireEvent.click(screen.getByRole("button", { name: "LIVE" }));
-      fireEvent.click(screen.getByRole("button", { name: "Collapse Controls panel" }));
-      fireEvent.click(screen.getByRole("button", { name: "MOBILE" }));
-      for (const name of ["STATIC", "MOBILE"]) {
-        const button = screen.getByRole("button", { name });
-        expect(button).toBeDisabled();
-        expect(button).toHaveAttribute("aria-busy", "true");
-        expect(button).toHaveTextContent(name);
-      }
-    } finally { window.innerWidth = previous; }
-  });
-
   it.each(["LOCAL", "INTERNET", "AUTO"] as const)("sends %s through the settings API without inferring source authority", async mode => {
     const mutate = vi.fn().mockResolvedValue({});
     render(<App client={async () => fixed} eventSourceFactory={quietStream} settingsMutator={mutate} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
     fireEvent.click(await screen.findByRole("button", { name: mode }));
     await waitFor(() => expect(mutate).toHaveBeenCalledWith(expect.objectContaining({
       expected_revision: 3, changes: { aircraft_source: { requested_mode: mode } },
     })));
     expect(screen.getByRole("button", { name: "LOCAL" })).toHaveAttribute("aria-pressed", "true");
-    fireEvent.click(screen.getByRole("button", { name: "Expand Controls panel" }));
     expect(document.querySelector(".source-meta")).toHaveTextContent("Requested AUTO / Effective LOCAL / Provider ADSB.lol / Health PRIVACY_BLOCKED");
   });
 
   it("keeps backend health, transport, generated time and last refresh distinct", async () => {
     render(<App client={async () => ({ ...fixed, health: "STALE" })} eventSourceFactory={quietStream} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
     const button = await screen.findByRole("button", { name: "Expand Backend state panel" });
     expect(button).toHaveTextContent("STALE");
     expect(button).toHaveTextContent("Generated");
@@ -153,8 +167,8 @@ describe("STANDARD final controls", () => {
       return {};
     });
     const rendered = render(<App client={async () => current} eventSourceFactory={quietStream} settingsMutator={mutate} gpsClient={gps} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
     try {
-      fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
       fireEvent.click(screen.getByRole("button", { name: "Change location" }));
       for (const [name, value] of [["Static latitude", "12"], ["Static longitude", "34"], ["Static elevation AMSL", "100"]]) {
         fireEvent.change(screen.getByLabelText(name), { target: { value } });
@@ -171,6 +185,7 @@ describe("STANDARD final controls", () => {
     const browser = browserGps(); const gps = gpsMock();
     const client = vi.fn(async () => activeFixture);
     const rendered = render(<App client={client} eventSourceFactory={quietStream} gpsClient={gps} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
     try {
       const start = await screen.findByRole("button", { name: "Start GPS" });
       await waitFor(() => expect(start).not.toBeDisabled());
@@ -194,6 +209,7 @@ describe("STANDARD final controls", () => {
     const browser = browserGps(); const gps = gpsMock();
     browser.watchPosition.mockImplementation(() => { throw new Error("unavailable"); });
     const rendered = render(<App client={async () => activeFixture} eventSourceFactory={quietStream} gpsClient={gps} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
     try {
       const start = await screen.findByRole("button", { name: "Start GPS" });
       await waitFor(() => expect(start).not.toBeDisabled());
@@ -216,8 +232,10 @@ describe("STANDARD final controls", () => {
       return {};
     });
     const rendered = render(<App client={client} eventSourceFactory={quietStream} settingsMutator={mutate} gpsClient={gps} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Expand Controls panel" }));
     try {
       await waitFor(() => expect(gps.status).toHaveBeenCalled());
+      expect(screen.getByText("Observer STATIC")).toBeVisible();
       fireEvent.click(await screen.findByRole("button", { name: "MOBILE" }));
       await waitFor(() => expect(browser.watchPosition).toHaveBeenCalledTimes(1));
       expect(screen.getByRole("button", { name: "Stop GPS" })).toHaveClass("gps-waiting");
@@ -227,6 +245,14 @@ describe("STANDARD final controls", () => {
       current = { ...current, observer: { requested_mode: "MOBILE", effective_source: "MOBILE_FRESH" } };
       await act(async () => browser.success[0](fix));
       await waitFor(() => expect(screen.getByRole("button", { name: "Stop GPS" })).toHaveClass("gps-active"));
+      fireEvent.click(screen.getByRole("button", { name: "Collapse Controls panel" }));
+      expect(screen.getByText("Observer MOBILE")).toBeVisible();
+      expect(screen.queryByRole("button", { name: "Stop GPS" })).not.toBeInTheDocument();
+      expect(browser.clearWatch).not.toHaveBeenCalled();
+      expect(gps.clear).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "Expand Controls panel" }));
+      expect(screen.getByRole("button", { name: "Stop GPS" })).toHaveClass("gps-active");
+      expect(browser.watchPosition).toHaveBeenCalledTimes(1);
       act(() => browser.failure[0]({ code: 1 } as GeolocationPositionError));
       expect(screen.getByRole("button", { name: "Stop GPS" })).toHaveClass("gps-attention");
       expect(screen.getByText(/permission was denied/)).toBeVisible();
