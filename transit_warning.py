@@ -62,6 +62,7 @@ from __future__ import print_function
 import argparse
 from copy import deepcopy
 import io
+import json
 import os
 from pathlib import Path
 import shutil
@@ -78,6 +79,7 @@ from types import SimpleNamespace
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import wraps
+from runtime_deferred_prediction import RuntimeDeferredPrediction
 from math import atan2, sin, cos, acos, radians, degrees, atan, asin, sqrt, isnan
 import pytz  # Import pytz for timezone handling
 from config import ConfigurationError, InstallationConfig, load_installation_config
@@ -249,6 +251,7 @@ raw_diagnostic_replay = None
 telegram_notifier = None
 dashboard_runtime = DisabledDashboard()
 aircraft_source_mode = "LOCAL"
+deferred_true2d = None
 aircraft_source_lock = threading.RLock()
 internet_source_poller = None
 internet_source_bridge = None
@@ -803,6 +806,8 @@ def complete_candidate_observation_windows(now_utc):
 
 def discard_authoritative_aircraft(icao, now_utc):
     """Preserve lifecycle behavior while observing its withdrawal results."""
+    if deferred_true2d is not None:
+        deferred_true2d.invalidate(icao)
     transitions = authoritative_transit_lifecycle.discard_aircraft_transitions(
         icao)
     for transition in transitions:
@@ -2277,44 +2282,51 @@ def prepare_shadow_2d(
         return None
 
 
-def complete_shadow_2d(prepared, legacy_result, legacy_prediction_base_utc):
-    """Refine and persist a coordinate-free comparison, always fail-open."""
-    if prepared is None:
-        return None
-    try:
-        context, coarse = prepared
-        legacy_tca = None
-        if legacy_result:
-            legacy_event_utc = (
-                legacy_prediction_base_utc
-                + datetime.timedelta(seconds=float(legacy_result[6])))
-            legacy_tca = (
-                legacy_event_utc - context.prediction_base_utc).total_seconds()
-        exact = (shadow_exact_refine(
-            context, coarse, shadow_2d_config,
-            legacy_tca_seconds=legacy_tca)
-            if coarse.passed else None)
-        result = Shadow2DResult(coarse=coarse, exact=exact)
-        transition = authoritative_transit_lifecycle.consider_transition(
-            context, result, context.prediction_base_utc)
-        writer = shadow_2d_diagnostics
-        if writer is not None:
+def compute_shadow_2d_result(context, coarse, legacy_result, legacy_base, config):
+    """Numerical refinement only: safe with frozen input outside aircraft lock."""
+    legacy_tca = None
+    if legacy_result:
+        legacy_event = legacy_base + datetime.timedelta(seconds=float(legacy_result[6]))
+        legacy_tca = (legacy_event - context.prediction_base_utc).total_seconds()
+    exact = (shadow_exact_refine(context, coarse, config, legacy_tca_seconds=legacy_tca)
+             if coarse.passed else None)
+    return Shadow2DResult(coarse=coarse, exact=exact)
+
+
+def commit_shadow_2d_result(context, result, legacy_result, legacy_base, config, now_utc):
+    """Apply only a validated computation; preserve per-body diagnostic records."""
+    transition = authoritative_transit_lifecycle.consider_transition(context, result, now_utc)
+    writer = shadow_2d_diagnostics
+    if writer is not None:
+        try:
+            coarse, exact = result.coarse, result.exact
             writer.counters["screened"] += 1
-            if coarse.passed:
-                writer.counters["passed"] += 1
-            else:
-                writer.counters["coarse_rejected"] += 1
+            writer.counters["passed" if coarse.passed else "coarse_rejected"] += 1
             if exact is not None:
-                counter = "exact_success" if exact.succeeded else "exact_failure"
-                writer.counters[counter] += 1
+                writer.counters["exact_success" if exact.succeeded else "exact_failure"] += 1
             record = shadow_comparison_record(
-                context, result, legacy_prediction_base_utc, legacy_result,
-                shadow_2d_config.refinement_target_deg,
-                legacy_prediction_base_utc)
+                context, result, legacy_base, legacy_result,
+                config.refinement_target_deg, now_utc)
             if record["shadow_only"]:
                 writer.counters["shadow_only"] += 1
             record["runtime_counters"] = dict(writer.counters)
             writer.record(record)
+        except Exception:
+            pass  # Diagnostic failures must not suppress an already committed transition.
+    return transition
+
+
+def complete_shadow_2d(prepared, legacy_result, legacy_prediction_base_utc):
+    """Synchronous adapter retained for replay and shadow-only evaluation."""
+    if prepared is None:
+        return None
+    try:
+        context, coarse = prepared
+        result = compute_shadow_2d_result(
+            context, coarse, legacy_result, legacy_prediction_base_utc, shadow_2d_config)
+        transition = commit_shadow_2d_result(
+            context, result, legacy_result, legacy_prediction_base_utc,
+            shadow_2d_config, context.prediction_base_utc)
         return result, transition, context
     except Exception:
         return None
@@ -2974,6 +2986,9 @@ def update_transit_prediction_timestamp(icao, celestial_body, now_utc,
 
 def clear_transit_prediction_state(icao, entry, celestial_body,
                                    start_index):
+    if (deferred_true2d is not None
+            and deferred_true2d.committing_icao != icao):
+        deferred_true2d.invalidate(icao)
     clear_transit_prediction(entry, start_index)
     last_valid, predicted_times = _prediction_timestamps(celestial_body)
     last_valid.pop(icao, None)
@@ -2993,6 +3008,8 @@ def clear_transit_prediction_state(icao, entry, celestial_body,
 @synchronized_plane_dict
 def invalidate_observer_dependent_state(observer_context=None, reason="OBSERVER_INVALIDATED"):
     """Remove live predictions computed for a previous observer epoch."""
+    if deferred_true2d is not None:
+        deferred_true2d.invalidate(source=reason == "SOURCE_RESET")
     for icao, entry in plane_dict.items():
         clear_transit_prediction(entry, 18)
         clear_transit_prediction(entry, 23)
@@ -3273,6 +3290,18 @@ class AutoFusionBridge(StandaloneBridge):
         super().__init__(poller, dashboard, geoid, source="AUTO_FUSION",
                          source_mode="AUTO")
 
+    def _clear(self, now):
+        with plane_dict_lock:
+            if deferred_true2d is not None:
+                deferred_true2d.invalidate()
+            return super()._clear(now)
+
+    def _remove(self, icao, now, reason="WITHDRAWN"):
+        with plane_dict_lock:
+            if deferred_true2d is not None:
+                deferred_true2d.invalidate(icao)
+            return super()._remove(icao, now, reason=reason)
+
     def context(self, ac, observer, now, age, body):
         now_mono = self.monotonic()
         with plane_dict_lock:
@@ -3340,6 +3369,8 @@ class AutoFusionBridge(StandaloneBridge):
                                   geoid=self.geoid)
             if view is None or view["classification"] != "DEGRADED_UNKNOWN_FIELD_AGE":
                 return
+            if deferred_true2d is not None:
+                deferred_true2d.invalidate(prediction.icao)
             super()._publish(prediction, context, now)
             capture_authoritative_transit_prediction(prediction, context, now)
 
@@ -4431,7 +4462,15 @@ def install_table_snapshot_signal_handler():
 def render_full_table_snapshot():
     output = io.StringIO()
     tabela(output=output, full=True, force=True)
+    if deferred_true2d is not None:
+        print("Deferred TRUE_2D: " + json.dumps(
+            deferred_prediction_diagnostics(), sort_keys=True), file=output)
     return ANSI_ESCAPE_RE.sub("", output.getvalue())
+
+
+def deferred_prediction_diagnostics():
+    """Private/internal counters only; no coordinates, jobs, or aircraft IDs."""
+    return deferred_true2d.scheduler.snapshot() if deferred_true2d is not None else None
 
 
 def write_table_snapshot(directory=DIAGNOSTICS_DIRECTORY):
@@ -4553,6 +4592,8 @@ def shutdown_runtime(threads, recorder):
             thread.join(timeout=2.0)
         except Exception:
             pass
+    if deferred_true2d is not None:
+        deferred_true2d.close()
     close_transit_snapshots(clock.now_utc())
     try:
         if candidate_storage_worker is not None:
@@ -4615,6 +4656,8 @@ def read_from_port(host, port, process_line, session_recorder=None):
                 line = file.readline()
                 if not line:
                     break
+                if deferred_true2d is not None and port == adsb_port:
+                    deferred_true2d.scheduler.received()
                 if session_recorder is not None:
                     try:
                         session_recorder.record_line(port, line)
@@ -5158,6 +5201,15 @@ def process_line(line, port):
         tst_int2 = apply_vertical_prediction_to_transit_result(
             icao, "sun", tst_int2, elevation, prediction_now,
             observer_position)
+        if (deferred_true2d is not None and shadow_track is not None
+                and is_float_try(shadow_track.value)):
+            deferred_true2d.submit(
+                icao, flight, observer_context, shadow_track, velocity, elevation,
+                shadow_prediction_base_utc, (tst_int1, tst_int2), prediction_now)
+            sun_alt, sun_az, moon_alt, moon_az = tabela_for_observer(observer_context)
+            clean_dict()
+            clean_transit_dict()
+            return
         if shadow_track is not None and is_float_try(shadow_track.value):
             for shadow_body in ("moon", "sun"):
                 shadow_prepared[shadow_body] = prepare_shadow_2d(
@@ -5277,11 +5329,16 @@ def process_line(line, port):
 
     if (not shadow_completed and shadow_prediction_base_utc is not None
             and shadow_track is not None and is_float_try(shadow_track.value)):
-        for shadow_body in ("moon", "sun"):
-            shadow_prepared[shadow_body] = prepare_shadow_2d(
-                icao, plane_dict[icao][1], shadow_body, observer_context,
-                shadow_track, plane_dict[icao][14], plane_dict[icao][4],
-                shadow_prediction_base_utc)
+        if deferred_true2d is not None:
+            deferred_true2d.submit(
+                icao, plane_dict[icao][1], observer_context, shadow_track,
+                plane_dict[icao][14], plane_dict[icao][4], shadow_prediction_base_utc)
+        else:
+            for shadow_body in ("moon", "sun"):
+                shadow_prepared[shadow_body] = prepare_shadow_2d(
+                    icao, plane_dict[icao][1], shadow_body, observer_context,
+                    shadow_track, plane_dict[icao][14], plane_dict[icao][4],
+                    shadow_prediction_base_utc)
     for pending_shadow in shadow_prepared.values():
         completed = complete_shadow_2d(
             pending_shadow, None,
@@ -5299,6 +5356,7 @@ def process_line(line, port):
 
 
 def main():
+    global deferred_true2d
     global daily_environment_recorder, session_recorder, session_recording_requested
     global transit_snapshot_manager, telegram_notifier, dashboard_runtime
     global shutdown_complete
@@ -5404,6 +5462,10 @@ def main():
             session_recorder = None
 
     initialize_candidate_recorder_observation()
+
+    if (not isinstance(clock, ReplayClock) and shadow_2d_config.enabled
+            and authoritative_transit_lifecycle.enabled):
+        deferred_true2d = RuntimeDeferredPrediction(sys.modules[__name__])
 
     # Uruchomienie wątków do czytania z portów / Start threads to read from ports
     threads = [threading.Thread(

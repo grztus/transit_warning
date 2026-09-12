@@ -1,6 +1,8 @@
 """Fail-open local web dashboard for already-computed transit predictions."""
 
 from copy import deepcopy
+from contextlib import nullcontext
+from functools import wraps
 from dataclasses import asdict, dataclass, replace
 import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -192,6 +194,16 @@ class TelegramBodyControls:
         return self.snapshot()
 
 
+def _prediction_mutation(method):
+    """Order lifecycle mutation before any existing publication callback."""
+    @wraps(method)
+    def guarded(self, *args, **kwargs):
+        guard = getattr(self, "_prediction_guard", nullcontext)
+        with guard():
+            return method(self, *args, **kwargs)
+    return guarded
+
+
 class DashboardState:
     """Thread-safe live queues with a bounded persistent-backed recent cache."""
 
@@ -248,6 +260,7 @@ class DashboardState:
         with self._lock:
             self._aircraft_source = deepcopy(diagnostic)
 
+    @_prediction_mutation
     def publish(self, candidate, *, source_owner=None):
         if candidate.fusion_provenance is not None:
             candidate = replace(candidate, fusion_provenance=deepcopy(candidate.fusion_provenance))
@@ -321,6 +334,7 @@ class DashboardState:
             item["history_worthy"] = True
         return True
 
+    @_prediction_mutation
     def withdraw(self, icao, body, now_utc, reason="WITHDRAWN", details=None):
         body = body.upper()
         with self._lock:
@@ -339,6 +353,7 @@ class DashboardState:
             self._trace_finalization(item, now_utc, "WITHDRAWN", reason, decision, details)
         return True
 
+    @_prediction_mutation
     def withdraw_source(self, icao, body, owner, now_utc,
                         reason="WITHDRAWN", details=None):
         """Withdraw only the candidate still owned by this source."""
@@ -348,6 +363,7 @@ class DashboardState:
                 return False
             return self.withdraw(icao, body, now_utc, reason, details)
 
+    @_prediction_mutation
     def invalidate_source(self, owner, now_utc=None,
                           reason="OBSERVER_INVALIDATED", details=None):
         """Discard only this source's live candidates without history output."""
@@ -364,6 +380,7 @@ class DashboardState:
                             ("SKIPPED", reason, False, False), details)
         return changed
 
+    @_prediction_mutation
     def withdraw_aircraft(self, icao, now_utc, reason="WITHDRAWN", details=None,
                           *, source_owner=_ANY_SOURCE):
         changed = False
@@ -376,6 +393,16 @@ class DashboardState:
             changed = result or changed
         return changed
 
+    def prediction_encounters(self, icao):
+        """Internal identity and owner guard; never serialized to public state."""
+        with self._lock:
+            return tuple(
+                (self._live[body][icao]["candidate"].encounter_id,
+                 self._live[body][icao].get("source_owner"))
+                if icao in self._live[body] else None
+                for body in ("MOON", "SUN"))
+
+    @_prediction_mutation
     def invalidate_live(self, now_utc=None, reason="OBSERVER_INVALIDATED", details=None):
         """Discard observer-dependent live candidates without history output."""
         with self._lock:
@@ -386,6 +413,7 @@ class DashboardState:
                         ("SKIPPED", reason, False, False), details)
             self._live = {"SUN": {}, "MOON": {}}
 
+    @_prediction_mutation
     def tick(self, now_utc):
         with self._lock:
             self._generated_at_utc = now_utc
@@ -637,6 +665,9 @@ class DisabledDashboard:
 
     def set_aircraft_source(self, status):
         self.aircraft_source = dict(status)
+
+    def prediction_encounters(self, icao):
+        return (None, None)
 
     def _publish_application_state(self):
         return None
