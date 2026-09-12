@@ -3061,7 +3061,8 @@ def invalidate_observer_dependent_state(observer_context=None, reason="OBSERVER_
     transit_solver_diagnostics.clear()
     authoritative_terminal_predictions.clear()
     transitions = authoritative_transit_lifecycle.invalidate_transitions()
-    invalidated_at_utc = clock.now_utc()
+    invalidated_at_utc = (None if isinstance(clock, ReplayClock) and not clock.is_ready()
+                          else clock.now_utc())
     for transition in transitions:
         observe_candidate_authoritative_transition(
             transition, invalidated_at_utc)
@@ -3125,6 +3126,9 @@ def set_aircraft_source_mode(mode):
     requested = str(mode).upper()
     if requested not in ("LOCAL", "INTERNET", "AUTO"):
         raise ValueError("Invalid aircraft source mode")
+    # Replay always consumes recorded LOCAL input. Keep the requested preference
+    # in settings/configuration so the next real-clock run uses it normally.
+    effective = "LOCAL" if isinstance(clock, ReplayClock) else requested
     old_poller = None
     try:
         with aircraft_source_lock:
@@ -3135,16 +3139,16 @@ def set_aircraft_source_mode(mode):
             internet_source_poller = None
             internet_source_bridge = None
             with plane_dict_lock:
-                aircraft_source_mode = requested
+                aircraft_source_mode = effective
                 _clear_aircraft_source_state()
-            if requested in ("INTERNET", "AUTO"):
-                if requested == "INTERNET" and aircraft_los_geoid_provider is None:
+            if effective in ("INTERNET", "AUTO"):
+                if effective == "INTERNET" and aircraft_los_geoid_provider is None:
                     dashboard_runtime.state.set_aircraft_source(
                         _source_status(requested, "ERROR"))
                     dashboard_runtime._publish_application_state()
                     return
                 internet_source_poller = SnapshotPoller(observer_position_provider)
-                if requested == "INTERNET":
+                if effective == "INTERNET":
                     internet_source_bridge = ProductionInternetBridge(
                         internet_source_poller, dashboard_runtime,
                         aircraft_los_geoid_provider, source="ADSBLOL",
@@ -3155,15 +3159,17 @@ def set_aircraft_source_mode(mode):
                             internet_source_poller, dashboard_runtime,
                             aircraft_los_geoid_provider)
                 internet_source_poller.start()
-                if requested == "INTERNET" and internet_source_bridge is not None:
+                if effective == "INTERNET" and internet_source_bridge is not None:
                     internet_source_bridge.step()
                 else:
                     dashboard_runtime.state.set_aircraft_source(
                         _source_status("AUTO", "WAITING"))
                     dashboard_runtime._publish_application_state()
             else:
-                dashboard_runtime.state.set_aircraft_source(
-                    _source_status(requested))
+                status = _source_status(effective,
+                    "REPLAY" if isinstance(clock, ReplayClock) else "HEALTHY")
+                status["requested_mode"] = requested
+                dashboard_runtime.state.set_aircraft_source(status)
                 dashboard_runtime._publish_application_state()
 
     finally:
@@ -5492,7 +5498,9 @@ def main():
         configuration.dashboard_enabled and not isinstance(clock, ReplayClock),
         configuration.dashboard_host,
         configuration.dashboard_port,
-        clock.now_utc,
+        # The replay clock has no timestamp until the first recorded message.
+        lambda: None if isinstance(clock, ReplayClock) and not clock.is_ready()
+                else clock.now_utc(),
         error_handler=lambda message: print(message),
         sep_green_max_deg=configuration.dashboard_sep_green_max_deg,
         sep_yellow_max_deg=configuration.dashboard_sep_yellow_max_deg,

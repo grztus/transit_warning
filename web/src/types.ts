@@ -160,10 +160,12 @@ export interface LiveStateEvent {
   event: "live_state";
   live_revision: number;
   generated_at_utc?: string | null;
-  payload: Pick<BootstrapDto, "generated_at_utc" | "bodies" | "recent_events" | "presentation" | "aircraft_source">;
+  payload: Pick<BootstrapDto, "generated_at_utc" | "bodies" | "recent_events" | "presentation" | "aircraft_source">
+    & Partial<Pick<BootstrapDto, "observer">> & { observer_settings_revision?: number };
 }
 
 export interface SettingsSnapshotDto {
+  observer?: ObserverStatusDto;
   schema_version: 1;
   revision: number;
   values: RuntimeSettingsValuesDto;

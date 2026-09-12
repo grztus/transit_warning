@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import threading
 
-from .contracts import SCHEMA_VERSION
+from .contracts import SCHEMA_VERSION, serialize_observer_status
 from .privacy import assert_public_payload
 
 
@@ -52,7 +52,8 @@ class RuntimeSettingsStore:
                  validate_callback=None,
                  manual_persistence=None,
                  observer_manual_position_saved=False,
-                 aircraft_source_requested_mode="LOCAL"):
+                 aircraft_source_requested_mode="LOCAL",
+                 observer_status_callback=None):
         self._values = {
             "telegram": {
                 "sun_enabled": bool(telegram_sun_enabled),
@@ -79,6 +80,7 @@ class RuntimeSettingsStore:
         self._apply_callback = apply_callback
         self._validate_callback = validate_callback
         self._manual_persistence = manual_persistence
+        self._observer_status_callback = observer_status_callback
         self._accepted_commands = OrderedDict()
         self._subscribers = []
         self._lock = threading.RLock()
@@ -190,6 +192,9 @@ class RuntimeSettingsStore:
             "capabilities": deepcopy(self.CAPABILITIES),
             "persistence": "RUNTIME_WITH_DURABLE_MANUAL_OBSERVER",
         }
+        if self._observer_status_callback is not None:
+            # Capture diagnostics under the same settings lock as the revision.
+            result["observer"] = serialize_observer_status(self._observer_status_callback())
         assert_public_payload(result)
         return result
 

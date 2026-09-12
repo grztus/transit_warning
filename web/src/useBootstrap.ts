@@ -20,6 +20,14 @@ export interface BootstrapPollingState {
   resync(): Promise<void>;
 }
 
+// Match application_health(): generated data is fresh through ten seconds,
+// inclusive. Transport contact and settings revisions do not refresh this age.
+const DATA_FRESHNESS_MS = 10_000;
+export function generatedHealth(timestamp: string | null | undefined, nowMs = Date.now()) {
+  const generated = timestamp ? Date.parse(timestamp) : NaN;
+  return Number.isFinite(generated) && nowMs - generated <= DATA_FRESHNESS_MS ? "ACTIVE" : "STALE";
+}
+
 const nativeEventSource: EventSourceFactory | undefined = typeof EventSource === "undefined"
   ? undefined : (url) => new EventSource(url) as EventSourceLike;
 
@@ -77,12 +85,27 @@ export function useBootstrap(
   }, [client, contactFailed, contactSucceeded, install]);
 
   useEffect(() => {
+    if (snapshot?.health !== "ACTIVE") return;
+    const timestamp = snapshot.generated_at_utc;
+    const generated = timestamp ? Date.parse(timestamp) : NaN;
+    const remaining = Number.isFinite(generated) ? Math.max(0, generated + DATA_FRESHNESS_MS + 1 - Date.now()) : 0;
+    const timer = setTimeout(() => {
+      const latest = snapshotRef.current;
+      if (latest && generatedHealth(latest.generated_at_utc) === "STALE") {
+        const stale = { ...latest, health: "STALE" as const };
+        snapshotRef.current = stale;
+        setSnapshot(stale);
+      }
+    }, Math.min(remaining, 2_147_483_647));
+    return () => clearTimeout(timer);
+  }, [snapshot?.generated_at_utc, snapshot?.health]);
+
+  useEffect(() => {
     let cancelled = false;
     let source: EventSourceLike | undefined;
     let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
     let pollTimer: ReturnType<typeof setTimeout> | undefined;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
-    let staleTimer: ReturnType<typeof setTimeout> | undefined;
     let fallbackActive = false;
     let connectionCount = 0;
 
@@ -125,17 +148,12 @@ export function useBootstrap(
             !Number.isInteger(update.live_revision) || !current) return;
         if (update.live_revision <= current.live_revision) return;
         if (update.live_revision !== current.live_revision + 1) { void safeResync(); return; }
-        install({ ...current, ...update.payload, health: "ACTIVE",
-          live_revision: update.live_revision });
-        if (staleTimer !== undefined) clearTimeout(staleTimer);
-        staleTimer = setTimeout(() => {
-          const latest = snapshotRef.current;
-          if (latest) {
-            const stale = { ...latest, health: "STALE" as const };
-            snapshotRef.current = stale;
-            setSnapshot(stale);
-          }
-        }, 10_000);
+        const { observer, observer_settings_revision, ...payload } = update.payload;
+        install({ ...current, ...payload,
+          // A publication captured before a settings change cannot roll back
+          // the observer attached to the newer authoritative settings event.
+          ...(observer && observer_settings_revision === current.settings_revision ? { observer } : {}),
+          health: generatedHealth(payload.generated_at_utc), live_revision: update.live_revision });
       } catch { void safeResync(); }
     };
     const applySettings = (event: MessageEvent<string>) => {
@@ -148,7 +166,8 @@ export function useBootstrap(
         if (update.settings_revision !== current.settings_revision + 1) { void safeResync(); return; }
         install({ ...current, settings_revision: update.settings_revision,
           settings: update.payload.values,
-          capabilities: update.payload.capabilities });
+          capabilities: update.payload.capabilities,
+          ...(update.payload.observer ? { observer: update.payload.observer } : {}) });
       } catch { void safeResync(); }
     };
     const connect = () => {
@@ -213,7 +232,6 @@ export function useBootstrap(
       if (fallbackTimer !== undefined) clearTimeout(fallbackTimer);
       if (pollTimer !== undefined) clearTimeout(pollTimer);
       if (reconnectTimer !== undefined) clearTimeout(reconnectTimer);
-      if (staleTimer !== undefined) clearTimeout(staleTimer);
     };
   }, [contactFailed, contactSucceeded, eventSourceFactory, fallbackDelayMs, pollIntervalMs,
     reconnectDelayMs, resync, install]);

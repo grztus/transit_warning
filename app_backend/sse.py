@@ -38,12 +38,23 @@ class Subscription:
         self.broker = broker
         self.condition = threading.Condition()
         self.latest = {}
+        self.last_revisions = {}
         self.closed = False
 
     def offer(self, value):
         with self.condition:
             if not self.closed:
-                self.latest[value["event"]] = value
+                event = value["event"]
+                revision = value.get("live_revision" if event == "live_state"
+                                     else "settings_revision")
+                previous = self.last_revisions.get(event)
+                if isinstance(previous, int) and (
+                        not isinstance(revision, int) or revision <= previous):
+                    return
+                if isinstance(revision, int):
+                    self.last_revisions[event] = revision
+                # Keep the watermark after next() drains the bounded mailbox.
+                self.latest[event] = value
                 self.condition.notify()
 
     def next(self, timeout):

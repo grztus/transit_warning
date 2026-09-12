@@ -879,6 +879,36 @@ class DashboardRuntime:
             self.state.finalization_journal.close()
 
 
+def observer_status(observer_position_provider, now_utc, stale_warning_seconds,
+                    critical_warning_seconds):
+    if observer_position_provider is None:
+        return {"requested_mode": "STATIC", "effective_source": "STATIC"}
+    context = observer_position_provider.resolve(now_utc())
+    result = {
+        "requested_mode": context.requested_mode,
+        "effective_source": context.effective_source,
+        "fallback_enabled": context.fallback_enabled,
+        "fallback_active": context.fallback_active,
+        "mobile_age_seconds": context.mobile_age_seconds,
+        "mobile_accuracy_m": context.mobile_accuracy_m,
+        "effective_elevation_m": (
+            context.position.elevation_m if context.position else None),
+    }
+    if context.requested_mode == "MANUAL":
+        manual = observer_position_provider.manual_position
+        result.update({
+            "manual_lat_deg": manual.coordinates[0],
+            "manual_lon_deg": manual.coordinates[1],
+            "manual_elevation_amsl_m": manual.elevation_m,
+        })
+    age = context.mobile_age_seconds
+    result["gps_health"] = (
+        "NO_FIX" if age is None else
+        "CRITICAL" if age > critical_warning_seconds else
+        "STALE" if age > stale_warning_seconds else "ACTIVE")
+    return result
+
+
 def _handler_factory(state, now_utc, mobile_gps_state, telegram_controls,
                      application_state_store=None, settings_store=None,
                      sse_broker=None,
@@ -890,32 +920,8 @@ def _handler_factory(state, now_utc, mobile_gps_state, telegram_controls,
         Path(__file__).resolve().parent / "web" / "dist")).resolve()
 
     def observer_diagnostics():
-        if observer_position_provider is None:
-            return {"requested_mode": "STATIC", "effective_source": "STATIC"}
-        context = observer_position_provider.resolve(now_utc())
-        result = {
-            "requested_mode": context.requested_mode,
-            "effective_source": context.effective_source,
-            "fallback_enabled": context.fallback_enabled,
-            "fallback_active": context.fallback_active,
-            "mobile_age_seconds": context.mobile_age_seconds,
-            "mobile_accuracy_m": context.mobile_accuracy_m,
-            "effective_elevation_m": (
-                context.position.elevation_m if context.position else None),
-        }
-        if context.requested_mode == "MANUAL":
-            manual = observer_position_provider.manual_position
-            result.update({
-                "manual_lat_deg": manual.coordinates[0],
-                "manual_lon_deg": manual.coordinates[1],
-                "manual_elevation_amsl_m": manual.elevation_m,
-            })
-        age = context.mobile_age_seconds
-        result["gps_health"] = (
-            "NO_FIX" if age is None else
-            "CRITICAL" if age > critical_warning_seconds else
-            "STALE" if age > stale_warning_seconds else "ACTIVE")
-        return result
+        return observer_status(observer_position_provider, now_utc,
+                               stale_warning_seconds, critical_warning_seconds)
 
     class DashboardHandler(BaseHTTPRequestHandler):
         _mutation_condition = threading.Condition()
@@ -1384,7 +1390,10 @@ def start_dashboard(enabled, host, port, now_utc, error_handler=None,
         apply_callback=apply_settings, validate_callback=validate_settings,
         manual_persistence=manual_persistence,
         observer_manual_position_saved=saved_manual is not None,
-        aircraft_source_requested_mode=aircraft_source_mode)
+        aircraft_source_requested_mode=aircraft_source_mode,
+        observer_status_callback=lambda: observer_status(
+            observer_position_provider, now_utc,
+            mobile_gps_stale_warning_seconds, mobile_gps_critical_warning_seconds))
     if not enabled:
         return DisabledDashboard(telegram_controls, settings_store)
     history_store = (
@@ -1405,10 +1414,19 @@ def start_dashboard(enabled, host, port, now_utc, error_handler=None,
         lambda snapshot: sse_broker.publish(live_envelope(snapshot)), required=True)
     settings_store.subscribe(
         lambda snapshot: sse_broker.publish(settings_envelope(snapshot)))
-    publisher = PublicStatePublisher(lambda: application_state_store.publish(state.snapshot()))
+    def public_snapshot():
+        snapshot = state.snapshot()
+        # Resolve observer diagnostics outside the dashboard lock. The settings
+        # snapshot binds diagnostics to their revision, including on SSE updates.
+        settings = settings_store.snapshot()
+        snapshot.update(observer=settings["observer"],
+                        observer_settings_revision=settings["revision"])
+        return snapshot
+
+    publisher = PublicStatePublisher(lambda: application_state_store.publish(public_snapshot()))
     try:
         state.tick(now_utc())
-        application_state_store.publish(state.snapshot())
+        application_state_store.publish(public_snapshot())
         server = server_factory(
             (host, port), _handler_factory(
                 state, now_utc, mobile_gps_state,

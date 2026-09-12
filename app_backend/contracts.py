@@ -81,6 +81,10 @@ def serialize_live_state(snapshot):
         "presentation": _select(
             snapshot.get("presentation"), _PRESENTATION_FIELDS),
     }
+    if isinstance(snapshot.get("observer"), dict):
+        result["observer"] = serialize_observer_status(snapshot["observer"])
+        if "observer_settings_revision" in snapshot:
+            result["observer_settings_revision"] = snapshot["observer_settings_revision"]
     if isinstance(snapshot.get("aircraft_source"), dict):
         result["aircraft_source"] = _select(snapshot["aircraft_source"], (
             "mode", "requested_mode", "effective_mode", "provider",
@@ -113,7 +117,7 @@ def serialize_bootstrap(application_snapshot, settings, observer_status, now_utc
         "settings_revision": settings["revision"],
         "generated_at_utc": live["generated_at_utc"],
         "health": application_health(live["generated_at_utc"], now_utc),
-        "observer": serialize_observer_status(observer_status),
+        "observer": serialize_observer_status(settings.get("observer", observer_status)),
         "bodies": live["bodies"],
         "recent_events": live["recent_events"],
         "presentation": live["presentation"],

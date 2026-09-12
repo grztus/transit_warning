@@ -4,7 +4,7 @@ export const activeFixture: BootstrapDto = {
   schema_version: 1,
   live_revision: 42,
   settings_revision: 3,
-  generated_at_utc: "2026-09-04T10:00:00Z",
+  generated_at_utc: new Date().toISOString(),
   health: "ACTIVE",
   observer: {
     requested_mode: "MOBILE",

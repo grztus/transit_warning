@@ -3,6 +3,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from transit_clock import ReplayClock, RealClock
+from app_backend.settings import RuntimeSettingsStore
 import transit_warning as transit
 
 
@@ -94,3 +96,45 @@ class AircraftSourceModeTests(unittest.TestCase):
         self.assertIsNone(transit.adsblol_auto_cache.snapshot_id)
         self.assertEqual({}, transit.adsblol_auto_cache.aircraft)
         self.assertEqual({}, transit.fused_aircraft_states)
+
+
+    def test_replay_overrides_each_requested_mode_without_rewriting_preference(self):
+        for requested in ("LOCAL", "INTERNET", "AUTO"):
+            with self.subTest(requested=requested):
+                replay = ReplayClock()
+                preference = RuntimeSettingsStore(aircraft_source_requested_mode=requested)
+                with patch.object(transit, "clock", replay), patch.object(transit, "SnapshotPoller") as provider:
+                    # Startup has no replay timestamp yet and must still be safe.
+                    transit.set_aircraft_source_mode(requested)
+                    provider.assert_not_called()
+                    self.assertTrue(transit.local_aircraft_source_enabled())
+                    status = transit.dashboard_runtime.sources[-1]
+                    self.assertEqual(requested, status["requested_mode"])
+                    self.assertEqual("LOCAL", status["effective_mode"])
+                    self.assertEqual("REPLAY", status["status"])
+                    self.assertFalse(replay.is_ready())
+                    now = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+                    replay.advance_to(now)
+                    transit._update_motion_parameter("REPLAY1", "track", 42., now, transit.adsb_port)
+                    self.assertEqual(42., transit.aircraft_motion_states["REPLAY1"].track.value)
+                    self.assertIsNone(transit.internet_source_bridge)
+                self.assertEqual(requested, preference.snapshot()["values"]["aircraft_source"]["requested_mode"])
+
+    def test_leaving_replay_restores_each_requested_real_clock_mode(self):
+        transit.aircraft_los_geoid_provider = object()
+        for requested in ("LOCAL", "INTERNET", "AUTO"):
+            with self.subTest(requested=requested):
+                with patch.object(transit, "clock", ReplayClock()):
+                    transit.set_aircraft_source_mode(requested)
+                poller = Mock()
+                with patch.object(transit, "clock", RealClock()), \
+                        patch.object(transit, "SnapshotPoller", return_value=poller) as provider, \
+                        patch.object(transit, "ProductionInternetBridge"), \
+                        patch.object(transit, "AutoFusionBridge"):
+                    transit.set_aircraft_source_mode(requested)
+                    self.assertEqual(requested, transit.aircraft_source_mode)
+                    self.assertEqual(requested != "INTERNET", transit.local_aircraft_source_enabled())
+                    if requested == "LOCAL":
+                        provider.assert_not_called()
+                    else:
+                        poller.start.assert_called_once_with()

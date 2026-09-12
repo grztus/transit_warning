@@ -1,6 +1,7 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import App from "../App";
+import { generatedHealth } from "../useBootstrap";
 import type { EventSourceFactory, EventSourceLike } from "../useBootstrap";
 import type { BootstrapDto } from "../types";
 import { activeFixture } from "./fixture";
@@ -136,6 +137,7 @@ describe("SSE realtime transport", () => {
 
   it("can show stale backend data while transport remains realtime", async () => {
     vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-04T10:00:01Z"));
     try {
       const { sources } = setup();
       await act(async () => { await Promise.resolve(); });
@@ -147,7 +149,7 @@ describe("SSE realtime transport", () => {
           presentation: activeFixture.presentation } }));
       expect(screen.getByRole("status")).toHaveTextContent("ACTIVE");
       expect(screen.getByText("REALTIME")).toBeInTheDocument();
-      act(() => vi.advanceTimersByTime(10_000));
+      act(() => vi.advanceTimersByTime(10_001));
       expect(screen.getByRole("status")).toHaveTextContent("STALE");
       expect(screen.getByText("REALTIME")).toBeInTheDocument();
     } finally { vi.useRealTimers(); }
@@ -213,5 +215,93 @@ describe("HTTP and stream ordering", () => {
     expect(screen.getByText("REALTIME")).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("ACTIVE");
     expect(screen.queryByText(/Connection failed/)).not.toBeInTheDocument();
+  });
+});
+
+
+describe("release observer and health synchronization", () => {
+  it("updates client B observer diagnostics when client A selects STATIC or a custom fixed location", async () => {
+    const { sources, client } = setup();
+    await screen.findByText("TEST123");
+    for (const [revision, mode] of [[4, "STATIC"], [5, "MANUAL"]] as const) {
+      act(() => sources[0].emit("settings", { schema_version: 1, event: "settings", settings_revision: revision,
+        payload: { values: { ...activeFixture.settings, observer: { ...activeFixture.settings.observer,
+          requested_mode: mode, manual_position_saved: true } }, capabilities: activeFixture.capabilities,
+          observer: { requested_mode: mode, effective_source: mode, gps_health: "NO_FIX" } } }));
+      expect(screen.getByRole("button", { name: "STATIC" })).toHaveAttribute("aria-pressed", "true");
+      expect(document.querySelector(".observer-meta")).not.toHaveTextContent("MOBILE");
+      expect(document.querySelector(".observer-meta")).toHaveTextContent(mode === "MANUAL" ? "STATIC (custom)" : "STATIC");
+      expect(screen.queryByRole("button", { name: "MANUAL" })).not.toBeInTheDocument();
+    }
+    // A delayed live publication from before the settings change cannot undo it.
+    act(() => sources[0].emit("live_state", { schema_version: 1, event: "live_state", live_revision: 43,
+      payload: { generated_at_utc: new Date().toISOString(), bodies: activeFixture.bodies,
+        recent_events: activeFixture.recent_events, presentation: activeFixture.presentation,
+        observer: activeFixture.observer, observer_settings_revision: 3 } }));
+    expect(document.querySelector(".observer-meta")).toHaveTextContent("STATIC (custom)");
+    expect(client).toHaveBeenCalledTimes(1); // No polling or bootstrap round trip required.
+  });
+
+  it("updates effective observer status from live state without changing settings", async () => {
+    const { sources } = setup();
+    await screen.findByText("TEST123");
+    act(() => sources[0].emit("live_state", { schema_version: 1, event: "live_state", live_revision: 43,
+      payload: { generated_at_utc: new Date().toISOString(), bodies: activeFixture.bodies,
+        recent_events: activeFixture.recent_events, presentation: activeFixture.presentation,
+        observer: { ...activeFixture.observer, effective_source: "MOBILE_LAST_KNOWN", gps_health: "STALE" },
+        observer_settings_revision: 3 } }));
+    expect(document.querySelector(".observer-meta")).toHaveTextContent("Effective MOBILE_LAST_KNOWN");
+    expect(screen.getByRole("button", { name: "MOBILE" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it.each(["diagnostic", "source"])("does not revive stale data on a %s publication", async kind => {
+    const fixture = { ...activeFixture, health: "STALE" as const,
+      generated_at_utc: new Date(Date.now() - 20_000).toISOString() };
+    const { sources } = setup(vi.fn(async () => fixture));
+    await screen.findByText("TEST123");
+    act(() => sources[0].onopen?.());
+    act(() => sources[0].emit("live_state", { schema_version: 1, event: "live_state", live_revision: 43,
+      payload: { generated_at_utc: fixture.generated_at_utc, bodies: fixture.bodies,
+        recent_events: fixture.recent_events, presentation: fixture.presentation,
+        ...(kind === "source" ? { aircraft_source: { requested_mode: "AUTO", status: "HEALTHY" } } : {}) } }));
+    expect(screen.getByRole("status")).toHaveTextContent("STALE");
+    expect(screen.getByText("REALTIME")).toBeInTheDocument();
+  });
+
+  it("ages fresh data from its generated time instead of its SSE receipt time", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-12T12:00:00Z"));
+    try {
+      const { sources } = setup();
+      await act(async () => { await Promise.resolve(); });
+      act(() => sources[0].emit("live_state", { schema_version: 1, event: "live_state", live_revision: 43,
+        payload: { generated_at_utc: "2026-09-12T11:59:52Z", bodies: activeFixture.bodies,
+          recent_events: [], presentation: activeFixture.presentation } }));
+      expect(screen.getByRole("status")).toHaveTextContent("ACTIVE");
+      act(() => vi.advanceTimersByTime(2_000));
+      expect(screen.getByRole("status")).toHaveTextContent("ACTIVE"); // Backend boundary is inclusive.
+      act(() => vi.advanceTimersByTime(1));
+      expect(screen.getByRole("status")).toHaveTextContent("STALE");
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("keeps stale data stale across reconnect", async () => {
+    const fixture = { ...activeFixture, health: "STALE" as const,
+      generated_at_utc: new Date(Date.now() - 20_000).toISOString() };
+    const { sources } = setup(vi.fn(async () => fixture));
+    await screen.findByText("TEST123");
+    act(() => sources[0].onerror?.());
+    await waitFor(() => expect(sources).toHaveLength(2));
+    await act(async () => sources[1].onopen?.());
+    expect(screen.getByText("REALTIME")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("STALE");
+  });
+
+  it("matches the existing ten-second freshness boundary and rejects missing timestamps", () => {
+    const now = Date.parse("2026-09-12T12:00:00Z");
+    expect(generatedHealth("2026-09-12T11:59:50Z", now)).toBe("ACTIVE");
+    expect(generatedHealth("2026-09-12T11:59:49.999Z", now)).toBe("STALE");
+    expect(generatedHealth(undefined, now)).toBe("STALE");
+    expect(generatedHealth("invalid", now)).toBe("STALE");
   });
 });

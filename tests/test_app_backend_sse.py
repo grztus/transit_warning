@@ -1,10 +1,12 @@
 import datetime
 import json
 import time
+import threading
+from unittest.mock import patch
 import unittest
 import urllib.request
 
-from app_backend.sse import SseBroker, encode_sse, live_envelope, settings_envelope
+from app_backend.sse import Subscription, SseBroker, encode_sse, live_envelope, settings_envelope
 from app_backend.settings import RuntimeSettingsStore
 from app_backend.state import ApplicationStateStore
 import live_dashboard
@@ -15,6 +17,51 @@ NOW = datetime.datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
 
 
 class SseBrokerTests(unittest.TestCase):
+    def test_initial_offer_cannot_overwrite_concurrent_newer_revision(self):
+        for event, revision_key in (("live_state", "live_revision"), ("settings", "settings_revision")):
+            with self.subTest(event=event):
+                broker = SseBroker()
+                entered, release = threading.Event(), threading.Event()
+                original = Subscription.offer
+                def offer(client, value):
+                    if value[revision_key] == 1:
+                        entered.set()
+                        if not release.wait(2):
+                            raise AssertionError("initial offer was not released")
+                    original(client, value)
+                with patch.object(Subscription, "offer", offer):
+                    worker = threading.Thread(target=lambda: broker.subscribe((
+                        {"event": event, revision_key: 1},)))
+                    worker.start()
+                    try:
+                        self.assertTrue(entered.wait(2))
+                        broker.publish({"event": event, revision_key: 2})
+                    finally:
+                        release.set()
+                        worker.join(2)
+                    self.assertFalse(worker.is_alive())
+                client = next(iter(broker.clients))
+                self.addCleanup(client.close)
+                self.assertEqual(2, client.next(0)[0][revision_key])
+
+    def test_subscription_watermark_survives_drain_and_is_per_event(self):
+        broker = SseBroker()
+        client = broker.subscribe((
+            {"event": "live_state", "live_revision": 2},
+            {"event": "settings", "settings_revision": 1}))
+        self.addCleanup(client.close)
+        self.assertEqual(2, len(client.next(0)))
+        for revision in (1, 2):
+            client.offer({"event": "live_state", "live_revision": revision})
+        self.assertEqual((), client.next(0))
+        client.offer({"event": "live_state", "live_revision": 3})
+        client.offer({"event": "settings", "settings_revision": 2})
+        values = {item["event"]: item for item in client.next(0)}
+        self.assertEqual(3, values["live_state"]["live_revision"])
+        self.assertEqual(2, values["settings"]["settings_revision"])
+        client.offer({"event": "settings", "settings_revision": 1})
+        self.assertEqual((), client.next(0))
+
     def test_latest_state_delivery_is_bounded_and_ordered_by_event_type(self):
         broker = SseBroker()
         client = broker.subscribe()
