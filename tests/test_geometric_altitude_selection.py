@@ -1,5 +1,9 @@
 import datetime
 import math
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -233,8 +237,10 @@ class RuntimeSelectionTests(unittest.TestCase):
         original = (51.1, 21.1, 120.0, 20.0, 100.0, 50.0,
                     10.0, 0, 120.0, 21.0, NOW)
         observer = transit.ObserverPosition(51.0, 21.0, 200.0)
-        with patch.object(transit, "predict_vertical_state_at_time",
-                          return_value=vertical_state), patch.object(
+        # This fixture deliberately asserts flat geometry at a supplied 100 km.
+        with patch.object(transit, "aircraft_los_geoid_provider", None), patch.object(
+                transit, "predict_vertical_state_at_time",
+                return_value=vertical_state), patch.object(
                 transit, "select_geometric_altitude_for_prediction",
                 return_value=selected):
             updated = transit.apply_vertical_prediction_to_transit_result(
@@ -353,6 +359,77 @@ class RuntimeSelectionTests(unittest.TestCase):
             GeometricAltitudeSource.OWN_GNSS_GEOMETRIC,
             ent_result.source)
         self.assertAlmostEqual(73.0, ent_result.correction_m, places=6)
+
+
+class GeoidIsolationRegressionTests(unittest.TestCase):
+    def run_sequence(self, predecessor=None, fail_setup=False):
+        # Fresh processes keep the legacy fixtures' unrelated runtime state out
+        # of this suite. Geoid discovery is mocked; no host PGM is required.
+        script = textwrap.dedent("""
+            import unittest
+            from types import SimpleNamespace
+            from unittest.mock import patch
+            import transit_warning as transit
+            from tests.test_geometric_altitude_selection import RuntimeSelectionTests
+
+            predecessor = PREDECESSOR
+            fail_setup = FAIL_SETUP
+            target = "test_selected_altitude_changes_only_final_aircraft_elevation"
+            real_apply = transit.apply_installation_config
+            for installed in (None, SimpleNamespace(undulation_m=lambda *_: 35.0)):
+                for previous in (None, SimpleNamespace(undulation_m=lambda *_: 50.0)):
+                    transit.aircraft_los_geoid_provider = previous
+                    transit.aircraft_los_geometry_mode = "PREVIOUS_DIAGNOSTIC"
+                    def configure_then_fail(config):
+                        real_apply(config)
+                        raise RuntimeError("intentional setup failure")
+                    with patch.object(transit.PgmGeoidProvider, "discover", return_value=installed) as discover:
+                        if predecessor:
+                            case = unittest.defaultTestLoader.loadTestsFromName(predecessor)
+                            result = unittest.TestResult()
+                            if fail_setup:
+                                with patch.object(transit, "apply_installation_config", configure_then_fail):
+                                    case.run(result)
+                                assert len(result.errors) == 1, result.errors
+                                assert "intentional setup failure" in result.errors[0][1]
+                                assert not result.failures, result.failures
+                            else:
+                                case.run(result)
+                                assert result.wasSuccessful(), result.failures + result.errors
+                            discover.assert_called_once()
+                            assert transit.aircraft_los_geoid_provider is previous
+                            assert transit.aircraft_los_geometry_mode == "PREVIOUS_DIAGNOSTIC"
+                        result = unittest.TestResult()
+                        RuntimeSelectionTests(target).run(result)
+                        assert result.wasSuccessful(), result.failures + result.errors
+                        assert transit.aircraft_los_geoid_provider is previous
+                        assert transit.aircraft_los_geometry_mode == "PREVIOUS_DIAGNOSTIC"
+            """).replace("PREDECESSOR", repr(predecessor)).replace("FAIL_SETUP", repr(fail_setup))
+        completed = subprocess.run(
+            [sys.executable, "-B", "-c", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
+
+    def test_flat_target_is_independent_of_installed_geoid(self):
+        self.run_sequence()
+
+    def test_motion_fixture_restores_geoid_before_target(self):
+        self.run_sequence("tests.test_aircraft_motion_state.AircraftMotionStateTests."
+                          "test_adsb_vertical_rate_has_value_timestamp_and_source")
+
+    def test_altitude_fixture_restores_geoid_before_target(self):
+        self.run_sequence("tests.test_altitude_provenance.AltitudeProvenanceTests."
+                          "test_adsb_msg3_records_raw_corrected_kind_type_and_generated_time")
+
+    def test_predecessor_cleanup_also_runs_after_setup_failure(self):
+        for predecessor in (
+                "tests.test_aircraft_motion_state.AircraftMotionStateTests."
+                "test_adsb_vertical_rate_has_value_timestamp_and_source",
+                "tests.test_altitude_provenance.AltitudeProvenanceTests."
+                "test_adsb_msg3_records_raw_corrected_kind_type_and_generated_time"):
+            with self.subTest(predecessor=predecessor):
+                self.run_sequence(predecessor, fail_setup=True)
 
 
 if __name__ == "__main__":

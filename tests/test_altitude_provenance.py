@@ -47,6 +47,9 @@ def msg5(icao, timestamp, altitude, prefix="MSG"):
 
 class AltitudeProvenanceTests(unittest.TestCase):
     def setUp(self):
+        # Configuration discovers host geoid data; restore even if setUp fails.
+        for name in ("aircraft_los_geoid_provider", "aircraft_los_geometry_mode"):
+            self.addCleanup(setattr, transit, name, getattr(transit, name))
         self.original_clock = transit.clock
         self.original_plane_dict = transit.plane_dict
         self.original_altitude_sources = transit.altitude_sources
