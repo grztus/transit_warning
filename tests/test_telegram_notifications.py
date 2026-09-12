@@ -275,6 +275,9 @@ class TelegramConfigTests(unittest.TestCase):
 
 class TransitIntegrationTests(unittest.TestCase):
     def setUp(self):
+        # Configuration may discover host geoid data; restore even on setup failure.
+        for name in ("aircraft_los_geoid_provider", "aircraft_los_geometry_mode"):
+            self.addCleanup(setattr, transit, name, getattr(transit, name))
         self.old_notifier = transit.telegram_notifier
         self.old_threshold = transit.telegram_alert_separation_deg
         self.old_horizon = transit.telegram_alert_horizon_seconds

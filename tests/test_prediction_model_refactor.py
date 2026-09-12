@@ -1,6 +1,7 @@
 import datetime
 import math
 import unittest
+from unittest.mock import patch
 from collections import deque
 
 import pytz
@@ -154,6 +155,7 @@ class HorizontalExtractionEquivalenceTests(unittest.TestCase):
         self.assert_case((51.1, 21.1), (50.3, 22.2), 190, 150.5,
                          velocity=0)
 
+    @patch.object(transit, "aircraft_los_geoid_provider", None)
     def test_transit_pred_tuple_uses_extracted_result_unchanged(self):
         observer = (51.1, 21.1)
         plane = (50.3, 22.2)
@@ -282,6 +284,7 @@ class FrozenVerticalModelEquivalenceTests(unittest.TestCase):
                 self.assertEqual(actual.prediction, expected)
                 self.assertEqual(actual.intent_details, expected_details)
 
+    @patch.object(transit, "aircraft_los_geoid_provider", None)
     def test_final_altitude_angle_matches_existing_production_composition(self):
         original = (
             transit.aircraft_motion_states,

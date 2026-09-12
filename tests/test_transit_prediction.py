@@ -29,6 +29,9 @@ TEST_CONFIG = InstallationConfig(
 
 class TransitVelocityTests(unittest.TestCase):
     def setUp(self):
+        # Configuration may discover host geoid data; restore even on setup failure.
+        for name in ("aircraft_los_geoid_provider", "aircraft_los_geometry_mode"):
+            self.addCleanup(setattr, transit, name, getattr(transit, name))
         transit.apply_installation_config(TEST_CONFIG)
 
     def predict(self, velocity):

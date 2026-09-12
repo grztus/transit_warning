@@ -28,6 +28,11 @@ TEST_CONFIG = InstallationConfig(
 
 
 class ApplicationConfigurationTests(unittest.TestCase):
+    def setUp(self):
+        # Configuration may discover host geoid data; restore even on setup failure.
+        for name in ("aircraft_los_geoid_provider", "aircraft_los_geometry_mode"):
+            self.addCleanup(setattr, transit, name, getattr(transit, name))
+
     def test_import_does_not_load_installation_configuration(self):
         with patch("config.load_installation_config") as loader:
             importlib.reload(transit)

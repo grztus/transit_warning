@@ -362,7 +362,7 @@ class RuntimeSelectionTests(unittest.TestCase):
 
 
 class GeoidIsolationRegressionTests(unittest.TestCase):
-    def run_sequence(self, predecessor=None, fail_setup=False):
+    def run_sequence(self, predecessor=None, fail_setup=False, target=None):
         # Fresh processes keep the legacy fixtures' unrelated runtime state out
         # of this suite. Geoid discovery is mocked; no host PGM is required.
         script = textwrap.dedent("""
@@ -370,11 +370,10 @@ class GeoidIsolationRegressionTests(unittest.TestCase):
             from types import SimpleNamespace
             from unittest.mock import patch
             import transit_warning as transit
-            from tests.test_geometric_altitude_selection import RuntimeSelectionTests
 
             predecessor = PREDECESSOR
             fail_setup = FAIL_SETUP
-            target = "test_selected_altitude_changes_only_final_aircraft_elevation"
+            target = TARGET_TEST
             real_apply = transit.apply_installation_config
             for installed in (None, SimpleNamespace(undulation_m=lambda *_: 35.0)):
                 for previous in (None, SimpleNamespace(undulation_m=lambda *_: 50.0)):
@@ -400,11 +399,13 @@ class GeoidIsolationRegressionTests(unittest.TestCase):
                             assert transit.aircraft_los_geoid_provider is previous
                             assert transit.aircraft_los_geometry_mode == "PREVIOUS_DIAGNOSTIC"
                         result = unittest.TestResult()
-                        RuntimeSelectionTests(target).run(result)
+                        unittest.defaultTestLoader.loadTestsFromName(target).run(result)
                         assert result.wasSuccessful(), result.failures + result.errors
                         assert transit.aircraft_los_geoid_provider is previous
                         assert transit.aircraft_los_geometry_mode == "PREVIOUS_DIAGNOSTIC"
-            """).replace("PREDECESSOR", repr(predecessor)).replace("FAIL_SETUP", repr(fail_setup))
+            """).replace("PREDECESSOR", repr(predecessor)).replace("FAIL_SETUP", repr(fail_setup)).replace(
+            "TARGET_TEST", repr(target or "tests.test_geometric_altitude_selection.RuntimeSelectionTests."
+                               "test_selected_altitude_changes_only_final_aircraft_elevation"))
         completed = subprocess.run(
             [sys.executable, "-B", "-c", script],
             cwd=Path(__file__).resolve().parents[1],
@@ -422,12 +423,40 @@ class GeoidIsolationRegressionTests(unittest.TestCase):
         self.run_sequence("tests.test_altitude_provenance.AltitudeProvenanceTests."
                           "test_adsb_msg3_records_raw_corrected_kind_type_and_generated_time")
 
+    FLAT_TARGETS = (
+        "tests.test_prediction_model_refactor.FrozenVerticalModelEquivalenceTests."
+        "test_final_altitude_angle_matches_existing_production_composition",
+        "tests.test_prediction_model_refactor.HorizontalExtractionEquivalenceTests."
+        "test_transit_pred_tuple_uses_extracted_result_unchanged",
+        "tests.test_transit_snapshot.TransitSnapshotSelfContainmentTests."
+        "test_snapshot_reconstructs_t0_and_vertical_decision_from_json_only",
+    )
+    CONFIG_PREDECESSORS = (
+        "tests.test_plane_dict_synchronization.PlaneDictSynchronizationTests."
+        "test_cleaning_and_message_processing_are_serialized",
+        "tests.test_transit_prediction.TransitVelocityTests."
+        "test_negative_velocity_has_no_prediction",
+    )
+
+    def test_remaining_flat_targets_ignore_installed_geoid(self):
+        for target in self.FLAT_TARGETS:
+            with self.subTest(target=target):
+                self.run_sequence(target=target)
+
+    def test_configuration_predecessors_restore_geoid_before_remaining_targets(self):
+        for predecessor, target in zip(
+                (self.CONFIG_PREDECESSORS[0], self.CONFIG_PREDECESSORS[0],
+                 self.CONFIG_PREDECESSORS[1]), self.FLAT_TARGETS):
+            with self.subTest(predecessor=predecessor, target=target):
+                self.run_sequence(predecessor, target=target)
+
     def test_predecessor_cleanup_also_runs_after_setup_failure(self):
         for predecessor in (
                 "tests.test_aircraft_motion_state.AircraftMotionStateTests."
                 "test_adsb_vertical_rate_has_value_timestamp_and_source",
                 "tests.test_altitude_provenance.AltitudeProvenanceTests."
-                "test_adsb_msg3_records_raw_corrected_kind_type_and_generated_time"):
+                "test_adsb_msg3_records_raw_corrected_kind_type_and_generated_time",
+                *self.CONFIG_PREDECESSORS):
             with self.subTest(predecessor=predecessor):
                 self.run_sequence(predecessor, fail_setup=True)
 

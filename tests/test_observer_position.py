@@ -36,6 +36,9 @@ CONFIG = InstallationConfig(
 
 class ObserverPositionTests(unittest.TestCase):
     def setUp(self):
+        # Configuration may discover host geoid data; restore even on setup failure.
+        for name in ("aircraft_los_geoid_provider", "aircraft_los_geometry_mode"):
+            self.addCleanup(setattr, transit, name, getattr(transit, name))
         transit.apply_installation_config(CONFIG)
 
     def test_position_is_immutable_and_static_provider_returns_same_instance(self):

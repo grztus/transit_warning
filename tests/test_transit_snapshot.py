@@ -524,6 +524,7 @@ class TransitSnapshotSelfContainmentTests(unittest.TestCase):
     def parse_utc(value):
         return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
 
+    @patch.object(transit, "aircraft_los_geoid_provider", None)
     def test_snapshot_reconstructs_t0_and_vertical_decision_from_json_only(self):
         names = (
             "aircraft_motion_states", "aircraft_intent_states",

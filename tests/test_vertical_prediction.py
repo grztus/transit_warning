@@ -252,6 +252,9 @@ class VerticalTransitIntegrationTests(unittest.TestCase):
 
 class VerticalRateHistoryMessageTests(unittest.TestCase):
     def setUp(self):
+        # Configuration may discover host geoid data; restore even on setup failure.
+        for name in ("aircraft_los_geoid_provider", "aircraft_los_geometry_mode"):
+            self.addCleanup(setattr, transit, name, getattr(transit, name))
         self.originals = {
             name: getattr(transit, name) for name in (
                 "clock", "plane_dict", "altitude_sources",

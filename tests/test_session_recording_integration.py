@@ -77,6 +77,11 @@ class StopAfterLinesSocket:
 
 
 class ReadFromPortRecordingTests(unittest.TestCase):
+    def setUp(self):
+        # Configuration may discover host geoid data; restore even on setup failure.
+        for name in ("aircraft_los_geoid_provider", "aircraft_los_geometry_mode"):
+            self.addCleanup(setattr, transit, name, getattr(transit, name))
+
     def run_reader(self, sockets, recorder, processor, port=30003):
         transit.stop_event.clear()
         socket_factory = Mock(side_effect=list(sockets) + [KeyboardInterrupt()])
@@ -170,6 +175,9 @@ class ReadFromPortRecordingTests(unittest.TestCase):
 
 class MainSessionRecordingTests(unittest.TestCase):
     def setUp(self):
+        # Configuration may discover host geoid data; restore even on setup failure.
+        for name in ("aircraft_los_geoid_provider", "aircraft_los_geometry_mode"):
+            self.addCleanup(setattr, transit, name, getattr(transit, name))
         self.original_recorder = transit.session_recorder
         self.original_requested = transit.session_recording_requested
         self.original_stop_state = transit.stop_event.is_set()
