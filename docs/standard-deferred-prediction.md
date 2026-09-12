@@ -31,7 +31,8 @@ finalization; withdrawals and PASSED ticks invalidate outstanding work even
 when the same encounter ID is later reused. No-op withdrawals do not cancel work.
 Source resets retain the Stage 2B finalization policy.
 
-STATIC and MANUAL require exact position and elevation equality. MOBILE requires
+Default STATIC and custom STATIC (internal MANUAL) require exact position and
+elevation equality. MOBILE requires
 exact configured elevation and displacement no greater than
 min(50 m, max(5 m, frozen accuracy + current accuracy)). Missing, negative,
 non-finite or nonnumeric accuracy uses a 5 m allowance. Equality is accepted.

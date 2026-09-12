@@ -1,9 +1,9 @@
-# A4.2 isolated live acquisition diagnostics
+# Isolated ADSB.lol acquisition diagnostics
 
 This opt-in tool implements the [STANDARD field contract](adsblol_live_contract.md).
 It does not read installation/observer settings, import the runtime, populate
 aircraft state, run geometry, create candidates, or update the dashboard.
-It cannot yet be used to test live Transit Warning predictions in another region.
+This standalone tool does not test live Transit Warning predictions.
 It acquires and inspects potential inputs only.
 
 ## Usage
@@ -17,6 +17,9 @@ python tools/adsblol_live_probe.py --observer-mode MANUAL --lat <authorized-lati
 python tools/adsblol_live_probe.py --icao 48AE25 --retries 0
 python tools/adsblol_live_probe.py --icao 48AE25 --count 3 --poll-seconds 10
 ```
+
+The CLI accepts MANUAL only as an internal compatibility name for a custom fixed
+STATIC query; it is not a third STANDARD UI observer mode.
 
 Supplying a location explicitly authorizes sending that query centre to ADSB.lol;
 no location is inferred from the running application. Default observer mode is
@@ -109,7 +112,7 @@ not numeric zero. MCP/FMS selected altitudes are intent with unspecified
 reference; altimeter setting is not assumed local QNH. Magnetic/true/selected
 headings and calculated/reported tracks remain distinct and unrounded.
 
-## Validation and next boundary
+## Validation scope
 
 Focused tests use synthetic fixtures and mocked HTTP only:
 
@@ -119,9 +122,10 @@ python -m unittest discover -s tests
 python -m py_compile tools/adsblol_live.py tools/adsblol_live_probe.py tests/test_adsblol_live.py
 ```
 
-The A4.2 manual probe failed certificate verification in the development
-environment before receiving HTTP. No successful latency or live field
-availability is claimed; TLS validation was not weakened.
+An earlier development-only probe failed certificate verification before HTTP;
+TLS validation was not weakened. That historical probe result is separate from
+the subsequent operator-validated production INTERNET/AUTO checks in the
+[release record](../docs/standard-release-smoke-test.md).
 
 Production source integration is separate from this isolated probe; see
 [STANDARD aircraft sources](../docs/standard-aircraft-sources.md). The probe does

@@ -1,9 +1,32 @@
 # STANDARD Debian deployment smoke test
 
-Run this checklist manually on the deployment after approving the release commit.
-No production host was accessed during the local release checkpoint. Physical
-phone/browser testing remains required. Use the existing private access transport;
-the dashboard does not add authentication. Do not publish private logs or locations.
+## Completed operator validation
+
+The operator reports that release `0530034990ea80ccc8e77110351adc262c00224f`
+was validated and promoted to public `main`. Completed physical checks covered:
+
+- Debian with Python 3.11.15 and real installed geoid data; full Python suite passed.
+- Local ADS-B/SBS (30003), MLAT (30106), LOCAL, INTERNET/ADSB.lol and AUTO fusion.
+- STATIC/default, custom fixed STATIC persistence, and physical Android MOBILE
+  GPS on Galaxy S23 through a secure Tailscale origin.
+- Accepted MOBILE_FRESH, GPS ACTIVE, live freshness/accuracy and resumed SUN/MOON
+  calculations; this was more than merely starting a browser watcher.
+- Independent Telegram SUN/MOON controls, LIVE/HISTORY and responsive Galaxy S23 UI.
+- Healthy CPU/RAM and TCP Recv-Q = 0 during the observation period.
+
+These are operator-reported deployment results, not measurements taken by the
+local documentation audit. No actual candidate-triggered Telegram message delivery
+is claimed here. Candidate-specific handoffs, finalization and recorder scenarios
+remain conditional checks unless separately observed. Recv-Q is an observation,
+not a throughput guarantee. No private addresses, locations or credentials are
+included in this record.
+
+## Reusable deployment checklist
+
+Use the following checklist for subsequent releases. Physical browser checks
+remain useful after UI changes. Use an existing private/secure access transport;
+the dashboard does not add authentication. Keep private logs and locations private.
+For a new service, see the [generic installation example](standard-installation.md).
 
 ## 1. Select the deployment and verify Git
 

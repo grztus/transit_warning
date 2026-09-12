@@ -37,13 +37,7 @@ backend configuration are unchanged.
 
 ## Production
 
-Use Vite during development:
-
-```sh
-npm run dev
-```
-
-Install the locked dependencies and create the production build with:
+From the `web/` directory, install the locked dependencies and build with:
 
 ```sh
 npm ci
@@ -60,10 +54,11 @@ This compatibility/debug interface remains available at `/legacy`; when
 
 ## STANDARD operational controls
 
-The top navigation contains LIVE and HISTORY. Controls start compact, with
-STATIC/MOBILE observer selection, LOCAL/INTERNET/AUTO aircraft-source selection,
-and independent Telegram SUN and MOON toggles. Expand Controls for diagnostics
-and the fixed-location editor. The same controls wrap and stack on narrow screens.
+The top navigation contains LIVE and HISTORY. Controls start as one summary row
+without individual controls. Expand for STATIC/MOBILE observer selection,
+LOCAL/INTERNET/AUTO aircraft-source selection, independent Telegram SUN/MOON
+toggles, diagnostics and the fixed-location editor. Expanded controls wrap and
+stack on narrow screens. Backend state uses the same one-row disclosure pattern.
 
 STATIC uses the configured default location. Under Controls, choose Change
 location to enter fixed latitude, longitude and elevation AMSL, then Apply or
@@ -112,7 +107,9 @@ intact; it only hides the controls. This behavior is shared by phone and desktop
 
 Browser geolocation requires a secure context (normally HTTPS) and browser
 permission. Plain LAN HTTP may make geolocation unavailable; this is distinct
-from permission denial. The physical Galaxy S23 smoke test succeeded through
+from permission denial. Same-device localhost is a development exception;
+a phone opening another machine over LAN HTTP is not localhost. The physical
+Galaxy S23 smoke test succeeded through
 the Tailscale secure origin, with backend MOBILE_FRESH and GPS ACTIVE. A running
 browser watcher alone does not establish a valid backend fix. This does not
 introduce a cloud requirement or change networking or backend GPS semantics.

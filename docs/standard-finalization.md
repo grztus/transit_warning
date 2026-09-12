@@ -23,4 +23,6 @@ without adding history. Observer-scope invalidation preserves other source owner
 
 No-op withdrawals do not publish. Aircraft-expiry and post-transit cleanup finalize
 each mutation immediately and publish once per changed batch, including from a
-finally block when later cleanup fails. Publication remains synchronous.
+finally block when later cleanup fails. Authoritative finalization remains
+synchronous; presentation publication is marked dirty and coalesced by the
+[public-state worker](standard-public-state-publisher.md).

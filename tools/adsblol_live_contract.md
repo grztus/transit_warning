@@ -4,7 +4,9 @@ This document describes the contract implemented by [adsblol_live.py](adsblol_li
 and consumed by the [isolated probe](adsblol_live_probe.md). It documents local
 normalization, not a provider availability guarantee or permission to redistribute
 provider data. Review applicable provider terms before distributing acquired data.
-No remote acquisition was required for the STANDARD release checks.
+Contract regression tests use synthetic data and mocked acquisition. Separate
+physical source validation is recorded in the
+[release checklist](../docs/standard-release-smoke-test.md).
 
 ## Envelope and identity
 

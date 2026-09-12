@@ -21,7 +21,8 @@ does not hold runtime source or aircraft locks. Switching sources invalidates
 old candidates and clears local/fusion input state. Private bridge ownership
 prevents delayed remote withdrawal from deleting a LOCAL replacement.
 
-STATIC and MANUAL can supply an explicit query centre. Requested MOBILE,
+Default or custom fixed STATIC (internal MANUAL storage) can supply an explicit
+query centre. Requested MOBILE,
 including static fallback, blocks provider HTTP. Observer-scope changes discard
 old mailbox evidence. Provider clock offsets are diagnostic only: position expiry
 uses relative provider age and monotonic elapsed time, not cross-clock subtraction.
