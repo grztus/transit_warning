@@ -40,6 +40,8 @@ DEFAULT_HISTORY_LIMIT = 100
 RECENT_EVENT_LIMIT = 5
 RECENT_EVENT_WINDOW_SECONDS = 60 * 60
 WITHDRAW_HISTORY_GRACE_SECONDS = 3.0
+# Operator display only; independent of solve freshness and prediction grace.
+DEGRADED_PREDICTION_DISPLAY_SECONDS = 10.0
 DEFAULT_SEP_GREEN_MAX_DEG = 3.0
 DEFAULT_SEP_YELLOW_MAX_DEG = 5.0
 DEFAULT_SEP_VISIBLE_MAX_DEG = 7.0
@@ -70,6 +72,9 @@ class DashboardCandidate:
     prediction_geometry: str = "LEGACY"
     aircraft_source_mode: str = "LOCAL"
     fusion_provenance: dict | None = None
+    prediction_quality: str = "FRESH"
+    prediction_quality_reason: str | None = None
+    prediction_expires_utc: datetime.datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -320,6 +325,29 @@ class DashboardState:
                 self._live[body][key]["ever_visible"] = True
         return True
 
+    @_prediction_mutation
+    def mark_prediction_degraded(self, icao, now_utc, *, source_owner=None):
+        """Change display quality only, preserving geometry and solve timestamps."""
+        changed = False
+        with self._lock:
+            for body in ("SUN", "MOON"):
+                item = self._live[body].get(icao.upper())
+                if item is None or item["source_owner"] is not source_owner:
+                    continue
+                candidate = item["candidate"]
+                if candidate.prediction_quality == "DEGRADED":
+                    continue
+                deadline = candidate.last_prediction_update_utc + datetime.timedelta(
+                    seconds=DEGRADED_PREDICTION_DISPLAY_SECONDS)
+                if now_utc >= deadline:
+                    continue
+                fields = dict(prediction_quality="DEGRADED",
+                              prediction_quality_reason="VELOCITY_STALE",
+                              prediction_expires_utc=deadline)
+                item["candidate"] = replace(candidate, **fields)
+                changed = True
+        return changed
+
     def update_callsign(self, icao, callsign):
         """Refresh known identity on open rows without a new prediction."""
         callsign = str(callsign or "").strip()
@@ -429,6 +457,13 @@ class DashboardState:
             changed = self._generated_at_utc != now_utc
             self._generated_at_utc = now_utc
             for body in ("SUN", "MOON"):
+                expired = [icao for icao, item in self._live[body].items()
+                           if item["candidate"].prediction_expires_utc is not None
+                           and item["candidate"].prediction_expires_utc <= now_utc
+                           and item["candidate"].prediction_expires_utc < item["candidate"].predicted_event_utc]
+                for icao in expired:
+                    changed = self.withdraw(icao, body, now_utc, reason="MOTION_STALE",
+                        details={"prediction_quality_reason": "VELOCITY_STALE"}) or changed
                 due = [icao for icao, item in self._live[body].items()
                        if item["candidate"].predicted_event_utc <= now_utc]
                 for icao in due:
@@ -658,6 +693,8 @@ class DashboardState:
             candidate.predicted_event_utc)
         result["last_prediction_update_utc"] = utc_text(
             candidate.last_prediction_update_utc)
+        result["prediction_expires_utc"] = (
+            utc_text(candidate.prediction_expires_utc) if candidate.prediction_expires_utc else None)
         result["state"] = (
             "TELEGRAM RANGE" if candidate.telegram_range else "CANDIDATE")
         result["separation_class"] = self._separation_class(
@@ -692,6 +729,9 @@ class DisabledDashboard:
         return None
 
     def publish(self, candidate):
+        return False
+
+    def mark_prediction_degraded(self, icao, now_utc):
         return False
 
     def publish_authoritative(self, candidate, prediction, *, source_owner=None):
@@ -771,6 +811,12 @@ class DashboardRuntime:
         if result:
             self._publish_application_state()
         return result
+
+    def mark_prediction_degraded(self, icao, now_utc):
+        changed = self.state.mark_prediction_degraded(icao, now_utc)
+        if changed:
+            self._publish_application_state()
+        return changed
 
     def publish_authoritative(self, candidate, prediction, *, source_owner=None):
         """Publish provenance and private source ownership, without geometry storage."""

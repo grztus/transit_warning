@@ -144,6 +144,7 @@ from candidate_recorder import (
     FullRecorderReference,
 )
 from live_dashboard import (
+    DEGRADED_PREDICTION_DISPLAY_SECONDS,
     DashboardCandidate,
     DisabledDashboard,
     start_dashboard,
@@ -3542,6 +3543,75 @@ def expire_transit_prediction_after_grace(icao, entry, celestial_body,
             icao, entry, celestial_body, start_index)
 
 
+def hold_transit_prediction_for_velocity_gap(icao, freshness, observer_context):
+    """Retain labeled display output; STALE input never becomes solve-eligible.
+
+    The separate 10-second display deadline starts at the last successful solve.
+    Missing fields, stale position/altitude and excessive velocity gaps still
+    take the immediate withdrawal path. Internal prediction grace is unchanged.
+    """
+    velocity_reasons = {
+        "TRACK_AGE_GT_10", "GROUNDSPEED_AGE_GT_10",
+        "POSITION_TRACK_DELTA_GT_10", "POSITION_GROUNDSPEED_DELTA_GT_10",
+    }
+    if ((freshness.status == MotionFreshnessStatus.STALE
+            and (not freshness.reason_codes
+                 or not set(freshness.reason_codes) <= velocity_reasons))
+            or freshness.position_age > MOTION_FRESH_POSITION_SECONDS
+            or freshness.altitude_age > MOTION_FRESH_PARAMETER_SECONDS
+            or max(freshness.track_age, freshness.groundspeed_age)
+                >= MOTION_STALE_SECONDS + DEGRADED_PREDICTION_DISPLAY_SECONDS):
+        return False
+    # Maintenance may see recovered TC19 track before the next SBS solve.
+    # Recovery of input alone neither expires nor renews the existing grace.
+    now = freshness.assessed_at_utc
+    # Do not grant a hold to future-dated/inconsistent evidence, whose age is
+    # otherwise clamped by the existing diagnostic classifier.
+    motion = effective_motion_state(icao, now)
+    if any(getattr(motion, name).updated_at_utc > now
+           for name in ("position", "altitude", "track", "groundspeed")):
+        return False
+    successes = []
+    for body in ("sun", "moon"):
+        last_valid, targets = _prediction_timestamps(body)
+        if icao not in targets:
+            continue
+        last = last_valid.get(icao)
+        if last is None or not 0 <= (now-last).total_seconds() < DEGRADED_PREDICTION_DISPLAY_SECONDS:
+            return False
+        if authoritative_transit_lifecycle.enabled:
+            prediction = authoritative_transit_lifecycle.active_prediction(
+                observer_context.epoch, icao, body)
+            if prediction is None or not 0 <= (now-prediction.updated_at_utc).total_seconds() < DEGRADED_PREDICTION_DISPLAY_SECONDS:
+                return False
+        successes.append(last)
+    return bool(successes)
+
+
+def withdraw_motion_stale_prediction(icao, freshness, observer_context, *, publish=True):
+    """Finalize stale output consistently while retaining the aircraft track."""
+    now = freshness.assessed_at_utc
+    entry = plane_dict[icao]
+    withdraw_shadow_2d(icao, entry[1], now, "MOTION_STALE", freshness=freshness)
+    cancel_pending_transit_notification(icao)
+    changed = False
+    try:
+        changed = dashboard_runtime.withdraw_aircraft(
+            icao, now, reason="MOTION_STALE", publish=publish, source_owner=None,
+            details={"motion_freshness": freshness.diagnostic,
+                     "aircraft_source_mode": aircraft_source_mode})
+    except Exception:
+        pass
+    discard_authoritative_aircraft(icao, now)
+    for body, index in (("sun", 18), ("moon", 23)):
+        authoritative_terminal_predictions.pop((icao, body.upper()), None)
+        clear_transit_prediction(entry, index)
+        last_valid, targets = _prediction_timestamps(body)
+        last_valid.pop(icao, None)
+        targets.pop(icao, None)
+    return changed
+
+
 # Funkcja do czyszczenia słownika samolotów / Function to clean the plane dictionary
 @synchronized_plane_dict
 def clean_dict():
@@ -3584,6 +3654,22 @@ def clean_dict():
             discard_authoritative_aircraft(icao, current_time)
             authoritative_terminal_predictions.pop((icao, "SUN"), None)
             authoritative_terminal_predictions.pop((icao, "MOON"), None)
+        # A held candidate must expire even if the velocity/position stream
+        # stops. Reuse the cached STALE marker and existing prediction maps;
+        # there is no additional timer or per-aircraft lifetime state.
+        for icao, previous in tuple(aircraft_motion_freshness_status.items()):
+            if (previous.status != MotionFreshnessStatus.STALE or icao not in plane_dict
+                    or not (icao in sun_predicted_transit_utc or icao in moon_predicted_transit_utc)):
+                continue
+            freshness = assess_motion_freshness(effective_motion_state(icao, current_time), current_time)
+            observer = current_observer_context()
+            if not hold_transit_prediction_for_velocity_gap(icao, freshness, observer):
+                changed = withdraw_motion_stale_prediction(
+                    icao, freshness, observer, publish=False)
+                dashboard_changed = changed or dashboard_changed
+            else:
+                changed = dashboard_runtime.state.mark_prediction_degraded(icao, current_time)
+                dashboard_changed = changed or dashboard_changed
     finally:
         # Publish completed withdrawals even if a later cleanup operation fails.
         if dashboard_changed:
@@ -5197,6 +5283,12 @@ def process_line(line, port):
         motion_now = clock.now_utc()
         motion_freshness = assess_motion_freshness(
             effective_motion_state(icao, motion_now), motion_now)
+        previous_freshness = aircraft_motion_freshness_status.get(icao)
+        if (previous_freshness is not None
+                and previous_freshness.status == MotionFreshnessStatus.STALE
+                and (icao in sun_predicted_transit_utc or icao in moon_predicted_transit_utc)
+                and not hold_transit_prediction_for_velocity_gap(icao, motion_freshness, observer_context)):
+            withdraw_motion_stale_prediction(icao, motion_freshness, observer_context)
         aircraft_motion_freshness_status[icao] = motion_freshness
 
     shadow_prepared = {}
@@ -5260,20 +5352,18 @@ def process_line(line, port):
         if distance > alert_distance and plane_dict[icao][8] == "ENTERING":
             plane_dict[icao][8] = "LEAVING"
         if motion_freshness.status == MotionFreshnessStatus.STALE:
-            withdraw_shadow_2d(
-                icao, flight, clock.now_utc(), "MOTION_STALE", freshness=motion_freshness)
-            cancel_pending_transit_notification(icao)
-            try:
-                dashboard_runtime.withdraw_aircraft(
-                    icao, clock.now_utc(), reason="MOTION_STALE",
-                    source_owner=None, details={
-                        "motion_freshness": motion_freshness.diagnostic,
-                        "aircraft_source_mode": aircraft_source_mode})
-            except Exception:
-                pass
-            discard_authoritative_aircraft(icao, clock.now_utc())
-            authoritative_terminal_predictions.pop((icao, "SUN"), None)
-            authoritative_terminal_predictions.pop((icao, "MOON"), None)
+            if hold_transit_prediction_for_velocity_gap(
+                    icao, motion_freshness, observer_context):
+                dashboard_runtime.mark_prediction_degraded(icao, motion_now)
+                cancel_pending_transit_notification(icao)
+                if deferred_true2d is not None:
+                    deferred_true2d.invalidate(icao)
+                sun_alt, sun_az, moon_alt, moon_az = tabela_for_observer(
+                    observer_context)
+                clean_dict()
+                clean_transit_dict()
+                return
+            withdraw_motion_stale_prediction(icao, motion_freshness, observer_context)
             sun_alt, sun_az, moon_alt, moon_az = tabela_for_observer(
                 observer_context)
             clean_dict()

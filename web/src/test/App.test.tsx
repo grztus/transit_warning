@@ -4,6 +4,64 @@ import App, { formatCountdown, geolocationErrorMessage, settingsCommandId } from
 import { activeFixture } from "./fixture";
 
 describe("LIVE screen", () => {
+  it("labels retained degraded geometry and advances its age without changing the prediction", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-04T10:00:00Z"));
+    const fixture = structuredClone(activeFixture);
+    Object.assign(fixture.bodies.sun.candidates[0], {
+      prediction_quality: "DEGRADED", prediction_quality_reason: "VELOCITY_STALE",
+      last_prediction_update_utc: "2026-09-04T09:59:56Z",
+      prediction_expires_utc: "2026-09-04T10:00:06Z",
+    });
+    try {
+      const { container } = render(<App client={async () => fixture} pollIntervalMs={60_000} />);
+      await act(async () => { await Promise.resolve(); });
+      expect(screen.getByText(/last prediction 4 s ago/)).toHaveTextContent("DEGRADED · velocity stale");
+      expect(screen.getByText("02:30")).toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(screen.getByText(/last prediction 5 s ago/)).toBeInTheDocument();
+      expect(screen.getByText("02:29")).toBeInTheDocument();
+      expect(screen.getByText("TEST123")).toBeInTheDocument();
+      expect(container.querySelectorAll('.candidate-quality')).toHaveLength(1);
+      expect(screen.getByText("SEP 0.42°")).toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(5_000));
+      // Enforce the server deadline even if the next SSE/poll is delayed.
+      expect(screen.queryByText('TEST123')).toBeNull();
+      expect(screen.getByText('ALERT789')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps fresh candidate presentation unchanged", async () => {
+    const fixture = structuredClone(activeFixture);
+    Object.assign(fixture.bodies.sun.candidates[0], {
+      prediction_quality: "FRESH", prediction_quality_reason: null, prediction_expires_utc: null,
+    });
+    render(<App client={async () => fixture} pollIntervalMs={60_000} />);
+    expect(await screen.findByText('TEST123')).toBeInTheDocument();
+    expect(screen.queryByText(/DEGRADED|last prediction/)).toBeNull();
+  });
+
+  it("clears the degraded label when the same encounter recovers", async () => {
+    const degraded = structuredClone(activeFixture);
+    Object.assign(degraded.bodies.sun.candidates[0], {
+      prediction_quality: "DEGRADED", prediction_quality_reason: "VELOCITY_STALE",
+      last_prediction_update_utc: "2026-09-04T09:59:56Z",
+    });
+    const { rerender } = render(<App client={async () => degraded} pollIntervalMs={60_000} />);
+    expect(await screen.findByText(/DEGRADED/)).toBeInTheDocument();
+    const fresh = structuredClone(degraded);
+    Object.assign(fresh.bodies.sun.candidates[0], {
+      prediction_quality: "FRESH", prediction_quality_reason: null,
+      prediction_expires_utc: null, last_prediction_update_utc: "2026-09-04T10:00:02Z",
+    });
+    rerender(<App client={async () => fresh} pollIntervalMs={60_000} />);
+    await waitFor(() => expect(screen.queryByText(/DEGRADED/)).toBeNull());
+    expect(screen.getByText('TEST123')).toBeInTheDocument();
+    expect(screen.getByText('7:ABC123:SUN:2')).toBeInTheDocument();
+  });
+
   it.each([
     [1, "permission was denied"],
     [2, "position is unavailable"],

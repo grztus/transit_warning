@@ -16,6 +16,7 @@ _CANDIDATE_FIELDS = (
     "distance_km", "last_prediction_update_utc", "telegram_range",
     "transit_distance_km", "encounter_id", "prediction_geometry", "state",
     "separation_class", "is_new_late_candidate", "aircraft_source_mode",
+    "prediction_quality", "prediction_quality_reason", "prediction_expires_utc",
 )
 _HISTORY_FIELDS = _CANDIDATE_FIELDS + (
     "event_id", "final_separation_deg", "first_separation_deg",

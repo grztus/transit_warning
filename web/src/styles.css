@@ -130,6 +130,7 @@ button[aria-pressed="true"], .view-tabs button.active {
 button:disabled { cursor: wait; opacity: .65; }
 .degraded, .settings-message { margin: .55rem 0 0; padding: .48rem .62rem; border-radius: .4rem; font-size: .78rem; }
 .degraded { background: #4a3717; }
+.candidate-quality { min-width: 0; overflow-wrap: anywhere; }
 .settings-message { background: #49242a; }
 .history-panel { max-width: 900px; margin-left: auto; margin-right: auto; }
 .history-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));

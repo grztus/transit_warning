@@ -118,6 +118,11 @@ function CandidateCard({ candidate, nowMs }: {
 }) {
   const state = candidate.state || "CANDIDATE";
   const countdown = formatCountdown(candidate.predicted_event_utc, nowMs);
+  const predictionTime = Date.parse(candidate.last_prediction_update_utc || "");
+  const predictionAge = Number.isFinite(predictionTime)
+    ? Math.max(0, Math.floor((nowMs - predictionTime) / 1000)) : null;
+  if (candidate.prediction_quality === "DEGRADED" &&
+      nowMs >= Date.parse(candidate.prediction_expires_utc || "")) return null;
   return (
     <article className="candidate-card">
       <div className="candidate-title">
@@ -141,6 +146,11 @@ function CandidateCard({ candidate, nowMs }: {
         <dt>Geometry</dt><dd>{candidate.prediction_geometry || "—"}</dd>
         <dt>Encounter</dt><dd className="encounter-id">{candidate.encounter_id || "—"}</dd>
       </dl>
+      {candidate.prediction_quality === "DEGRADED" &&
+        <p className="degraded candidate-quality" role="status">
+          <strong>DEGRADED</strong> · velocity stale · {predictionAge === null
+            ? "last prediction age unavailable" : `last prediction ${predictionAge} s ago`}
+        </p>}
     </article>
   );
 }

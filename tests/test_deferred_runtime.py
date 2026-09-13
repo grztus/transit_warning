@@ -321,6 +321,69 @@ class DeferredRuntimeTests(unittest.TestCase):
             [call.args[0].kind.value for call in self.recorder.call_args_list])
         self.assertEqual([], self.dashboard.state.snapshot(NOW)['moon']['candidates'])
 
+    def test_mlat_stale_hold_cancels_old_work_recovers_and_readmits_after_expiry(self):
+        from candidate_recorder import CandidateEncounterManager
+        manager = CandidateEncounterManager()
+        self.recorder.side_effect = lambda transition, now, *args: manager.process_transition(transition, now)
+        when = [NOW + datetime.timedelta(seconds=10)]
+        self.enterContext(patch.multiple(r, adsb_port=30003, mlat_port=30106,
+                                        adsb_timestamp_timezone='UTC'))
+        self.enterContext(patch.object(r, 'clock', SimpleNamespace(now_utc=lambda: when[0])))
+        self.enterContext(patch.object(r, 'get_metar_press', return_value=1013.25))
+        self.enterContext(patch.object(r, 'tabela_for_observer', return_value=(0., 0., 0., 0.)))
+        self.enterContext(patch.object(r, 'moving_body_transit_pred', return_value=0))
+        self.enterContext(patch.object(r, 'capture_transit_observation'))
+        self.enterContext(patch.object(r, 'aircraft_angular_position_from_observer',
+            return_value=SimpleNamespace(azimuth_deg=120., altitude_angle_deg=30.)))
+        r.aircraft_motion_states['ABC123'] = motion_state(position_age=-10, altitude_age=-10)
+        r.plane_dict['ABC123'][11] = 180.
+        self.submit()
+        self.idle()
+        first = self.dashboard.state._live['SUN']['ABC123']['candidate']
+        self.assertEqual(2, len(manager.encounters_for_icao('ABC123')))
+        started, release = self.pause_worker()
+        self.submit()
+        self.assertTrue(started.wait(3))
+
+        def message(seconds, *, velocity=False):
+            when[0] = NOW + datetime.timedelta(seconds=seconds)
+            line = sbs('MLAT', 3, when[0].strftime('%Y/%m/%d %H:%M:%S.%f'),
+                altitude=10000, latitude=51.2, longitude=21.2,
+                track=180 if velocity else '', groundspeed=450 if velocity else '')
+            r.process_line(line, r.mlat_port)
+
+        self.recorder.reset_mock()
+        self.telegram.reset_mock()
+        message(11)
+        degraded = self.dashboard.state._live['SUN']['ABC123']['candidate']
+        self.assertEqual(replace(first, prediction_quality='DEGRADED',
+            prediction_quality_reason='VELOCITY_STALE',
+            prediction_expires_utc=NOW+datetime.timedelta(seconds=20)), degraded)
+        self.recorder.assert_not_called()
+        self.telegram.assert_not_called()
+        self.assertEqual(2, self.service.scheduler.snapshot()['submitted'])
+        # Recover before the pre-gap worker returns: cancellation must still win.
+        message(17.5, velocity=True)  # Beyond internal grace, within display retention.
+        release.set()
+        self.idle()
+        self.assertEqual(2, self.service.scheduler.snapshot()['committed'])
+        self.assertEqual(1, self.service.scheduler.snapshot()['stale_discarded'])
+        recovered = self.dashboard.state._live['SUN']['ABC123']['candidate']
+        self.assertEqual(first.encounter_id, recovered.encounter_id)
+        self.assertEqual('FRESH', recovered.prediction_quality)
+        self.assertIsNone(recovered.prediction_quality_reason)
+        self.assertIsNone(recovered.prediction_expires_utc)
+        self.assertEqual(2, len(manager.encounters_for_icao('ABC123')))
+
+        message(31)
+        self.assertNotIn('ABC123', self.dashboard.state._live['SUN'])
+        self.assertTrue(all(e.outcome.value == 'WITHDRAWN' for e in manager.encounters_for_icao('ABC123')))
+        message(31.1, velocity=True)
+        self.idle()
+        readmitted = self.dashboard.state._live['SUN']['ABC123']['candidate']
+        self.assertNotEqual(first.encounter_id, readmitted.encounter_id)
+        self.assertEqual(4, len(manager.encounters_for_icao('ABC123')))
+
     def test_age_is_rechecked_after_contended_dashboard_guard(self):
         started, release = self.pause_worker()
         self.submit()

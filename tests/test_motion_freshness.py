@@ -327,14 +327,10 @@ class MotionFreshnessIntegrationTests(unittest.TestCase):
             transit.predicted_transit_remaining_seconds("ABC123", "moon"),
             90)
 
-    def test_stale_preserves_last_good_prediction_and_does_not_start_grace(self):
+    def test_excessive_staleness_expires_legacy_countdown_without_solving(self):
         transit.transit_pred = Mock(side_effect=[
             self.prediction(120), self.prediction(130)])
         self.process(self.mlat3("2026/08/19 12:00:00.000"))
-        moon_target = transit.moon_predicted_transit_utc["ABC123"]
-        prediction_block = list(transit.plane_dict["ABC123"][18:28])
-        moon_last_valid = transit.moon_prediction_last_valid["ABC123"]
-        sun_last_valid = transit.sun_prediction_last_valid["ABC123"]
         transit.moving_body_transit_pred = Mock()
 
         self.process(self.msg3("2026/08/19 12:00:15.000"))
@@ -342,17 +338,11 @@ class MotionFreshnessIntegrationTests(unittest.TestCase):
         transit.moving_body_transit_pred.assert_not_called()
         result = transit.get_aircraft_motion_freshness_status("ABC123")
         self.assertEqual(result.status, transit.MotionFreshnessStatus.STALE)
-        self.assertEqual(
-            transit.moon_predicted_transit_utc["ABC123"], moon_target)
-        self.assertEqual(
-            transit.moon_prediction_last_valid["ABC123"], moon_last_valid)
-        self.assertEqual(
-            transit.sun_prediction_last_valid["ABC123"], sun_last_valid)
-        self.assertEqual(
-            transit.predicted_transit_remaining_seconds("ABC123", "moon"),
-            105)
-        self.assertEqual(
-            transit.plane_dict["ABC123"][18:28], prediction_block)
+        self.assertNotIn("ABC123", transit.moon_predicted_transit_utc)
+        self.assertNotIn("ABC123", transit.sun_predicted_transit_utc)
+        self.assertNotIn("ABC123", transit.moon_prediction_last_valid)
+        self.assertNotIn("ABC123", transit.sun_prediction_last_valid)
+        self.assertEqual([""] * 10, transit.plane_dict["ABC123"][18:28])
 
     def test_fresh_after_stale_resumes_prediction(self):
         transit.transit_pred = Mock(side_effect=[
