@@ -4,19 +4,22 @@ import App, { formatCountdown, geolocationErrorMessage, settingsCommandId } from
 import { activeFixture } from "./fixture";
 
 describe("LIVE screen", () => {
-  it("labels retained degraded geometry and advances its age without changing the prediction", async () => {
+  it.each([
+    ["VELOCITY_STALE", "velocity stale"],
+    ["SOLVE_UNAVAILABLE", "prediction unavailable"],
+  ])("labels retained degraded geometry without changing the prediction (%s)", async (reason, label) => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-04T10:00:00Z"));
     const fixture = structuredClone(activeFixture);
     Object.assign(fixture.bodies.sun.candidates[0], {
-      prediction_quality: "DEGRADED", prediction_quality_reason: "VELOCITY_STALE",
+      prediction_quality: "DEGRADED", prediction_quality_reason: reason,
       last_prediction_update_utc: "2026-09-04T09:59:56Z",
       prediction_expires_utc: "2026-09-04T10:00:06Z",
     });
     try {
       const { container } = render(<App client={async () => fixture} pollIntervalMs={60_000} />);
       await act(async () => { await Promise.resolve(); });
-      expect(screen.getByText(/last prediction 4 s ago/)).toHaveTextContent("DEGRADED · velocity stale");
+      expect(screen.getByText(/last prediction 4 s ago/)).toHaveTextContent(`DEGRADED · ${label}`);
       expect(screen.getByText("02:30")).toBeInTheDocument();
       act(() => vi.advanceTimersByTime(1_000));
       expect(screen.getByText(/last prediction 5 s ago/)).toBeInTheDocument();

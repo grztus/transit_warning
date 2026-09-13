@@ -62,13 +62,30 @@ def observer_compatible(frozen, current):
 
 def result_compatible(job, *, incarnation, cancellation, source_generation,
                       source_mode, observer, committed_version, now_monotonic):
+    return result_rejection_reason(job, incarnation=incarnation, cancellation=cancellation,
+        source_generation=source_generation, source_mode=source_mode, observer=observer,
+        committed_version=committed_version, now_monotonic=now_monotonic) is None
+
+
+def result_rejection_reason(job, *, incarnation, cancellation, source_generation,
+                            source_mode, observer, committed_version, now_monotonic):
+    """Same compatibility policy, with a coordinate-free reason for diagnostics."""
     age = now_monotonic - job.captured_monotonic
-    return (job.incarnation == incarnation and job.cancellation == cancellation
-            and job.source_generation == source_generation
-            and job.source_mode == source_mode
-            and job.version > committed_version
-            and 0 <= age <= MAX_RESULT_AGE_SECONDS
-            and observer_compatible(job.observer, observer))
+    if job.incarnation != incarnation:
+        return "INCARNATION_CHANGED"
+    if job.cancellation != cancellation:
+        return "CANCELLED"
+    if job.source_generation != source_generation:
+        return "SOURCE_GENERATION_CHANGED"
+    if job.source_mode != source_mode:
+        return "SOURCE_MODE_CHANGED"
+    if job.version <= committed_version:
+        return "SUPERSEDED"
+    if not 0 <= age <= MAX_RESULT_AGE_SECONDS:
+        return "RESULT_AGE"
+    if not observer_compatible(job.observer, observer):
+        return "OBSERVER_CHANGED"
+    return None
 
 
 class LatestPredictionScheduler:

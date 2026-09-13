@@ -569,6 +569,7 @@ class Shadow2DDiagnosticWriter:
             record.get("stage"), record.get("solver_status"),
             record.get("legacy_available"), record.get("shadow_only"),
             record.get("boundary_status"), record.get("reason"),
+            record.get("commit_status"), record.get("commit_reason"),
             (round(float(separation) / 0.05) if separation is not None
              else None),
             (round(float(tca) / 5.0) if tca is not None else None),

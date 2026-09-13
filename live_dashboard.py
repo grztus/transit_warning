@@ -229,6 +229,7 @@ class DashboardState:
         self.history_store = history_store
         self.finalization_journal = finalization_journal
         self.notification_finalized = None
+        self.prediction_finalized = None
         self.new_transit_indicator_enabled = bool(
             new_transit_indicator_enabled)
         self.new_transit_threshold_seconds = float(
@@ -326,23 +327,29 @@ class DashboardState:
         return True
 
     @_prediction_mutation
-    def mark_prediction_degraded(self, icao, now_utc, *, source_owner=None):
+    def mark_prediction_degraded(self, icao, now_utc, *, source_owner=None,
+                                 body=None, encounter_id=None,
+                                 reason="VELOCITY_STALE",
+                                 retention_seconds=DEGRADED_PREDICTION_DISPLAY_SECONDS):
         """Change display quality only, preserving geometry and solve timestamps."""
         changed = False
         with self._lock:
-            for body in ("SUN", "MOON"):
+            for body in ((body.upper(),) if body is not None else ("SUN", "MOON")):
                 item = self._live[body].get(icao.upper())
                 if item is None or item["source_owner"] is not source_owner:
                     continue
                 candidate = item["candidate"]
-                if candidate.prediction_quality == "DEGRADED":
+                if encounter_id is not None and candidate.encounter_id != encounter_id:
+                    continue
+                if (candidate.prediction_quality == "DEGRADED"
+                        and candidate.prediction_quality_reason == reason):
                     continue
                 deadline = candidate.last_prediction_update_utc + datetime.timedelta(
-                    seconds=DEGRADED_PREDICTION_DISPLAY_SECONDS)
+                    seconds=retention_seconds)
                 if now_utc >= deadline:
                     continue
                 fields = dict(prediction_quality="DEGRADED",
-                              prediction_quality_reason="VELOCITY_STALE",
+                              prediction_quality_reason=reason,
                               prediction_expires_utc=deadline)
                 item["candidate"] = replace(candidate, **fields)
                 changed = True
@@ -462,8 +469,11 @@ class DashboardState:
                            and item["candidate"].prediction_expires_utc <= now_utc
                            and item["candidate"].prediction_expires_utc < item["candidate"].predicted_event_utc]
                 for icao in expired:
-                    changed = self.withdraw(icao, body, now_utc, reason="MOTION_STALE",
-                        details={"prediction_quality_reason": "VELOCITY_STALE"}) or changed
+                    quality_reason = self._live[body][icao]["candidate"].prediction_quality_reason
+                    reason = ("PREDICTION_UNAVAILABLE" if quality_reason == "SOLVE_UNAVAILABLE"
+                              else "MOTION_STALE")
+                    changed = self.withdraw(icao, body, now_utc, reason=reason,
+                        details={"prediction_quality_reason": quality_reason}) or changed
                 due = [icao for icao, item in self._live[body].items()
                        if item["candidate"].predicted_event_utc <= now_utc]
                 for icao in due:
@@ -478,6 +488,12 @@ class DashboardState:
 
     def _trace_finalization(self, item, now, state, reason, decision, details=None):
         candidate = item["candidate"]
+        if self.prediction_finalized is not None:
+            # Callback must never acquire source/aircraft locks from this lock.
+            try:
+                self.prediction_finalized(candidate, now, reason)
+            except Exception:
+                pass
         if self.notification_finalized is not None:
             try:
                 self.notification_finalized(candidate.icao, candidate.body,
@@ -731,7 +747,7 @@ class DisabledDashboard:
     def publish(self, candidate):
         return False
 
-    def mark_prediction_degraded(self, icao, now_utc):
+    def mark_prediction_degraded(self, icao, now_utc, **kwargs):
         return False
 
     def publish_authoritative(self, candidate, prediction, *, source_owner=None):
@@ -812,8 +828,8 @@ class DashboardRuntime:
             self._publish_application_state()
         return result
 
-    def mark_prediction_degraded(self, icao, now_utc):
-        changed = self.state.mark_prediction_degraded(icao, now_utc)
+    def mark_prediction_degraded(self, icao, now_utc, **kwargs):
+        changed = self.state.mark_prediction_degraded(icao, now_utc, **kwargs)
         if changed:
             self._publish_application_state()
         return changed

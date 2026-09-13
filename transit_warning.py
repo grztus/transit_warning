@@ -133,6 +133,7 @@ from telegram_notifications import (
     create_telegram_notifier,
 )
 from authoritative_transit import (
+    SOLVE_CONTINUITY_SECONDS,
     AuthoritativeTransitLifecycle,
     AuthoritativeTransitionKind,
 )
@@ -904,6 +905,7 @@ def apply_installation_config(configuration: InstallationConfig):
     authoritative_transit_lifecycle = AuthoritativeTransitLifecycle(
         authoritative_geometry,
         grace_seconds=TRANSIT_PREDICTION_GRACE_SECONDS,
+        continuity_seconds=SOLVE_CONTINUITY_SECONDS,
         horizon_seconds=shadow_2d_config.horizon_seconds)
     fleet_geometric_altitude_estimator = None
     aircraft_los_geoid_provider = PgmGeoidProvider.discover(
@@ -2295,27 +2297,62 @@ def compute_shadow_2d_result(context, coarse, legacy_result, legacy_base, config
     return Shadow2DResult(coarse=coarse, exact=exact)
 
 
-def commit_shadow_2d_result(context, result, legacy_result, legacy_base, config, now_utc):
+def commit_shadow_2d_result(context, result, legacy_result, legacy_base, config, now_utc, *, job=None):
     """Apply only a validated computation; preserve per-body diagnostic records."""
+    expire_authoritative_prediction(context.observer_context.epoch,
+                                    context.icao, context.body, now_utc)
     transition = authoritative_transit_lifecycle.consider_transition(context, result, now_utc)
+    record_shadow_2d_commit(context, result, legacy_result, legacy_base, config,
+                           now_utc, transition=transition, job=job)
+    return transition
+
+
+def record_shadow_2d_commit(context, result, legacy_result, legacy_base, config,
+                           now_utc, *, transition=None, job=None, rejection_reason=None):
+    """Bounded, coordinate-free diagnostics; numerical SUCCESS is not acceptance.
+
+    Acceptance describes the lifecycle decision, before dashboard/alert consumers.
+    The existing writer retains its per-pair rate limit and privacy validation.
+    """
     writer = shadow_2d_diagnostics
     if writer is not None:
         try:
-            coarse, exact = result.coarse, result.exact
-            writer.counters["screened"] += 1
-            writer.counters["passed" if coarse.passed else "coarse_rejected"] += 1
-            if exact is not None:
-                writer.counters["exact_success" if exact.succeeded else "exact_failure"] += 1
-            record = shadow_comparison_record(
-                context, result, legacy_base, legacy_result,
-                config.refinement_target_deg, now_utc)
-            if record["shadow_only"]:
-                writer.counters["shadow_only"] += 1
+            if result is not None:
+                coarse, exact = result.coarse, result.exact
+                writer.counters["screened"] += 1
+                writer.counters["passed" if coarse.passed else "coarse_rejected"] += 1
+                if exact is not None:
+                    writer.counters["exact_success" if exact.succeeded else "exact_failure"] += 1
+                record = shadow_comparison_record(
+                    context, result, now_utc=now_utc, legacy_result=legacy_result,
+                    relevance_threshold_deg=config.refinement_target_deg,
+                    legacy_prediction_base_utc=legacy_base)
+                if record["shadow_only"]:
+                    writer.counters["shadow_only"] += 1
+            else:
+                record = dict(utc=_snapshot_utc_text(now_utc), icao=context.icao,
+                    callsign=context.callsign, body=context.body.upper(), stage="COMMIT",
+                    solver_status="NOT_RUN", reason="RESULT_UNAVAILABLE")
+            kind = transition.kind.value if transition is not None else None
+            prediction = (transition.prediction if transition is not None else
+                authoritative_transit_lifecycle.active_prediction(
+                    context.observer_context.epoch, context.icao, context.body))
+            status = ("REJECTED" if rejection_reason is not None else
+                      "ACCEPTED" if kind in ("OPENED", "UPDATED") else
+                      "DIAGNOSTIC_ONLY" if not authoritative_transit_lifecycle.enabled else "UNAVAILABLE")
+            record.update(commit_status=status, commit_reason=rejection_reason or kind,
+                observer_epoch=context.observer_context.epoch,
+                prediction_base_utc=_snapshot_utc_text(context.prediction_base_utc),
+                commit_evaluated_at_utc=_snapshot_utc_text(now_utc),
+                encounter_id=prediction.encounter_id if prediction is not None else None)
+            if job is not None:
+                record.update(job_version=job.version, job_incarnation=job.incarnation,
+                    job_cancellation=job.cancellation, source_generation=job.source_generation,
+                    source_mode=job.source_mode)
             record["runtime_counters"] = dict(writer.counters)
             writer.record(record)
         except Exception:
             pass  # Diagnostic failures must not suppress an already committed transition.
-    return transition
 
 
 def complete_shadow_2d(prepared, legacy_result, legacy_prediction_base_utc):
@@ -2731,6 +2768,19 @@ def finalize_authoritative_notification(icao, body, encounter_id, reason):
         pass
 
 
+def finalize_authoritative_encounter(candidate, now_utc, reason):
+    """Close matching LOCAL identity, without source/aircraft/dashboard locking.
+
+    Dashboard finalization owns its lock here. The lifecycle releases its own
+    lock before observational recorder work; neither path acquires runtime locks.
+    PASSED keeps the recorder's existing post-event observation window.
+    """
+    transition = authoritative_transit_lifecycle.finalize_encounter(
+        candidate.icao, candidate.body, candidate.encounter_id)
+    if transition is not None and reason != "PASSED":
+        observe_candidate_authoritative_transition(transition, now_utc)
+
+
 def emit_authoritative_transit_notification(prediction, now_utc, owner="LOCAL"):
     """Feed one fresh true-2D update into existing Telegram stabilization."""
     if telegram_notifier is None:
@@ -3134,6 +3184,12 @@ def set_aircraft_source_mode(mode):
     try:
         with aircraft_source_lock:
             dashboard_runtime.state.notification_finalized = finalize_authoritative_notification
+            dashboard_runtime.state.prediction_finalized = finalize_authoritative_encounter
+            if (deferred_true2d is None and authoritative_transit_lifecycle.enabled
+                    and authoritative_transit_lifecycle.continuity_seconds is not None):
+                # Replay/synchronous publication needs the same aircraft-before-
+                # dashboard ordering; deferred runtime installs its richer guard.
+                dashboard_runtime.state._prediction_guard = lambda: plane_dict_lock
             old_poller = internet_source_poller
             if old_poller is not None:
                 old_poller.stop.set()
@@ -3478,15 +3534,29 @@ class AutoFusionBridge(ProductionInternetBridge):
 def consume_authoritative_transition(transition, context, entry,
                                      current_distance_km, now_utc):
     """Route one lifecycle transition without invoking legacy consumers."""
-    observe_candidate_authoritative_transition(
-        transition, now_utc, context.observer_context)
     if transition is None:
         return False
     kind = transition.kind
     prediction = transition.prediction
+    passed = (kind == AuthoritativeTransitionKind.WITHDRAWN
+              and authoritative_transit_lifecycle.continuity_seconds is not None
+              and prediction is not None
+              and prediction.predicted_transit_utc <= now_utc)
+    if passed:
+        # T0 wins over a later unavailable solve or maintenance tick. Preserve
+        # normal PASSED history and the recorder's post-T0 capture window.
+        dashboard_runtime.tick(now_utc)
+    else:
+        observe_candidate_authoritative_transition(
+            transition, now_utc, getattr(context, "observer_context", None))
     body = context.body.lower()
     start_index = 18 if body == "sun" else 23
     if kind == AuthoritativeTransitionKind.HELD:
+        if transition.prediction_quality_reason == "SOLVE_UNAVAILABLE":
+            dashboard_runtime.mark_prediction_degraded(
+                prediction.icao, now_utc, body=prediction.body,
+                encounter_id=prediction.encounter_id, reason="SOLVE_UNAVAILABLE",
+                retention_seconds=SOLVE_CONTINUITY_SECONDS)
         return True
     if kind == AuthoritativeTransitionKind.WITHDRAWN:
         clear_transit_prediction_state(
@@ -3517,6 +3587,23 @@ def consume_authoritative_transition(transition, context, entry,
     entry[29 if body == "moon" else 30] = clock.now_utc()
     capture_authoritative_transit_prediction(prediction, context, now_utc)
     return True
+
+
+def consume_expired_authoritative_prediction(transition, now_utc):
+    if transition.prediction is None:
+        return False
+    prediction = transition.prediction
+    entry = plane_dict.get(prediction.icao)
+    if entry is not None:
+        consume_authoritative_transition(transition, SimpleNamespace(
+            icao=prediction.icao, body=prediction.body), entry, 0, now_utc)
+    return True
+
+
+def expire_authoritative_prediction(epoch, icao, body, now_utc):
+    """Caller owns aircraft lock; expire before capturing/committing new work."""
+    transition = authoritative_transit_lifecycle.expire_transition(epoch, icao, body, now_utc)
+    return consume_expired_authoritative_prediction(transition, now_utc)
 
 
 def _store_transit_solver_solution(icao, celestial_body, solution):
@@ -3654,6 +3741,26 @@ def clean_dict():
             discard_authoritative_aircraft(icao, current_time)
             authoritative_terminal_predictions.pop((icao, "SUN"), None)
             authoritative_terminal_predictions.pop((icao, "MOON"), None)
+        # Input updates/rejected jobs are not successful solves. Apply the same
+        # deadline to FRESH predictions even if no unavailable callback arrived.
+        for icao in {prediction.icao for prediction in
+                     authoritative_transit_lifecycle.retained_predictions(include_fresh=True)}:
+            if icao not in plane_dict:
+                continue
+            freshness = assess_motion_freshness(effective_motion_state(icao, current_time), current_time)
+            if freshness.status == MotionFreshnessStatus.STALE:
+                observer = current_observer_context()
+                aircraft_motion_freshness_status[icao] = freshness
+                if hold_transit_prediction_for_velocity_gap(icao, freshness, observer):
+                    dashboard_changed = dashboard_runtime.state.mark_prediction_degraded(
+                        icao, current_time) or dashboard_changed
+                else:
+                    dashboard_changed = withdraw_motion_stale_prediction(
+                        icao, freshness, observer, publish=False) or dashboard_changed
+        for transition in authoritative_transit_lifecycle.expire_retained_transitions(
+                current_time, include_fresh=True):
+            dashboard_changed = consume_expired_authoritative_prediction(
+                transition, current_time) or dashboard_changed
         # A held candidate must expire even if the velocity/position stream
         # stops. Reuse the cached STALE marker and existing prediction maps;
         # there is no additional timer or per-aircraft lifetime state.

@@ -189,6 +189,8 @@ class FinalizationTests(unittest.TestCase):
                 patch.object(runtime, "session_recorder") as full_session:
             transition = object()
             lifecycle.invalidate_transitions.return_value = (transition,)
+            # The reset already removed these identities before dashboard callbacks.
+            lifecycle.finalize_encounter.return_value = None
             runtime.set_aircraft_source_mode("LOCAL")
             observe.assert_called_once_with(transition, NOW)
             snapshots.invalidate_active_predictions.assert_called_once_with()

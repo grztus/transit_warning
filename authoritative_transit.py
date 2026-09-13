@@ -7,6 +7,9 @@ from enum import Enum
 import threading
 
 
+SOLVE_CONTINUITY_SECONDS = 10.0
+
+
 class PredictionGeometry(str, Enum):
     LEGACY = "LEGACY"
     TRUE_2D = "TRUE_2D"
@@ -57,12 +60,14 @@ class AuthoritativeTransitPrediction:
 class AuthoritativeTransition:
     kind: AuthoritativeTransitionKind
     prediction: AuthoritativeTransitPrediction | None
+    prediction_quality_reason: str | None = None
 
 
 @dataclass
 class _ActiveEncounter:
     prediction: AuthoritativeTransitPrediction
     last_success_utc: datetime.datetime
+    solve_unavailable: bool = False
 
 
 class AuthoritativeTransitLifecycle:
@@ -74,12 +79,17 @@ class AuthoritativeTransitLifecycle:
     """
 
     def __init__(self, geometry=PredictionGeometry.LEGACY,
-                 grace_seconds=3.0, horizon_seconds=900.0, encounter_namespace=None):
+                 grace_seconds=3.0, horizon_seconds=900.0, encounter_namespace=None,
+                 continuity_seconds=None):
         value = geometry.value if isinstance(geometry, PredictionGeometry) else geometry
         self.geometry = PredictionGeometry(str(value).upper())
         self.grace_seconds = float(grace_seconds)
         self.horizon_seconds = float(horizon_seconds)
         self.encounter_namespace = encounter_namespace
+        # Opt-in for the LOCAL runtime, whose input/ownership guards are required.
+        # Remote and legacy consumers retain their existing numerical grace.
+        self.continuity_seconds = (None if continuity_seconds is None
+                                   else float(continuity_seconds))
         self._active = {}
         self._generations = {}
         self._lock = threading.RLock()
@@ -116,11 +126,17 @@ class AuthoritativeTransitLifecycle:
             exact is not None and exact.succeeded
             and exact.boundary_status == "INTERIOR"
             and exact.tca_seconds is not None
-            and 0.0 < exact.tca_seconds <= self.horizon_seconds)
+            and 0.0 < exact.tca_seconds <= self.horizon_seconds
+            and (self.continuity_seconds is None or
+                 context.prediction_base_utc + datetime.timedelta(
+                     seconds=exact.tca_seconds) > now_utc))
         with self._lock:
             if not valid:
                 return self._missing_transition_locked(key, now_utc)
             active = self._active.get(key)
+            if active is not None and self._continuity_expired(active, now_utc):
+                self._active.pop(key)
+                active = None
             if active is None:
                 generation = self._generations.get(key, 0) + 1
                 self._generations[key] = generation
@@ -191,12 +207,70 @@ class AuthoritativeTransitLifecycle:
             return AuthoritativeTransition(AuthoritativeTransitionKind.NONE,
                                            None)
         age = (now_utc - active.last_success_utc).total_seconds()
-        if age < self.grace_seconds:
+        if self.continuity_seconds is not None:
+            if not self._continuity_expired(active, now_utc) and age >= 0:
+                active.solve_unavailable = True
+                return AuthoritativeTransition(AuthoritativeTransitionKind.HELD,
+                                               active.prediction, "SOLVE_UNAVAILABLE")
+        elif age < self.grace_seconds:
             return AuthoritativeTransition(AuthoritativeTransitionKind.HELD,
                                            active.prediction)
         self._active.pop(key, None)
         return AuthoritativeTransition(AuthoritativeTransitionKind.WITHDRAWN,
                                        active.prediction)
+
+    def _continuity_expired(self, active, now_utc):
+        return self.continuity_seconds is not None and (
+            now_utc >= active.prediction.predicted_transit_utc or
+            (now_utc - active.last_success_utc).total_seconds() >= self.continuity_seconds)
+
+    def expire_transition(self, observer_epoch, icao, body, now_utc):
+        """Expire before accepting new input/results, including success-only gaps."""
+        key = self._key(observer_epoch, icao, body)
+        with self._lock:
+            active = self._active.get(key)
+            if active is None or not self._continuity_expired(active, now_utc):
+                return AuthoritativeTransition(AuthoritativeTransitionKind.NONE, None)
+            self._active.pop(key)
+            return AuthoritativeTransition(AuthoritativeTransitionKind.WITHDRAWN,
+                                           active.prediction)
+
+    def expire_retained_transitions(self, now_utc, *, include_fresh=False):
+        """Apply the same success deadline even when no failure callback arrived."""
+        with self._lock:
+            expired = []
+            for key, active in tuple(self._active.items()):
+                if ((active.solve_unavailable or include_fresh)
+                        and self._continuity_expired(active, now_utc)):
+                    self._active.pop(key)
+                    expired.append(AuthoritativeTransition(
+                        AuthoritativeTransitionKind.WITHDRAWN, active.prediction))
+            return tuple(expired)
+
+    def retained_predictions(self, *, include_fresh=False):
+        with self._lock:
+            return tuple(active.prediction for active in self._active.values()
+                         if active.solve_unavailable or
+                         (include_fresh and self.continuity_seconds is not None))
+
+    def finalize_encounter(self, icao, body, encounter_id):
+        """Close only this exact identity; safe under a dashboard finalization lock.
+
+        This method acquires only the lifecycle lock and never calls consumers.
+        """
+        if self.continuity_seconds is None:
+            return None
+        try:
+            key = self._key(int(encounter_id.split(':', 1)[0]), icao, body)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        with self._lock:
+            active = self._active.get(key)
+            if active is None or active.prediction.encounter_id != encounter_id:
+                return None
+            self._active.pop(key)
+            return AuthoritativeTransition(AuthoritativeTransitionKind.WITHDRAWN,
+                                           active.prediction)
 
     @staticmethod
     def _key(observer_epoch, icao, body):

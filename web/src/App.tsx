@@ -148,7 +148,8 @@ function CandidateCard({ candidate, nowMs }: {
       </dl>
       {candidate.prediction_quality === "DEGRADED" &&
         <p className="degraded candidate-quality" role="status">
-          <strong>DEGRADED</strong> · velocity stale · {predictionAge === null
+          <strong>DEGRADED</strong> · {candidate.prediction_quality_reason === "SOLVE_UNAVAILABLE"
+            ? "prediction unavailable" : "velocity stale"} · {predictionAge === null
             ? "last prediction age unavailable" : `last prediction ${predictionAge} s ago`}
         </p>}
     </article>

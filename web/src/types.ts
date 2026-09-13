@@ -20,7 +20,7 @@ export interface TransitCandidateDto {
   transit_distance_km?: number;
   last_prediction_update_utc?: string;
   prediction_quality?: "FRESH" | "DEGRADED";
-  prediction_quality_reason?: "VELOCITY_STALE" | null;
+  prediction_quality_reason?: "VELOCITY_STALE" | "SOLVE_UNAVAILABLE" | null;
   prediction_expires_utc?: string | null;
   telegram_range?: boolean;
   encounter_id?: string;

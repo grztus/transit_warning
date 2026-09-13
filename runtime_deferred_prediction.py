@@ -12,7 +12,7 @@ import logging
 import time
 import threading
 
-from deferred_prediction import LatestPredictionScheduler, PredictionInput, result_compatible, MAX_RESULT_AGE_SECONDS
+from deferred_prediction import LatestPredictionScheduler, PredictionInput, result_rejection_reason, MAX_RESULT_AGE_SECONDS
 from shadow_2d_prediction import message_aircraft_cache
 from transit_prediction_model import precise_angular_position_from_observer
 
@@ -74,6 +74,7 @@ class RuntimeDeferredPrediction:
             capacity=PENDING_AIRCRAFT_CAPACITY, max_input_age_seconds=MAX_RESULT_AGE_SECONDS)
         # Covers main-loop AND AUTO bridge tick callers without locking solves.
         runtime.dashboard_runtime.state._prediction_guard = self.dashboard_tick_guard
+        runtime.dashboard_runtime.state.prediction_finalized = runtime.finalize_authoritative_encounter
 
     def invalidate(self, icao=None, source=False):
         """Caller owns aircraft lock; forgetting assigns a new incarnation later."""
@@ -94,6 +95,8 @@ class RuntimeDeferredPrediction:
         r = self.runtime
         if self.closed:
             return False
+        for body in ('MOON', 'SUN'):
+            r.expire_authoritative_prediction(observer.epoch, icao, body, r.clock.now_utc())
         captured = time.monotonic()
         entry = r.plane_dict.get(icao)
         motion = r.aircraft_motion_states.get(icao)
@@ -102,6 +105,10 @@ class RuntimeDeferredPrediction:
         self.sequence += 1
         version = self.sequence
         state = self.aircraft.get(icao)
+        if state is not None and state.entry is not entry:
+            for transition in r.authoritative_transit_lifecycle.discard_aircraft_transitions(icao):
+                r.consume_expired_authoritative_prediction(transition, r.clock.now_utc())
+            state = None
         if state is None or state.entry is not entry:
             state = AircraftGeneration(entry, version, version)
             self.aircraft[icao] = state
@@ -156,34 +163,50 @@ class RuntimeDeferredPrediction:
     def commit(self, job, outputs):
         r = self.runtime
         with r.aircraft_source_lock, r.plane_dict_lock:
-            if self.closed or self.stop.is_set() or outputs is None:
+            if outputs is None:
                 return False
+            now = r.clock.now_utc()
+            def reject(reason):
+                for context, result, legacy in outputs:
+                    r.record_shadow_2d_commit(context, result, legacy,
+                        job.payload.legacy_base_utc, job.payload.config, now,
+                        job=job, rejection_reason=reason)
+                return False
+            if self.closed or self.stop.is_set():
+                return reject("CANCELLED")
             observer = r.current_observer_context()  # May invalidate generations.
+            now = r.clock.now_utc()
             state = self.aircraft.get(job.icao)
             entry = r.plane_dict.get(job.icao)
             if state is None or entry is not state.entry:
-                return False
-            now = r.clock.now_utc()
+                return reject("AIRCRAFT_OWNERSHIP_CHANGED")
             if (now - entry[0]).total_seconds() > r.MAX_AGE_SECONDS:
-                return False
-            if not result_compatible(job, incarnation=state.incarnation,
+                return reject("AIRCRAFT_EXPIRED")
+            reason = result_rejection_reason(job, incarnation=state.incarnation,
                     cancellation=state.cancellation,
                     source_generation=self.source_generation, source_mode=r.aircraft_source_mode,
                     observer=observer, committed_version=state.committed,
-                    now_monotonic=time.monotonic()):
-                return False
+                    now_monotonic=time.monotonic())
+            if reason is not None:
+                return reject(reason)
             freshness = r.assess_motion_freshness(r.effective_motion_state(job.icao, now), now)
             if freshness.status == r.MotionFreshnessStatus.STALE:
-                return False
+                return reject("MOTION_STALE")
             encounters = r.dashboard_runtime.state.prediction_encounters(job.icao)
             if any(old != current and (
                        old is not None or
                        (current is not None and current[1] is not None))
                    for old, current in zip(job.payload.encounters, encounters)):
-                return False
+                return reject("OWNERSHIP_CHANGED")
             # Recheck the deadline after other potentially contended guards.
             if time.monotonic() - job.captured_monotonic > MAX_RESULT_AGE_SECONDS:
-                return False
+                return reject("RESULT_AGE")
+            # A rejected old job must have no lifecycle effects. Only a compatible
+            # current job may check expiry; maintenance also expires without jobs.
+            for body in ('MOON', 'SUN'):
+                r.expire_authoritative_prediction(observer.epoch, job.icao, body, now)
+            if self.aircraft.get(job.icao) is not state:
+                return reject("CONTINUITY_EXPIRED")
             state.committed = job.version
             self.committing_icao = job.icao
             try:
@@ -191,15 +214,22 @@ class RuntimeDeferredPrediction:
                     exact = result.exact if result is not None else None
                     if (exact is not None and exact.succeeded and exact.tca_seconds is not None
                             and context.prediction_base_utc + datetime.timedelta(seconds=exact.tca_seconds) <= now):
-                        # Reject this body's obsolete geometry, not its paired body.
-                        result = None
+                        # An obsolete result is not evidence against the current
+                        # future prediction. Ignore this body, preserving its peer.
+                        r.record_shadow_2d_commit(context, result, legacy,
+                            job.payload.legacy_base_utc, job.payload.config, now,
+                            job=job, rejection_reason="EVENT_OBSOLETE")
+                        continue
                     if result is None:
                         transition = r.authoritative_transit_lifecycle.unavailable_transition(
                             job.observer.epoch, job.icao, context.body, now)
+                        r.record_shadow_2d_commit(context, result, legacy,
+                            job.payload.legacy_base_utc, job.payload.config, now,
+                            transition=transition, job=job)
                     else:
                         transition = r.commit_shadow_2d_result(
                             context, result, legacy, job.payload.legacy_base_utc,
-                            job.payload.config, now)
+                            job.payload.config, now, job=job)
                     r.consume_authoritative_transition(
                         transition, context, entry, job.payload.distance_km, now)
             finally:
